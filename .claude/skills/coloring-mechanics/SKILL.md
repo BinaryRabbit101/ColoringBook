@@ -19,7 +19,7 @@ Full design: [docs/DESIGN.md](../../../docs/DESIGN.md) §1–3. These are the ru
 - The brush shader samples the **ID-map texture** and `discard`s fragments where the ID-map color ≠ the locked region's `id_color` (passed as a uniform). Stroke geometry may freely overlap lines; the shader does the clipping.
 - Layer order (back → front): paper background → SubViewport paint texture → line-art texture (lines drawn on top).
 - **Never** implement per-pixel CPU painting with region checks — it will not hold up on mobile.
-- ID map import must be lossless and unfiltered: `filter: nearest`, no mipmaps, no lossy/VRAM compression. Any color drift corrupts region identity. Guard the `.import` file.
+- ID map must stay lossless: `.import` keeps `compress/mode=0`, `mipmaps/generate=false`, and `detect_3d/compress_to=0` (default `1` silently VRAM-compresses if the texture is ever seen in 3D — corrupts region IDs). Filtering is **not** an import flag in Godot 4: set `TEXTURE_FILTER_NEAREST` on the node/material that samples the ID map. Guard the `.import` file in diffs.
 
 ## Hit-testing & region data
 

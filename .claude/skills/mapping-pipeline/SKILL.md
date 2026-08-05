@@ -40,12 +40,12 @@ Outputs next to the source image: `page_01_idmap.png` + `page_01_regions.json`.
 }
 ```
 
-Coordinates are image pixel space. Consumers: hit-testing uses the **ID map**, not these polygons; polygons serve debug overlay, centroids/areas, coverage sample grids (see `coloring-mechanics`).
+Coordinates are image pixel space; `outline`/`holes` vertices are pixel-corner (marching-squares) coordinates while `centroid` is a pixel index, snapped to a pixel the region owns (`CENTROID_SNAP_TO_REGION`) so it's usable as a tap-hint even when the strict mean lands in a hole. `area_px` counts ID-map pixels (post-dilation). Consumers: hit-testing uses the **ID map**, not these polygons; polygons serve debug overlay, centroids/areas, coverage sample grids (see `coloring-mechanics`).
 
 ## Invariants & gotchas
 
 - ID map and base image must be **identical dimensions**; anti-aliased line edges belong to the **line** (unpaintable), never to a region — a 1-px halo of `#000000` around lines is correct and prevents edge bleed.
-- The `_idmap.png` **import settings** must stay lossless + `filter: nearest`, no mipmaps. If regions "bleed" at boundaries in-game, check the `.import` file first.
+- The `_idmap.png` **import settings** must stay lossless: `compress/mode=0`, `mipmaps/generate=false`, `detect_3d/compress_to=0` (the default `1` silently VRAM-compresses on 3D detection), `process/fix_alpha_border=false`. Filtering is a per-usage sampler setting in Godot 4, not an import flag — set `TEXTURE_FILTER_NEAREST` where the ID map is sampled. If regions "bleed" at boundaries in-game, check the `.import` file first.
 - Generated files are build artifacts of the source PNG: **never hand-edit**; re-run the tool after any art change, and commit source + both outputs + `.import` together.
 - Adding a new page = drop the line-art PNG under `assets/books/<book>/`, run the tool, create/update the `PageDef` `.tres`, then verify with the in-game debug overlay (region tinting) before calling it done.
 - Keep thresholds/tolerances as script constants at the top of the file with comments — pages vary in line weight and will need tuning.

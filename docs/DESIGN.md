@@ -72,7 +72,7 @@ Produced offline by the **mapping pipeline** (§4), shipped with the page art. T
      ]
    }
    ```
-   `outline`/`holes` are polygons in image pixel space (marching-squares traced, simplified).
+   `outline`/`holes` are polygons in image pixel space (marching-squares traced, simplified); vertices are pixel-corner coordinates, while `centroid` is a pixel index. `centroid` is snapped to a pixel the region actually owns (an area-weighted mean can land inside a hole — useless as a tap-hint marker). `area_px` counts ID-map pixels (post line-dilation), making the ID map and JSON agree exactly.
 2. **`<page>_idmap.png`** — a lossless **region ID map**: same dimensions as the base image, every pixel of region *N* has the flat color encoding *N* (`#000000` reserved: lines / not paintable). This is the runtime workhorse.
 
 **Runtime roles:**
@@ -86,7 +86,7 @@ Do **not** CPU-paint pixels with per-pixel region checks on mobile. Use the GPU:
 - The paint surface is a **`SubViewport`** the size of the page image; strokes are drawn into it (stamped brush quads along the drag path, interpolated so fast drags leave no gaps).
 - The brush material's **shader samples the ID-map texture** and `discard`s any fragment whose ID-map color ≠ the locked region's `id_color`. The stroke geometry can freely cross lines; the shader clips it to the region.
 - Scene layering (back → front): paper background → SubViewport paint texture → line-art texture (lines on top, transparent elsewhere).
-- The ID map **must** be imported losslessly (PNG, no filtering/mipmaps — `filter: nearest`, no compression that alters colors) or region IDs will bleed at edges.
+- The ID map **must** stay lossless end-to-end or region IDs bleed at edges. In Godot 4 that means: `.import` keeps `compress/mode=0`, `mipmaps/generate=false`, **and `detect_3d/compress_to=0`** (the default `1` silently re-imports as VRAM-compressed if the texture is ever seen in a 3D context). Texture *filtering* is not an import flag — set `TEXTURE_FILTER_NEAREST` on the node/material that samples the ID map.
 
 Per-region **coverage tracking** for completion: count painted pixels per region. Cheap approach: on stroke end, sample the SubViewport texture at a sparse grid of points per region (precomputed from the polygons) rather than reading back full images every frame. Threshold per mode (§1).
 
