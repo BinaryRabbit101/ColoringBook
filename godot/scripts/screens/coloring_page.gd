@@ -29,14 +29,20 @@ extends Control
 ## to learn about them -- so the readback is dropped entirely when every pending
 ## region is done.
 ##
-## Its cost is measured ([method get_last_readback_usec] /
-## [method get_average_readback_usec]) so the mobile pass has numbers. Measured on
-## the M4 dev box (RTX 5060, Vulkan, 1024x1024 paint layer): [b]~4 ms[/b] of real
-## transfer, but [b]~520 ms[/b] when the window presents with FIFO v-sync --
-## Godot's synchronous readback path waits out the presentation queue, and the
-## stall is identical for a 1152x648 main-viewport grab, so it is pacing, not
-## bandwidth. Under VSYNC_MAILBOX/disabled it is 4 ms again. M6 owns the real fix
-## ([code]RenderingDevice.texture_get_data_async()[/code]).
+## [b]M6: that readback is now asynchronous.[/b] The synchronous
+## [method PageView.get_paint_image] blocked the main thread for ~350-530 ms per
+## call under the default FIFO v-sync (presentation pacing, not bandwidth -- the
+## transfer itself is ~1.5 ms), which made every stroke end a visible hitch.
+## [method PageView.request_paint_image] queues the copy through
+## [method RenderingDevice.texture_get_data_async] instead: the call returns in
+## well under a millisecond and the [Image] arrives on the main thread a couple of
+## frames later ([AsyncReadback] has the details). Coalescing and
+## skip-when-every-pending-region-is-done are unchanged; the only behavioural
+## difference is that a region can now finish a few frames after the stroke that
+## finished it, which the completion cascade already tolerated. On a renderer with
+## no [RenderingDevice] (Compatibility/OpenGL) the code silently falls back to the
+## blocking readback. [method get_last_readback_usec] reports the BLOCKING part of
+## the last readback, which is what the mobile pass cares about.
 ##
 ## [b]M5 additions[/b] -- the two hooks M4's handoff called for, and nothing else:
 ##
@@ -62,8 +68,20 @@ extends Control
 ## paint SubViewport for a single frame. It uses PREMULTIPLIED-ALPHA blending onto
 ## the freshly cleared (all-zero) render target, which makes the restore
 ## bit-exact -- with normal MIX blending every save/restore cycle would darken
-## soft brush edges by another factor of alpha. M6 or a later unfreeze should move
-## this into [PageView] as a proper [code]set_paint_image()[/code].
+## soft brush edges by another factor of alpha. A later unfreeze should move this
+## into [PageView] as a proper [code]set_paint_image()[/code].
+##
+## [b]M6 additions[/b] -- the mobile pass, on top of the async readback above:
+##
+## 1. [b]Page navigation[/b] (the gap M5 flagged). The toolbar carries prev/next
+##    arrows, enabled only for pages the player has ALREADY reached -- see
+##    [method can_go_to_page]. Navigating saves the current page's paint first and
+##    then swaps INSTANTLY: the flip is the reward for finishing a page, not a
+##    tax on flicking back to look at one.
+## 2. [b]Portrait[/b]. The toolbar drops its centred page title below
+##    [constant NARROW_TOOLBAR_WIDTH] so five controls still fit across a 720 px
+##    phone; the palette component already scrolls horizontally. Nothing else
+##    needed changing -- the screen was already one vertical box.
 
 ## The player asked to leave the book.
 signal back_requested()
@@ -87,6 +105,13 @@ signal palette_rebuilt(mode: String)
 const CELEBRATION_DURATION := 0.55
 ## Frames to wait for the paint layer to catch up with a finished stroke.
 const MAX_SETTLE_FRAMES := 8
+## Frames an async readback is given to come back before it is written off. The
+## driver delivers in ~2; this only exists so a lost callback can never leave
+## [method has_pending_coverage] stuck true forever.
+const MAX_READBACK_FRAMES := 30
+## Below this screen width the toolbar drops its centred page title, so the back
+## button, the page counter and the two nav arrows still fit (M6, portrait).
+const NARROW_TOOLBAR_WIDTH := 620.0
 ## Node name of the paint SubViewport inside the frozen [PageView] scene. Named
 ## here because the restore path has to parent a canvas item into it -- see the
 ## class doc for why that is unavoidable while PageView is frozen.
@@ -125,6 +150,8 @@ class PaintRestoreQuad extends Node2D:
 @onready var _page_label: Label = $Ui/Toolbar/Row/PageLabel
 @onready var _title_label: Label = $Ui/Toolbar/Row/PageTitle
 @onready var _back_button: Button = $Ui/Toolbar/Row/BackButton
+@onready var _prev_button: Button = $Ui/Toolbar/Row/PrevButton
+@onready var _next_button: Button = $Ui/Toolbar/Row/NextButton
 @onready var _celebration: Label = $Celebration
 @onready var _flip: PageFlip = $PageFlip
 
@@ -143,6 +170,10 @@ var _completing := false
 var _last_readback_usec := 0
 var _total_readback_usec := 0
 var _readback_count := 0
+## Set when a readback had to use the blocking path (no RenderingDevice).
+var _last_readback_was_blocking := false
+## True while [method go_to_page] is saving and swapping pages.
+var _navigating := false
 
 ## True while a saved paint layer is being composited back into the page.
 var _restoring := false
@@ -156,10 +187,16 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_celebration.modulate.a = 0.0
 	_back_button.pressed.connect(_on_back_pressed)
+	_prev_button.pressed.connect(_on_prev_pressed)
+	_next_button.pressed.connect(_on_next_pressed)
 	_page_view.stroke_ended.connect(_on_stroke_ended)
 	# M5: the mode is changeable mid-book, so the palette is rebuilt on demand
 	# rather than only here.
 	GameState.mode_changed.connect(_on_mode_changed)
+	# M6: portrait windows get a leaner toolbar.
+	resized.connect(_apply_toolbar_layout)
+	_apply_toolbar_layout()
+	_refresh_nav()
 	_build_palette()
 
 
@@ -220,6 +257,97 @@ func _build_coverage() -> void:
 func _refresh_toolbar(page: PageDef) -> void:
 	_page_label.text = GameState.current_page_label()
 	_title_label.text = page.display_name
+	_refresh_nav()
+
+
+# ========================================================= page navigation ==
+# The gap M5 flagged: a finished book was a one-way street. The rule is "you may
+# revisit, you may not skip ahead": any page the player has ALREADY reached is
+# reachable again, plus the one page after a page they just finished.
+
+## Highest page index the player has reached in this book. The maximum of: the
+## page they are on, the cursor recorded in the save, and the last page with a
+## status other than "untouched". Taking the maximum of all three means neither a
+## save written mid-book nor an in-memory jump can hide a page that was reached.
+func furthest_reached_index() -> int:
+	if _book == null or _book.page_count() == 0:
+		return 0
+	var furthest := GameState.current_page_index
+	var progress := GameState.get_book_progress(GameState.book_key(_book))
+	furthest = maxi(furthest, int(progress.get("current_page_index", 0)))
+	var pages: Array = progress.get("pages", [])
+	for i in pages.size():
+		if String(pages[i]) != GameState.STATUS_UNTOUCHED:
+			furthest = maxi(furthest, i)
+	return clampi(furthest, 0, _book.page_count() - 1)
+
+
+## True when [method go_to_page] would accept [param page_index]: it is a real
+## page, it is not the current one, and it has either been reached before or is
+## the very next page after a page that is now complete.
+func can_go_to_page(page_index: int) -> bool:
+	if _book == null or not _book.has_page(page_index):
+		return false
+	if page_index == GameState.current_page_index:
+		return false
+	if page_index <= furthest_reached_index():
+		return true
+	# Forward by exactly one, only because the page in hand is finished.
+	return (
+		page_index == GameState.current_page_index + 1
+		and _coverage != null
+		and _coverage.is_page_complete()
+	)
+
+
+## Saves the open page and swaps to [param page_index] with NO flip ceremony.
+## Returns false when the jump is not allowed or the page fails to load.
+func go_to_page(page_index: int) -> bool:
+	if _completing or _navigating or not can_go_to_page(page_index):
+		return false
+	_navigating = true
+	_set_nav_enabled(false)
+	# Save first: the file must always describe the page it is named after.
+	await persist_current_page_settled()
+	if not is_inside_tree():
+		_navigating = false
+		return false
+	GameState.set_page_index(page_index)
+	var loaded := _apply_current_page()
+	_navigating = false
+	_refresh_nav()
+	if loaded:
+		page_changed.emit(GameState.current_page_index)
+	return loaded
+
+
+func _on_prev_pressed() -> void:
+	await go_to_page(GameState.current_page_index - 1)
+
+
+func _on_next_pressed() -> void:
+	await go_to_page(GameState.current_page_index + 1)
+
+
+func _refresh_nav() -> void:
+	if not is_instance_valid(_prev_button):
+		return
+	var busy := _completing or _navigating
+	_prev_button.disabled = busy or not can_go_to_page(GameState.current_page_index - 1)
+	_next_button.disabled = busy or not can_go_to_page(GameState.current_page_index + 1)
+
+
+func _set_nav_enabled(enabled: bool) -> void:
+	_prev_button.disabled = not enabled
+	_next_button.disabled = not enabled
+
+
+## Portrait toolbar: five controls do not fit across a 720 px phone, and the page
+## title is the one that carries no action, so it is what goes.
+func _apply_toolbar_layout() -> void:
+	if not is_instance_valid(_title_label):
+		return
+	_title_label.visible = size.x >= NARROW_TOOLBAR_WIDTH
 
 
 ## Instantiates the palette for the current mode and wires the two-signal
@@ -304,6 +432,8 @@ func _restore_saved_paint(page_index: int) -> void:
 		return
 	_coverage.update_all(image)
 	_restoring = false
+	# A page that comes back already finished re-enables the next-page arrow.
+	_refresh_nav()
 	paint_restored.emit(page_index, true)
 
 
@@ -320,32 +450,63 @@ func is_page_pre_completed() -> bool:
 
 # ================================================== paint persistence (M5) ==
 
-## Writes the current page's paint layer and records its status. Synchronous: it
-## reads the paint layer back exactly once, so callers must only reach here at a
-## save point (leaving the book, quitting). Returns false when there is nothing
-## worth writing.
+## Writes the current page's paint layer and records its status, BLOCKING.
+##
+## [b]This is the app-quit path and only that.[/b] On
+## [code]NOTIFICATION_WM_CLOSE_REQUEST[/code] there is no next frame to wait for --
+## the window is going away -- so the async readback has nowhere to deliver. A
+## bounded synchronous readback (one call, hundreds of milliseconds at worst, on a
+## frame the player will never see) is the right trade there: losing the last
+## strokes of a page would be a real bug, a stall during teardown is not.
+## Everywhere the app keeps running, use [method persist_current_page_settled].
 func persist_current_page() -> bool:
 	return _persist_page(GameState.current_page_index)
 
 
-## Same, but waits for queued dabs to render first. Use it when an [code]await[/code]
-## is available -- a stroke that ended this frame is not in the SubViewport yet.
+## Non-blocking save: waits for queued dabs to render, then reads the paint layer
+## back asynchronously. This is the save path for every moment the app keeps
+## running -- leaving the book, finishing a page, navigating between pages.
 func persist_current_page_settled() -> bool:
 	if _book == null or not _page_view.is_page_loaded():
 		return false
-	await _settle_paint()
-	return _persist_page(GameState.current_page_index)
+	return await _persist_page_async(GameState.current_page_index)
+
+
+## True when there is nothing worth writing for [param page_index]: nothing
+## painted and nothing saved before, so a save would only cost a readback and a
+## megabyte of transparent pixels.
+func _has_nothing_to_persist(page_index: int) -> bool:
+	return (
+		_status_for_page(page_index) == GameState.STATUS_UNTOUCHED
+		and not GameState.has_page_paint(_book, page_index)
+	)
 
 
 func _persist_page(page_index: int) -> bool:
 	if _book == null or page_index < 0 or not _page_view.is_page_loaded():
 		return false
-	# Nothing painted and nothing saved before: skip the readback entirely rather
-	# than write a megabyte of transparent pixels.
-	if _status_for_page(page_index) == GameState.STATUS_UNTOUCHED \
-			and not GameState.has_page_paint(_book, page_index):
+	if _has_nothing_to_persist(page_index):
 		return false
 	var image := _page_view.get_paint_image()
+	return _write_paint(page_index, image)
+
+
+func _persist_page_async(page_index: int) -> bool:
+	if _book == null or page_index < 0 or not _page_view.is_page_loaded():
+		return false
+	if _has_nothing_to_persist(page_index):
+		return false
+	var generation := _page_generation
+	await _settle_paint()
+	if generation != _page_generation or not is_inside_tree():
+		return false
+	var image := await _read_paint_async()
+	if generation != _page_generation or not is_inside_tree():
+		return false
+	return _write_paint(page_index, image)
+
+
+func _write_paint(page_index: int, image: Image) -> bool:
 	if image == null:
 		return false
 	var saved := GameState.save_page_paint(_book, page_index, image)
@@ -380,13 +541,20 @@ func _on_mode_changed(new_mode: String) -> void:
 	var palette_def := GameState.get_active_palette()
 	if _coverage != null and palette_def != null:
 		_coverage.set_threshold(palette_def.completion_threshold)
-		# Re-settle: a LOWER threshold can finish regions that were already past
-		# it. update_all is monotonic, so a higher threshold changes nothing.
-		if _page_view.is_page_loaded():
-			var image := _page_view.get_paint_image()
-			if image != null:
-				_coverage.update_all(image)
+	# Emitted BEFORE the re-settle: the palette and the threshold are already the
+	# new mode's, and callers must not have to wait out a readback to see that.
 	palette_rebuilt.emit(new_mode)
+
+	# Re-settle: a LOWER threshold can finish regions that were already past it.
+	# update_all is monotonic, so a higher threshold changes nothing. M6: async,
+	# so changing mode never stalls the frame it happens on.
+	if _coverage == null or palette_def == null or not _page_view.is_page_loaded():
+		return
+	var generation := _page_generation
+	var image := await _read_paint_async()
+	if image == null or generation != _page_generation or _coverage == null:
+		return
+	_coverage.update_all(image)
 
 
 # =================================================================== accessors ==
@@ -422,13 +590,50 @@ func has_pending_coverage() -> bool:
 	return _readback_scheduled
 
 
-## True from the moment a page completes until the next page is interactive.
+## True from the moment a page completes until the next page is interactive, and
+## while a [method go_to_page] jump is saving and swapping.
 func is_transitioning() -> bool:
-	return _completing
+	return _completing or _navigating
 
 
+## True only while a prev/next jump is in flight.
+func is_navigating() -> bool:
+	return _navigating
+
+
+## Microseconds the main thread was BLOCKED by the last paint readback. With the
+## async path this is the cost of queueing the request (tens of microseconds);
+## it is the full transfer only on the synchronous fallback.
 func get_last_readback_usec() -> int:
 	return _last_readback_usec
+
+
+## True when the last readback had to use the blocking fallback because the
+## renderer exposes no [RenderingDevice].
+func was_last_readback_blocking() -> bool:
+	return _last_readback_was_blocking
+
+
+## Whether this build can read the paint layer back without blocking at all.
+func is_async_readback_available() -> bool:
+	return _page_view.is_async_paint_readback_available()
+
+
+func get_prev_page_button() -> Button:
+	return _prev_button
+
+
+func get_next_page_button() -> Button:
+	return _next_button
+
+
+func get_back_button() -> Button:
+	return _back_button
+
+
+## True while the toolbar is in its narrow (portrait) form.
+func is_toolbar_narrow() -> bool:
+	return not _title_label.visible
 
 
 func get_readback_count() -> int:
@@ -451,10 +656,18 @@ func _on_brush_size_picked(size: float) -> void:
 	_page_view.brush_size = size
 
 
-## Leaving the book is one of the three save points: flush the paint layer before
-## the parent frees this screen.
+## Leaving the book is one of the save points: flush the paint layer before the
+## parent frees this screen.
+##
+## The save is AWAITED before [signal back_requested] goes out, and that ordering
+## is load-bearing now that the readback is async: the parent frees this screen at
+## the end of its fade-out, and a callback delivered to a freed screen would lose
+## the page. Three or four frames of latency before the fade starts is invisible;
+## losing a page is not.
 func _on_back_pressed() -> void:
-	persist_current_page()
+	_back_button.disabled = true
+	_set_nav_enabled(false)
+	await persist_current_page_settled()
 	back_requested.emit()
 
 
@@ -473,41 +686,98 @@ func _on_stroke_ended(region_id: int) -> void:
 	if _readback_scheduled:
 		return  # An in-flight readback will pick this region up too.
 	_readback_scheduled = true
+	await _run_coverage_cycles()
+	_readback_scheduled = false
 
-	var generation := _page_generation
-	await _settle_paint()
 
-	var regions := _pending_regions.keys()
-	_pending_regions.clear()
-	if generation != _page_generation or _coverage == null:
-		# The page changed under us; those strokes belong to a dead tracker.
-		_readback_scheduled = false
-		return
+## Drains [member _pending_regions], one readback per pass.
+##
+## The loop is what makes coalescing correct now that the readback is ASYNC: a
+## stroke that ends during the two-frame flight lands in [member _pending_regions]
+## after this pass has already taken its batch, and would simply be forgotten if
+## the cycle just stopped -- [member _readback_scheduled] was true, so it never
+## started a cycle of its own. Looping until the pending set is empty means a fast
+## scribbler still costs one readback per batch, never one per stroke, and never
+## loses a region.
+func _run_coverage_cycles() -> void:
+	while not _pending_regions.is_empty():
+		var generation := _page_generation
+		await _settle_paint()
+		if not is_inside_tree():
+			return
 
-	var stale: Array[int] = []
-	for id_variant in regions:
-		var id := int(id_variant)
-		if not _coverage.is_region_done(id):
-			stale.append(id)
-	if stale.is_empty():
-		_readback_scheduled = false
-		return
+		var regions := _pending_regions.keys()
+		_pending_regions.clear()
+		if generation != _page_generation or _coverage == null:
+			return  # The page changed under us; those strokes belong to a dead tracker.
 
+		# Regions already past the threshold have nothing left to teach us.
+		var stale: Array[int] = []
+		for id_variant in regions:
+			var id := int(id_variant)
+			if not _coverage.is_region_done(id):
+				stale.append(id)
+		if stale.is_empty():
+			continue
+
+		var paint := await _read_paint_async()
+		if generation != _page_generation or _coverage == null or not is_inside_tree():
+			return
+		if paint == null:
+			continue
+
+		var results: Array = []
+		for id in stale:
+			results.append([id, _coverage.update_region(id, paint)])
+		# Completing the page unlocks the next-page arrow.
+		_refresh_nav()
+		for result in results:
+			coverage_updated.emit(int(result[0]), float(result[1]))
+
+
+## The paint layer, read back WITHOUT blocking the main thread (M6).
+##
+## [method PageView.request_paint_image] queues the copy and returns immediately;
+## the image arrives a couple of frames later, which the [code]await[/code] loop
+## below waits out at zero cost -- those are frames the game renders normally.
+## Only when the renderer has no [RenderingDevice] does this fall back to the old
+## blocking call. [member _last_readback_usec] therefore records the time the main
+## thread was actually STUCK, which is the number the mobile pass is about.
+func _read_paint_async() -> Image:
+	var delivery: Array[Image] = []
 	var started := Time.get_ticks_usec()
-	var paint := _page_view.get_paint_image()
+	var queued := _page_view.request_paint_image(func(image: Image) -> void:
+		# Arrays are reference types, so the lambda's by-value capture still
+		# reaches the caller's cell (the M4 lambda gotcha, used deliberately).
+		delivery.append(image)
+	)
 	_last_readback_usec = Time.get_ticks_usec() - started
+	_last_readback_was_blocking = not queued
+
+	if not queued:
+		started = Time.get_ticks_usec()
+		var image := _page_view.get_paint_image()
+		_last_readback_usec = Time.get_ticks_usec() - started
+		_record_readback()
+		return image
+
+	var frames := 0
+	while delivery.is_empty() and frames < MAX_READBACK_FRAMES and is_inside_tree():
+		frames += 1
+		await get_tree().process_frame
+	_record_readback()
+	if delivery.is_empty():
+		push_warning(
+			"ColoringPage: the async paint readback did not arrive within %d frames."
+			% MAX_READBACK_FRAMES
+		)
+		return null
+	return delivery[0]
+
+
+func _record_readback() -> void:
 	_total_readback_usec += _last_readback_usec
 	_readback_count += 1
-	if paint == null:
-		_readback_scheduled = false
-		return
-
-	var results: Array = []
-	for id in stale:
-		results.append([id, _coverage.update_region(id, paint)])
-	_readback_scheduled = false
-	for result in results:
-		coverage_updated.emit(int(result[0]), float(result[1]))
 
 
 ## Waits until every queued brush dab has actually been rendered into the paint
@@ -533,22 +803,25 @@ func _on_coverage_page_completed() -> void:
 	if _completing:
 		return
 	_completing = true
+	_refresh_nav()
 	var finished_index := GameState.current_page_index
 	page_completed.emit(finished_index)
 
 	# Save point: the finished page's pixels are written BEFORE the cursor moves,
-	# so the file always describes the page it is named after.
-	await _settle_paint()
-	_persist_page(finished_index)
+	# so the file always describes the page it is named after. Async (M6) -- the
+	# app is very much still running here.
+	await _persist_page_async(finished_index)
 
 	await _celebrate()
 
 	if GameState.advance_page():
 		await _flip_to_current_page()
 		_completing = false
+		_refresh_nav()
 		page_changed.emit(GameState.current_page_index)
 	else:
 		_completing = false
+		_refresh_nav()
 		GameState.finish_book()
 		book_completed.emit(_book)
 
@@ -581,7 +854,23 @@ func _flip_to_current_page() -> void:
 
 
 ## A texture of exactly what is on screen right now.
+##
+## Async where it can be (M6): a blocking main-viewport grab costs the same
+## presentation stall as the paint-layer one did, and it would land right on the
+## beat where the flip is supposed to start moving. Nothing on screen changes
+## during the couple of frames the transfer takes -- the celebration tween has
+## already faded out -- so the snapshot is the same picture either way.
 func _take_snapshot() -> Texture2D:
 	await RenderingServer.frame_post_draw
-	var image := get_viewport().get_texture().get_image()
-	return ImageTexture.create_from_image(image)
+	var delivery: Array[Image] = []
+	var queued := AsyncReadback.request(get_viewport(), func(image: Image) -> void:
+		delivery.append(image)
+	)
+	if queued:
+		var frames := 0
+		while delivery.is_empty() and frames < MAX_READBACK_FRAMES and is_inside_tree():
+			frames += 1
+			await get_tree().process_frame
+	if not delivery.is_empty() and delivery[0] != null:
+		return ImageTexture.create_from_image(delivery[0])
+	return ImageTexture.create_from_image(get_viewport().get_texture().get_image())

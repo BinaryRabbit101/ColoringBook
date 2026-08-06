@@ -36,6 +36,24 @@ const TITLE_COLOR_INDICES: PackedInt32Array = [0, 1, 3, 4, 5, 6, 7, 8]
 ## Seconds for one full fade cycle of the "tap to start" hint.
 const HINT_PULSE_SECONDS := 1.7
 
+## [b]Portrait (M6)[/b]. The sheet of paper used to carry a hard
+## [code]custom_minimum_size.x = 820[/code], which simply did not fit a 720-wide
+## phone: the [CenterContainer] handed the paper its minimum size and the
+## lettering ran off both edges. The width is now driven by the screen -- capped
+## at [constant PAPER_MAX_WIDTH] so it still reads as a sheet on a desktop
+## monitor, and never wider than the screen minus [constant PAPER_SIDE_MARGIN].
+## The letters shrink with it, because a 96 pt "Coloring" is 8 glyphs wide and no
+## amount of container maths makes that fit across 672 px.
+const PAPER_MAX_WIDTH := 820.0
+const PAPER_SIDE_MARGIN := 48.0
+## Screen width at or above which the title keeps its full-size lettering.
+const WIDE_SCREEN_WIDTH := 900.0
+const TITLE_FONT_SIZE := 96
+const TITLE_FONT_SIZE_NARROW := 62
+## Paper height, likewise trimmed when the lettering shrinks.
+const PAPER_HEIGHT := 452.0
+const PAPER_HEIGHT_NARROW := 344.0
+
 ## Ink the lettering is outlined with, so every crayon colour reads on paper.
 const INK := Color(0.176471, 0.129412, 0.09)
 
@@ -94,28 +112,57 @@ class Scribble extends Control:
 
 
 @onready var _tap_target: Button = $TapTarget
+@onready var _paper: PanelContainer = $Center/Paper
 @onready var _column: VBoxContainer = $Center/Paper/Margin/Column
 @onready var _title_rows: VBoxContainer = $Center/Paper/Margin/Column/TitleRows
 @onready var _hint: Label = $Center/Paper/Margin/Column/TapHint
 @onready var _crayon_row: Control = $Crayons
 
 var _palette: PaletteDef
+## Font size the lettering was last built at, so a resize only rebuilds when the
+## size actually changes rather than on every pixel of a window drag.
+var _title_font_size := 0
 
 
 func _ready() -> void:
 	_palette = GameState.get_palette_for_mode(GameState.MODE_CHILD)
 	_tap_target.pressed.connect(_on_tap_pressed)
 	_crayon_row.resized.connect(_layout_crayons)
-	_build_title()
+	resized.connect(_apply_responsive_layout)
+	_apply_responsive_layout()
 	_build_scribble()
 	_build_crayons()
 	_pulse_hint()
+
+
+# ================================================================= responsive ==
+
+## Sizes the paper and the lettering to the screen (see the PAPER_* constants).
+## Rebuilds the title only when the font size really changed.
+func _apply_responsive_layout() -> void:
+	if not is_instance_valid(_paper):
+		return
+	var narrow := size.x < WIDE_SCREEN_WIDTH
+	_paper.custom_minimum_size = Vector2(
+		clampf(size.x - PAPER_SIDE_MARGIN, 0.0, PAPER_MAX_WIDTH),
+		PAPER_HEIGHT_NARROW if narrow else PAPER_HEIGHT
+	)
+	var font_size := TITLE_FONT_SIZE_NARROW if narrow else TITLE_FONT_SIZE
+	if font_size != _title_font_size:
+		_title_font_size = font_size
+		_build_title()
+
+
+## True while the screen is laid out for a narrow (portrait) window.
+func is_narrow() -> bool:
+	return _title_font_size == TITLE_FONT_SIZE_NARROW
 
 
 # ===================================================================== build ==
 
 func _build_title() -> void:
 	for child in _title_rows.get_children():
+		_title_rows.remove_child(child)
 		child.queue_free()
 	var letter_index := 0
 	for line in TITLE_LINES:
@@ -134,10 +181,10 @@ func _make_letter(character: String, index: int) -> Label:
 	var label := TiltedLabel.new()
 	label.text = character
 	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	label.add_theme_font_size_override("font_size", 96)
+	label.add_theme_font_size_override("font_size", _title_font_size)
 	label.add_theme_color_override("font_color", _title_color(index))
 	label.add_theme_color_override("font_outline_color", INK)
-	label.add_theme_constant_override("outline_size", 12)
+	label.add_theme_constant_override("outline_size", maxi(_title_font_size / 8, 6))
 	# Alternating tilt, so the word looks written by hand rather than typeset.
 	var direction := 1.0 if index % 2 == 0 else -1.0
 	label.tilt = deg_to_rad(LETTER_TILT_DEGREES * direction)

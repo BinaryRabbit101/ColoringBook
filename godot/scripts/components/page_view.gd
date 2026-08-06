@@ -425,12 +425,36 @@ func clear_paint() -> void:
 	_paint_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ONCE
 
 
-## Reads the paint layer back to the CPU. Expensive -- debug/verification only;
-## M4 coverage must sample sparsely instead (coloring-mechanics skill).
+## Reads the paint layer back to the CPU, SYNCHRONOUSLY. Blocks the main thread
+## for as long as the presentation queue takes (hundreds of ms under FIFO v-sync)
+## -- dev harnesses, and the app-quit save where there is no next frame to wait
+## for. Everything in the running game must use [method request_paint_image].
 func get_paint_image() -> Image:
 	if not _loaded:
 		return null
 	return _paint_viewport.get_texture().get_image()
+
+
+## Non-blocking version of [method get_paint_image] (M6).
+##
+## Queues a GPU readback and returns immediately (well under a millisecond);
+## [param callback] receives the [Image] on the main thread a couple of frames
+## later. Returns false -- WITHOUT calling back -- when the async path is
+## unavailable (Compatibility renderer, unsupported target format) or no page is
+## loaded, so the caller can fall back to [method get_paint_image].
+##
+## The paint layer is not cleared between frames, so a slightly-late image is a
+## superset of what the stroke laid down, never a stale one: coverage is
+## monotonic and tolerates the delay by design.
+func request_paint_image(callback: Callable) -> bool:
+	if not _loaded:
+		return false
+	return AsyncReadback.request(_paint_viewport, callback)
+
+
+## True when [method request_paint_image] can actually do its job on this build.
+func is_async_paint_readback_available() -> bool:
+	return AsyncReadback.is_available()
 
 
 ## True while stamps are queued but not yet rendered into the SubViewport.

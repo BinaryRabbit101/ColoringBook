@@ -90,6 +90,8 @@ Do **not** CPU-paint pixels with per-pixel region checks on mobile. Use the GPU:
 
 Per-region **coverage tracking** for completion: count painted pixels per region. Cheap approach: on stroke end, sample the SubViewport texture at a sparse grid of points per region (precomputed from the polygons) rather than reading back full images every frame. Threshold per mode (§1).
 
+The readback itself is **asynchronous** (M6): `RenderingDevice.texture_get_data_async()` via `scripts/components/async_readback.gd`, because the synchronous `Viewport.get_texture().get_image()` blocks the main thread for the length of the presentation queue — 350–530 ms under the default FIFO v-sync, on every stroke end. Two rules come with it: a readback may be **stale by a couple of frames** (harmless, coverage is monotonic), and the engine must **never be torn down while one is queued** (`AsyncReadback.drain()` before any `SceneTree.quit()`; it is a hard crash otherwise).
+
 ### 3.3 Input
 
 - Handle **both** mouse and touch through `InputEventScreenTouch`/`InputEventScreenDrag` with *Emulate Touch From Mouse* enabled in project settings — one code path.
@@ -132,10 +134,16 @@ One autoload: `GameState`. Screens communicate upward via signals; `main.tscn` s
 
 ### 3.5 Mobile considerations
 
-- Renderer: the project is Forward+; evaluate **Mobile** renderer before first device build — a 2D app usually runs fine on either, but test.
-- Textures: page art up to 2048×2048; keep ID maps lossless (VRAM-uncompressed) — they are correctness-critical.
-- Touch targets ≥ 48 px logical; UI uses anchors/containers for portrait/landscape and notch-safe areas.
-- Window stretch mode `canvas_items`, aspect `expand`.
+- **Renderer: Mobile** (`rendering/renderer/rendering_method="mobile"`, Vulkan) — decided in M6, evaluated empirically on the dev box (RTX 5060, Godot 4.5.1) rather than from documentation. This is a pure 2D game, so the deciding factor was not raster performance (all three renderers draw a handful of quads and one `canvas_item` shader without breaking a sweat) but **API availability**:
+  - Forward+ and Mobile are both Vulkan and both expose a `RenderingDevice`, so `RenderingServer.texture_get_rd_texture()` → `RenderingDevice.texture_get_data_async()` works — that is the asynchronous paint-layer readback the coloring loop depends on (§3.2).
+  - **Compatibility (`gl_compatibility`) is OpenGL and `RenderingServer.get_rendering_device()` returns null**, so there is no async readback at all. Every coverage update would fall back to the blocking one, which measures **350–530 ms** under the default FIFO v-sync. That disqualifies it as the shipping renderer.
+  - Between Forward+ and Mobile, Mobile wins on cost: it is the tile-GPU-oriented pipeline (single-pass forward, no clustered-lighting/decal/SDFGI machinery to set up per frame), which means less bandwidth and less battery for output that is pixel-identical here. All five smoke tests pass under it on Windows.
+  - Compatibility remains the fallback for a device with no Vulkan 1.0 driver. The code degrades rather than breaks: `AsyncReadback.request()` returns false and the caller uses the synchronous readback.
+- Textures: page art up to 2048×2048; keep ID maps lossless (VRAM-uncompressed) — they are correctness-critical. `rendering/textures/vram_compression/import_etc2_astc=true` gives ETC2/ASTC for everything else.
+- Touch targets ≥ 48 px logical (child-mode controls use 64+, the settings gear 72); UI uses anchors/containers for portrait/landscape, and `scripts/components/safe_area.gd` wraps the shell in notch-safe margins.
+- Window stretch mode `canvas_items`, aspect `expand`. **Consequence worth knowing**: with the 1152×648 base viewport, a portrait window never narrows the logical canvas below 1152 — it grows the *height* instead (a 720×1280 window becomes a 1152×2048 canvas). Portrait layouts therefore key off **aspect ratio**, not width.
+- Orientation: `display/window/handheld/orientation=6` (SENSOR) — portrait and landscape both allowed.
+- Android export: `godot/export_presets.cfg`, preset `Android`. See [ANDROID.md](ANDROID.md).
 
 ## 4. Mapping pipeline (dev tool, not shipped gameplay code)
 
@@ -161,6 +169,6 @@ Also provide a **debug overlay** toggle in `page_view.tscn` that tints regions f
 3. **M3 — Palettes & modes**: `PaletteDef`, child crayon row, adult swatches, brush sizes, `GameState.mode`.
 4. **M4 — Books, pages, completion & flip**: `BookDef`/`PageDef`, coverage tracking, completion thresholds, page-flip transition, book select screen.
 5. **M5 — Shell & persistence**: title, mode select, save/load progress, settings.
-6. **M6 — Mobile pass**: touch polish, renderer evaluation, export presets (Android first), performance profiling on device.
+6. **M6 — Mobile pass**: renderer evaluation (§3.5), async paint readback, portrait/safe-area layout pass, page navigation, the first real art book (`coyote`), Android export preset. Device profiling still pending — no Android hardware or 4.5.1 export templates on the dev box; see [ANDROID.md](ANDROID.md).
 
 Each milestone must end with the project running clean (no errors in debug output) via the godot-mcp `run_project` → `get_debug_output` loop.

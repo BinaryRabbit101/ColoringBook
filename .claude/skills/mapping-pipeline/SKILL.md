@@ -17,6 +17,12 @@ Full spec: [docs/DESIGN.md](../../../docs/DESIGN.md) §3.1 & §4. The tool lives
 
 Outputs next to the source image: `page_01_idmap.png` + `page_01_regions.json`.
 
+Optional per-run overrides (M6) after the source path — `--line-alpha-min`, `--line-luminance-max`,
+`--dilate`, `--min-area`, `--rdp`, `--giant-fraction`. The defaults are still the constants at the
+top of the script; the values actually used are printed in the run summary, so a page's mapping is
+always reproducible from its log. Prefer a flag over editing a constant: constants are shared by
+every page in the project.
+
 ## Algorithm (keep this order)
 
 1. **Binarize** — line pixel = alpha/darkness above a configurable threshold. Source art: dark line work, transparent or white elsewhere.
@@ -48,4 +54,6 @@ Coordinates are image pixel space; `outline`/`holes` vertices are pixel-corner (
 - The `_idmap.png` **import settings** must stay lossless: `compress/mode=0`, `mipmaps/generate=false`, `detect_3d/compress_to=0` (the default `1` silently VRAM-compresses on 3D detection), `process/fix_alpha_border=false`. Filtering is a per-usage sampler setting in Godot 4, not an import flag — set `TEXTURE_FILTER_NEAREST` where the ID map is sampled. If regions "bleed" at boundaries in-game, check the `.import` file first.
 - Generated files are build artifacts of the source PNG: **never hand-edit**; re-run the tool after any art change, and commit source + both outputs + `.import` together.
 - Adding a new page = drop the line-art PNG under `assets/books/<book>/`, run the tool, create/update the `PageDef` `.tres`, then verify with the in-game debug overlay (region tinting) before calling it done.
-- Keep thresholds/tolerances as script constants at the top of the file with comments — pages vary in line weight and will need tuning.
+- Keep thresholds/tolerances as script constants at the top of the file with comments — pages vary in line weight and will need tuning. Tune a single page with a CLI flag, not by editing the constant.
+- **Source art belongs to the artist**: keep the untouched original next to the page under `assets/books/<book>/source/` with an empty `.gdignore` in that folder (Godot skips it, the Android preset excludes it), and put the *shipped* page — snake_case, within the 2048 px budget — at `assets/books/<book>/page_NN.png`. Real art arrives with spaces in the filename and at print resolution; both are the pipeline's problem, not the artist's.
+- **What "it mapped" means for real art** (M6, the coyote book): a hand-drawn page maps to the regions the *artist actually closed*, which is usually far fewer than the shapes a human sees. Contour lines that stop in mid-air (fur ticks, a leg outline that fades into a ruff) enclose nothing, so the whole body comes back as one region. That is correct output, not a failure — the failure mode to watch for is the giant-region check firing, i.e. paint leaking *between* shapes through a gap. Check the ID map visually before believing either verdict.

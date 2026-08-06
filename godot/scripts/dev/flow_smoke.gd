@@ -26,6 +26,12 @@ extends Control
 ## Exit code is 0 only if every check passes.
 
 const BOOK_PATH := "res://resources/books/test_book/book.tres"
+## M6 shipped the first real art book. It is not what this harness colours -- the
+## test book's synthetic shapes are what the checks are calibrated against -- but
+## the shelf and the discovery scan must both account for it.
+const COYOTE_BOOK_PATH := "res://resources/books/coyote/book.tres"
+## Books discovered under res://resources/books/: test_book + coyote.
+const EXPECTED_BOOK_COUNT := 2
 const PAGE_01_TRES := "res://resources/books/test_book/pages/page_01.tres"
 const PAGE_02_TRES := "res://resources/books/test_book/pages/page_02.tres"
 const PAGE_02_IDMAP_IMPORT := "res://assets/books/test_book/page_02_idmap.png.import"
@@ -130,6 +136,9 @@ func _stay_on_the_shelf() -> void:
 
 
 func _finish(code: int) -> void:
+	# Never tear the engine down on top of a queued GPU readback: that is a hard
+	# crash (see AsyncReadback.drain).
+	await AsyncReadback.drain(get_tree())
 	print("exit code: %d" % code)
 	get_tree().quit(code)
 
@@ -162,11 +171,21 @@ func _check_resources() -> void:
 		_expect(page.validate().is_empty(),
 			"page %d ('%s') validates (%s)" % [i + 1, page.display_name, page.validate()])
 
-	# Discovery, not a preload list.
+	# Discovery, not a preload list. M6 added the coyote book by dropping a folder
+	# in -- no code changed, which is the property this check exists to defend.
 	var discovered := BookDef.discover()
-	_expect(discovered.size() == 1, "BookDef.discover() found 1 book by scanning (%d)" % discovered.size())
-	_expect(discovered.size() == 1 and discovered[0] == _book,
-		"the discovered book is the same cached resource instance")
+	_expect(discovered.size() == EXPECTED_BOOK_COUNT,
+		"BookDef.discover() found %d books by scanning (%d)"
+		% [EXPECTED_BOOK_COUNT, discovered.size()])
+	_expect(discovered.has(_book), "the discovered set contains the same cached test-book instance")
+	var discovered_names := PackedStringArray()
+	for book in discovered:
+		discovered_names.append(book.display_name)
+	_expect(discovered.size() == EXPECTED_BOOK_COUNT and discovered[0] == load(COYOTE_BOOK_PATH),
+		"books come back sorted by directory name (%s)" % ", ".join(discovered_names))
+	for book in discovered:
+		_expect(book.validate().is_empty(),
+			"discovered book '%s' validates (%s)" % [book.display_name, book.validate()])
 
 	# --- page_02's generated data --------------------------------------------
 	var page_02 := _book.get_page(1)
@@ -378,6 +397,15 @@ func _time_readbacks(probe: PageView, vsync_mode: int, samples: int) -> float:
 	return float(total) / float(samples) / 1000.0
 
 
+## The shelf cell showing [param book], or null. The shelf sorts by directory
+## name, so index 0 is no longer "the test book" now that a second book exists.
+static func _cell_for(shelf: BookSelect, book: BookDef) -> BookCell:
+	for cell in shelf.get_cells():
+		if cell.get_book() == book:
+			return cell
+	return null
+
+
 static func _blank_paint(page_size: Vector2i) -> Image:
 	var image := Image.create(page_size.x, page_size.y, false, Image.FORMAT_RGBA8)
 	image.fill(Color(0.0, 0.0, 0.0, 0.0))
@@ -403,15 +431,19 @@ func _check_book_select() -> void:
 	await get_tree().process_frame
 
 	var count := shelf.load_books()
-	_expect(count == 1, "shelf loaded %d book by scanning res://resources/books/ (%d)" % [1, count])
+	_expect(count == EXPECTED_BOOK_COUNT,
+		"shelf loaded %d books by scanning res://resources/books/ (%d)"
+		% [EXPECTED_BOOK_COUNT, count])
 	await _settle_layout()
 
 	var cells := shelf.get_cells()
-	_expect(cells.size() == 1, "one BookCell rendered (%d)" % cells.size())
-	if cells.is_empty():
+	_expect(cells.size() == EXPECTED_BOOK_COUNT,
+		"%d BookCells rendered (%d)" % [EXPECTED_BOOK_COUNT, cells.size()])
+	var cell := _cell_for(shelf, _book)
+	_expect(cell != null, "the shelf has a cell for the test book")
+	if cell == null:
 		shelf.queue_free()
 		return
-	var cell := cells[0]
 	_expect(cell.get_book() == _book, "the cell carries the discovered BookDef")
 	_expect(cell.get_title_text() == _book.display_name,
 		"the cell shows the title ('%s')" % cell.get_title_text())
@@ -425,7 +457,7 @@ func _check_book_select() -> void:
 	)
 	_expect(
 		cell.global_position.x >= 0.0 and cell.get_global_rect().end.x <= shelf.size.x + 1.0,
-		"a single book still lays out inside the shelf (x %.0f..%.0f of %.0f)"
+		"the book lays out inside the shelf (x %.0f..%.0f of %.0f)"
 		% [cell.global_position.x, cell.get_global_rect().end.x, shelf.size.x]
 	)
 
@@ -442,11 +474,12 @@ func _check_book_select() -> void:
 	shelf.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
 	shelf.size = Vector2(420.0, 820.0)
 	await _settle_layout()
-	_expect(
-		cell.global_position.x >= 0.0 and cell.get_global_rect().end.x <= shelf.size.x + 1.0,
-		"a 420 px-wide shelf still fits the single book (cell x %.0f..%.0f)"
-		% [cell.global_position.x, cell.get_global_rect().end.x]
-	)
+	var overflowing := 0
+	for other in shelf.get_cells():
+		if other.global_position.x < 0.0 or other.get_global_rect().end.x > shelf.size.x + 1.0:
+			overflowing += 1
+	_expect(overflowing == 0,
+		"a 420 px-wide shelf still fits every book (%d cell(s) overflowing)" % overflowing)
 	shelf.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	await _settle_layout()
 
@@ -578,10 +611,14 @@ func _check_coloring_flow() -> void:
 	_expect(_flip_started_count == 1, "no flip played past the last page (%d)" % _flip_started_count)
 
 	# --- back button ---------------------------------------------------------
+	# M6: leaving the book flushes the paint layer through the ASYNC readback and
+	# only then reports back_requested, so the parent cannot free the screen out
+	# from under a save in flight. The signal is therefore a few frames late.
 	var back_events: Array[int] = []
 	screen.back_requested.connect(func() -> void: back_events.append(1))
-	(screen.get_node("Ui/Toolbar/Row/BackButton") as Button).pressed.emit()
-	_expect(back_events.size() == 1,
+	screen.get_back_button().pressed.emit()
+	var reported := await _wait_until(func() -> bool: return back_events.size() == 1, 8.0)
+	_expect(reported,
 		"the toolbar's back button emits back_requested (%d)" % back_events.size())
 
 	print("   readbacks: %d, last %.2f ms, average %.2f ms"

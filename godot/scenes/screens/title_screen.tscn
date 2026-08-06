@@ -62,7 +62,7 @@ grow_vertical = 2
 mouse_filter = 2
 
 [node name="Paper" type="PanelContainer" parent="Center"]
-custom_minimum_size = Vector2(820, 452)
+custom_minimum_size = Vector2(0, 452)
 layout_mode = 2
 mouse_filter = 2
 theme_override_styles/panel = SubResource("StyleBoxFlat_paper")

@@ -1,0 +1,10 @@
+[gd_resource type="Resource" script_class="PageDef" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/resources/page_def.gd" id="1_page_def"]
+
+[resource]
+script = ExtResource("1_page_def")
+display_name = "Coyote Outline"
+base_image_path = "res://assets/books/coyote/page_01.png"
+id_map_path = "res://assets/books/coyote/page_01_idmap.png"
+regions_json_path = "res://assets/books/coyote/page_01_regions.json"

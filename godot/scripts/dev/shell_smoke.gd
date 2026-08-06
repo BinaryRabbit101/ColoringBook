@@ -38,6 +38,8 @@ extends Control
 
 const MAIN_SCENE := preload("res://scenes/main.tscn")
 const BOOK_PATH := "res://resources/books/test_book/book.tres"
+## Books on the shelf after M6 added the coyote art book: test_book + coyote.
+const EXPECTED_BOOK_COUNT := 2
 
 ## Scratch root for everything this run writes. Wiped at both ends.
 const TEST_SAVE_ROOT := "user://shell_smoke/state"
@@ -127,6 +129,9 @@ func _cleanup() -> void:
 
 
 func _finish(code: int) -> void:
+	# Never tear the engine down on top of a queued GPU readback: that is a hard
+	# crash (see AsyncReadback.drain).
+	await AsyncReadback.drain(get_tree())
 	print("exit code: %d" % code)
 	get_tree().quit(code)
 
@@ -144,6 +149,10 @@ func _check_boot_and_navigation() -> void:
 
 	_main = MAIN_SCENE.instantiate() as Main
 	_main.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	# M6: main quits the game itself on a close request so it can drain in-flight
+	# GPU readbacks first. Check (g) delivers that notification on purpose, so tell
+	# main to do everything EXCEPT the quit -- otherwise this run ends at check g.
+	_main.quit_on_close_request = false
 	_host.add_child(_main)
 	await _wait_for_screen(Main.SCREEN_TITLE)
 
@@ -202,10 +211,13 @@ func _check_boot_and_navigation() -> void:
 	# --- pick the book -------------------------------------------------------
 	var shelf := _main.get_current_screen() as BookSelect
 	var cells := shelf.get_cells()
-	_expect(cells.size() == 1, "the shelf shows the test book (%d cell(s))" % cells.size())
-	if cells.is_empty():
+	_expect(cells.size() == EXPECTED_BOOK_COUNT,
+		"the shelf shows %d books (%d cell(s))" % [EXPECTED_BOOK_COUNT, cells.size()])
+	var cell := _cell_for(shelf, _book)
+	_expect(cell != null, "one of them is the test book")
+	if cell == null:
 		return
-	cells[0].pressed.emit()
+	cell.pressed.emit()
 	var reached_page := await _wait_for_screen(Main.SCREEN_COLORING)
 	_expect(reached_page, "picking the book opens the coloring page (%s)" % _main.get_current_screen_id())
 	var coloring := _main.get_current_screen() as ColoringPage
@@ -294,7 +306,11 @@ func _check_resume() -> void:
 	if shelf == null:
 		_expect(false, "the shelf is showing")
 		return
-	shelf.get_cells()[0].pressed.emit()
+	var cell := _cell_for(shelf, _book)
+	if cell == null:
+		_expect(false, "the shelf still has a cell for the test book")
+		return
+	cell.pressed.emit()
 	var reopened := await _wait_for_screen(Main.SCREEN_COLORING)
 	_expect(reopened, "the book reopens (%s)" % _main.get_current_screen_id())
 	var coloring := _main.get_current_screen() as ColoringPage
@@ -538,6 +554,15 @@ func _check_broken_saves() -> void:
 
 
 # ================================================================= helpers ==
+
+## The shelf cell showing [param book], or null. The shelf sorts by directory
+## name, so index 0 is no longer "the test book" now that a second book exists.
+static func _cell_for(shelf: BookSelect, book: BookDef) -> BookCell:
+	for cell in shelf.get_cells():
+		if cell.get_book() == book:
+			return cell
+	return null
+
 
 func _read_save() -> Dictionary:
 	var path := GameState.get_save_path()

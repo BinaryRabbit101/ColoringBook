@@ -30,6 +30,23 @@ signal back_requested()
 const CARD_SIZE := Vector2(360.0, 452.0)
 ## Height reserved for a card's illustration.
 const ART_HEIGHT := 216.0
+
+## [b]Portrait (M6)[/b]. Two 360x452 cards side by side need ~800 px of width; a
+## phone held upright has less, and a row would just squeeze them until the
+## illustrations were slivers. Below this aspect ratio the row becomes a COLUMN
+## and the cards trade height for width, illustration included.
+##
+## The card holder is a plain [BoxContainer], NOT an [HBoxContainer]: Godot
+## refuses [code]set_vertical()[/code] on the H/V subclasses ("Can't change
+## orientation of HBoxContainer"), and they exist only to preset that one
+## property. The base class flips freely, so the same node does both jobs and no
+## card is ever rebuilt.
+const PORTRAIT_ASPECT := 1.0
+## Card height when stacked. Two of these plus the header fit a 720x1280 phone
+## with room to spare, and they still grow to fill whatever is left over.
+const PORTRAIT_CARD_HEIGHT := 300.0
+## Illustration height when stacked.
+const PORTRAIT_ART_HEIGHT := 118.0
 ## Touch-target floor asserted by the smoke test (DESIGN.md 1: child mode is
 ## deliberately more generous than the global 48 px).
 const MIN_TOUCH_TARGET := CrayonButton.MIN_TOUCH_TARGET
@@ -176,7 +193,7 @@ class ModeArt extends Control:
 				draw_rect(chip_rect, Color(0.176471, 0.129412, 0.09, 0.28), false, 1.5)
 
 
-@onready var _cards_row: HBoxContainer = $Margin/Body/Cards
+@onready var _cards_row: BoxContainer = $Margin/Body/Cards
 @onready var _back_button: Button = $Margin/Body/Footer/BackButton
 @onready var _footer: HBoxContainer = $Margin/Body/Footer
 
@@ -189,6 +206,42 @@ func _ready() -> void:
 	set_back_visible(false)
 	_build_cards()
 	GameState.mode_changed.connect(_on_mode_changed)
+	resized.connect(_apply_orientation)
+	_apply_orientation()
+
+
+# =============================================================== orientation ==
+
+## Switches the card row between a row and a column, and reflows each card for
+## the orientation it is now in. Driven by the screen's aspect, not by a
+## [DisplayServer] orientation query, so it is equally right for a resized desktop
+## window and a rotated phone.
+func _apply_orientation() -> void:
+	if not is_instance_valid(_cards_row):
+		return
+	var portrait := is_portrait()
+	_cards_row.vertical = portrait
+	for mode_id in _cards:
+		var card: Button = _cards[mode_id]
+		card.custom_minimum_size = (
+			Vector2(0.0, PORTRAIT_CARD_HEIGHT) if portrait else CARD_SIZE
+		)
+		card.size_flags_horizontal = (
+			Control.SIZE_FILL if portrait else Control.SIZE_EXPAND_FILL
+		)
+		card.size_flags_vertical = (
+			Control.SIZE_EXPAND_FILL if portrait else Control.SIZE_SHRINK_CENTER
+		)
+		var art := card.get_node_or_null("Margin/Column/Art") as Control
+		if art != null:
+			art.custom_minimum_size = Vector2(
+				0.0, PORTRAIT_ART_HEIGHT if portrait else ART_HEIGHT
+			)
+
+
+## True while the screen is taller than it is wide, i.e. the cards are stacked.
+func is_portrait() -> bool:
+	return size.y > 0.0 and size.x / size.y < PORTRAIT_ASPECT
 
 
 # ===================================================================== build ==
@@ -202,6 +255,7 @@ func _build_cards() -> void:
 		_cards_row.add_child(card)
 		_cards[mode_id] = card
 	_refresh_active()
+	_apply_orientation()
 
 
 func _make_card(mode_id: String) -> Button:

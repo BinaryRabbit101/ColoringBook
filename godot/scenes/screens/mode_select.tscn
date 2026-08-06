@@ -53,7 +53,7 @@ theme_override_font_sizes/font_size = 46
 text = "Who is coloring?"
 horizontal_alignment = 1
 
-[node name="Cards" type="HBoxContainer" parent="Margin/Body"]
+[node name="Cards" type="BoxContainer" parent="Margin/Body"]
 layout_mode = 2
 size_flags_vertical = 3
 mouse_filter = 2

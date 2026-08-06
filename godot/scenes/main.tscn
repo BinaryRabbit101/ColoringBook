@@ -1,6 +1,7 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" path="res://scripts/components/safe_area.gd" id="2_safe_area"]
 
 [node name="Main" type="Control"]
 anchors_preset = 15
@@ -21,22 +22,22 @@ grow_vertical = 2
 mouse_filter = 2
 color = Color(0.121569, 0.109804, 0.101961, 1)
 
-[node name="ScreenHost" type="Control" parent="."]
+[node name="SafeArea" type="MarginContainer" parent="."]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("2_safe_area")
+
+[node name="ScreenHost" type="Control" parent="SafeArea"]
+layout_mode = 2
 mouse_filter = 1
 
-[node name="Overlays" type="Control" parent="."]
-layout_mode = 1
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
+[node name="Overlays" type="Control" parent="SafeArea"]
+layout_mode = 2
 mouse_filter = 2
 
 [node name="Fade" type="ColorRect" parent="."]

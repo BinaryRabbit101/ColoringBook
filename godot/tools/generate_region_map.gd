@@ -9,29 +9,53 @@ extends SceneTree
 ##   <godot_exe> --headless --path <project> \
 ##       --script tools/generate_region_map.gd -- assets/books/<book>/page_01.png
 ##
+## Optional flags, after the source path (M6 — real art varies in line weight and
+## the shipped defaults are not going to suit every page; overriding them per run
+## beats editing constants and forgetting to put them back):
+##   --line-alpha-min <0..1>      opacity floor for a pixel to count as ink
+##   --line-luminance-max <0..1>  brightness ceiling for a pixel to count as ink
+##   --dilate <px>                line-mask growth; 0 disables the halo
+##   --min-area <px>              components smaller than this are specks
+##   --rdp <px>                   polygon simplification tolerance
+##   --giant-fraction <0..1>      "one region ate the page" failure threshold
+##
+## The values actually used are printed in the run summary, so a page's mapping
+## can always be reproduced from its log.
+##
 ## Never referenced by game scenes. Outputs are build artifacts of the source
 ## PNG — regenerate rather than hand-edit.
 
 # --------------------------------------------------------------- tunables ---
+# Defaults live here as constants (mapping-pipeline: "keep thresholds/tolerances
+# as script constants at the top of the file"); the working copies below are the
+# same values unless a CLI flag overrides them.
+
 ## A pixel counts as LINE when it is at least this opaque AND at most this
 ## bright. The luminance ceiling is deliberately generous so anti-aliased line
 ## edges land on the LINE side — a region must never own a half-dark pixel.
-const LINE_ALPHA_MIN := 0.5
-const LINE_LUMINANCE_MAX := 0.75
+const DEFAULT_LINE_ALPHA_MIN := 0.5
+const DEFAULT_LINE_LUMINANCE_MAX := 0.75
 ## Grow the line mask by this many pixels (8-neighbourhood) before segmenting.
 ## This is what guarantees the ~1 px #000000 halo around every region, so two
 ## region colors can never end up touching (not even diagonally) in the ID map.
 ## Set to 0 to disable.
-const LINE_DILATE_PX := 1
+const DEFAULT_LINE_DILATE_PX := 1
 ## Connected components smaller than this are anti-aliasing specks, not regions;
 ## they are folded back into the line mask.
-const MIN_REGION_AREA_PX := 64
+const DEFAULT_MIN_REGION_AREA_PX := 64
 ## Ramer-Douglas-Peucker tolerance in pixels for outline/hole simplification.
 ## Larger = fewer vertices, coarser polygons. The ID map stays pixel-exact.
-const RDP_TOLERANCE_PX := 1.5
+const DEFAULT_RDP_TOLERANCE_PX := 1.5
 ## Hard-fail when a single region owns more than this fraction of all paintable
 ## pixels — the classic symptom of a gap in the line art merging everything.
-const GIANT_REGION_FRACTION := 0.9
+const DEFAULT_GIANT_REGION_FRACTION := 0.9
+
+var LINE_ALPHA_MIN := DEFAULT_LINE_ALPHA_MIN
+var LINE_LUMINANCE_MAX := DEFAULT_LINE_LUMINANCE_MAX
+var LINE_DILATE_PX := DEFAULT_LINE_DILATE_PX
+var MIN_REGION_AREA_PX := DEFAULT_MIN_REGION_AREA_PX
+var RDP_TOLERANCE_PX := DEFAULT_RDP_TOLERANCE_PX
+var GIANT_REGION_FRACTION := DEFAULT_GIANT_REGION_FRACTION
 ## Snap a centroid onto its own region when the area-weighted mean falls in a
 ## hole or outside a concave region. Consumers use centroids as "tap here"
 ## markers, so a centroid that is not inside its region is useless.
@@ -64,6 +88,10 @@ func _initialize() -> void:
 		quit(2)
 		return
 
+	if not _apply_flags(args):
+		quit(2)
+		return
+
 	var source_path := _to_res_path(args[0])
 	var image := Image.load_from_file(source_path)
 	if image == null:
@@ -75,6 +103,7 @@ func _initialize() -> void:
 	_width = image.get_width()
 	_height = image.get_height()
 	print("Source: %s (%dx%d)" % [source_path, _width, _height])
+	print("Tunables: %s" % _tunable_summary())
 
 	_binarize(image.get_data())
 	if LINE_DILATE_PX > 0:
@@ -109,6 +138,49 @@ func _initialize() -> void:
 
 	_report(regions, dropped_specks, idmap_path, json_path)
 	quit(0)
+
+
+# ---------------------------------------------------------- 0. CLI flags ----
+
+## Reads the optional `--flag value` pairs that may follow the source path.
+## Returns false (after printing why) on an unknown flag or a missing value, so a
+## typo can never silently produce a mapping made with the wrong thresholds.
+func _apply_flags(args: PackedStringArray) -> bool:
+	var index := 1
+	while index < args.size():
+		var flag := args[index]
+		if index + 1 >= args.size():
+			printerr("FAIL: '%s' needs a value." % flag)
+			return false
+		var value := args[index + 1]
+		index += 2
+		match flag:
+			"--line-alpha-min":
+				LINE_ALPHA_MIN = clampf(value.to_float(), 0.0, 1.0)
+			"--line-luminance-max":
+				LINE_LUMINANCE_MAX = clampf(value.to_float(), 0.0, 1.0)
+			"--dilate":
+				LINE_DILATE_PX = maxi(value.to_int(), 0)
+			"--min-area":
+				MIN_REGION_AREA_PX = maxi(value.to_int(), 1)
+			"--rdp":
+				RDP_TOLERANCE_PX = maxf(value.to_float(), 0.0)
+			"--giant-fraction":
+				GIANT_REGION_FRACTION = clampf(value.to_float(), 0.01, 1.0)
+			_:
+				printerr("FAIL: unknown flag '%s'. See the header of this script." % flag)
+				return false
+	return true
+
+
+func _tunable_summary() -> String:
+	return (
+		"line alpha >= %.2f, luminance <= %.2f | dilate %d px | min area %d px | "
+		+ "rdp %.2f px | giant limit %.0f%%"
+	) % [
+		LINE_ALPHA_MIN, LINE_LUMINANCE_MAX, LINE_DILATE_PX,
+		MIN_REGION_AREA_PX, RDP_TOLERANCE_PX, 100.0 * GIANT_REGION_FRACTION,
+	]
 
 
 # ----------------------------------------------------------- 1. binarize ----

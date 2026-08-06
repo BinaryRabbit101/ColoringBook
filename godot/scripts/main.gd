@@ -31,6 +31,29 @@ extends Control
 ## [ColoringPage] (only it can reach the paint layer). Quitting is handled here,
 ## because [code]NOTIFICATION_WM_CLOSE_REQUEST[/code] has to flush the OPEN page's
 ## pixels before [code]GameState[/code] writes the JSON.
+##
+## [b]M6: main owns the quit.[/b] It turns off
+## [member SceneTree.auto_accept_quit] and calls [method SceneTree.quit] itself,
+## because two things have to happen between "the player closed the window" and
+## "the process ends", and the engine's automatic quit leaves no frames for
+## either:
+##
+## 1. the open page's paint layer is flushed with the BLOCKING readback -- there
+##    is no next frame to deliver an async one to, and a stall on a frame nobody
+##    will see is a better trade than losing the page (see
+##    [method ColoringPage.persist_current_page]);
+## 2. any readback that was already in flight is DRAINED
+##    ([method AsyncReadback.drain]). Tearing the engine down on top of a queued
+##    [method RenderingDevice.texture_get_data_async] is a hard crash, reproduced
+##    on 4.5.1 on every renderer.
+##
+## [member quit_on_close_request] is the dev-harness hook: with it false the flush
+## and the drain still run, but the process survives, which is how the shell smoke
+## can deliver a close request without ending its own run.
+##
+## [b]M6 also owns the safe area[/b]: both [code]ScreenHost[/code] and
+## [code]Overlays[/code] live inside one [SafeArea], so every screen and every
+## overlay is notch-clear without a single screen knowing about [DisplayServer].
 
 ## The visible screen changed. Payload is one of the SCREEN_* ids.
 signal screen_changed(screen_id: String)
@@ -61,7 +84,9 @@ const FADE_IN_SECONDS := 0.13
 ## Sits on a dark disc so it reads over both the shelf and a white page.
 class GearButton extends Button:
 	const TEETH := 8
-	const SIZE := Vector2(60.0, 60.0)
+	## M6 mobile pass: 72 px square, comfortably past the 48 px touch floor
+	## (DESIGN.md 3.5) and past the 64 px the child-mode controls use.
+	const SIZE := Vector2(72.0, 72.0)
 
 	func _init() -> void:
 		custom_minimum_size = SIZE
@@ -106,9 +131,20 @@ class GearButton extends Button:
 		draw_circle(center, body * 0.42, Color(0.156863, 0.141176, 0.129412))
 
 
-@onready var _host: Control = $ScreenHost
-@onready var _overlays: Control = $Overlays
+@onready var _safe_area: SafeArea = $SafeArea
+@onready var _host: Control = $SafeArea/ScreenHost
+@onready var _overlays: Control = $SafeArea/Overlays
 @onready var _fade: ColorRect = $Fade
+
+## Whether a close request really ends the process. Dev harnesses set it false so
+## they can exercise the quit save path without killing their own run; when it is
+## false the engine's own automatic quit is handed back, so the window's close
+## button still works during a `--stay` session.
+var quit_on_close_request := true:
+	set(value):
+		quit_on_close_request = value
+		if is_inside_tree():
+			get_tree().auto_accept_quit = not value
 
 var _gear: GearButton
 var _current_screen: Control
@@ -116,9 +152,13 @@ var _current_id := ""
 var _settings: SettingsPanel
 var _mode_overlay: ModeSelect
 var _transitioning := false
+## Guards against a second close request arriving while the first is draining.
+var _closing := false
 
 
 func _ready() -> void:
+	# Main quits the game itself, so it can flush and drain first (class doc).
+	get_tree().auto_accept_quit = not quit_on_close_request
 	_build_gear()
 	# Start under the fade so the first screen arrives the same way every other
 	# screen does, instead of popping in.
@@ -127,23 +167,40 @@ func _ready() -> void:
 	await show_title()
 
 
-## Quitting is a save point (the other two live in [ColoringPage]). The open
-## page's paint layer is flushed FIRST, because only the screen can read it back;
-## then GameState writes the progress JSON.
+## Quitting and backgrounding are save points (the others live in [ColoringPage]).
+## The open page's paint layer is flushed FIRST, because only the screen can read
+## it back; then GameState writes the progress JSON.
 ##
-## Deliberately does NOT call [method SceneTree.quit]: with the default
-## [code]auto_accept_quit[/code] the engine closes the window itself, and tests
-## can therefore deliver this notification without killing the run.
+## A close request additionally drains any in-flight GPU readback and then quits
+## (see the class doc). Backgrounding does neither -- the app is expected to come
+## back.
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_APPLICATION_PAUSED:
+	if what == NOTIFICATION_APPLICATION_PAUSED:
 		flush_and_save()
+	elif what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_close()
 
 
 ## Writes everything the player would lose right now. Safe to call at any time.
+## Synchronous on purpose: its callers are the moments where there is no next
+## frame to hand an async readback to.
 func flush_and_save() -> void:
 	if _current_screen is ColoringPage:
 		(_current_screen as ColoringPage).persist_current_page()
 	GameState.save_now()
+
+
+## The full shutdown sequence: save, drain, quit. Idempotent.
+func _close() -> void:
+	if _closing:
+		return
+	_closing = true
+	flush_and_save()
+	await AsyncReadback.drain(get_tree())
+	if quit_on_close_request:
+		get_tree().quit()
+	else:
+		_closing = false
 
 
 # ================================================================ the flow ==
@@ -411,3 +468,10 @@ func get_mode_select_overlay() -> ModeSelect:
 
 func get_gear_button() -> Button:
 	return _gear
+
+
+## The notch-safe wrapper both the screen host and the overlays live inside
+## (M6). Tests drive its [member SafeArea.debug_insets] to prove the inset really
+## reaches the screens on a machine with no cutout.
+func get_safe_area() -> SafeArea:
+	return _safe_area

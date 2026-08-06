@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://ckl1gaw3l2fj2"
-path="res://.godot/imported/coyote outline.png-fa256cd9b20c2ad8e558db1375e8c62a.ctex"
+uid="uid://ci3081mdjav7b"
+path="res://.godot/imported/page_02.png-cfed1babbf1eea140165e38a1dac1d11.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/images/coyote outline.png"
-dest_files=["res://.godot/imported/coyote outline.png-fa256cd9b20c2ad8e558db1375e8c62a.ctex"]
+source_file="res://assets/books/coyote/page_02.png"
+dest_files=["res://.godot/imported/page_02.png-cfed1babbf1eea140165e38a1dac1d11.ctex"]
 
 [params]
 
@@ -37,4 +37,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0

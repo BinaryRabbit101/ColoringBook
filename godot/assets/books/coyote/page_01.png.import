@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://dlm0fsqgdbdf7"
-path="res://.godot/imported/coyote detail.png-f5218aa517a9480cfcfd6d2f29de0e91.ctex"
+uid="uid://bhwovjgme57yj"
+path="res://.godot/imported/page_01.png-6fdf019b5450aafc476161c844e1968a.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/images/coyote detail.png"
-dest_files=["res://.godot/imported/coyote detail.png-f5218aa517a9480cfcfd6d2f29de0e91.ctex"]
+source_file="res://assets/books/coyote/page_01.png"
+dest_files=["res://.godot/imported/page_01.png-6fdf019b5450aafc476161c844e1968a.ctex"]
 
 [params]
 
@@ -37,4 +37,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0
