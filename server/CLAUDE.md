@@ -256,3 +256,119 @@ touching the table:
   as the cursor would never be pulled. A `where('updated_at', …)` binding has
   to be formatted with `BookProgress::DATE_FORMAT` by hand — the query
   grammar's default would truncate it.
+
+## WP3 — catalog, entitlements, DLC delivery
+
+Design §5 (catalog/entitlements), §7 (pack format & delivery), §11 "Catalog &
+DLC". Routes live in `routes/api/catalog.php`. No payments: the only sources
+WP3 writes are `free` and whatever WP5 grants.
+
+### The surface
+
+| Method | Path | Auth |
+|---|---|---|
+| `GET` | `/packs?client_version=` | optional |
+| `GET` | `/packs/{slug}?client_version=` | optional |
+| `GET` | `/packs/{slug}/manifest?version=` | token + `packs:download` + entitlement |
+| `GET` | `/packs/{slug}/download?version=` | token + `packs:download` + entitlement |
+| `GET` | `/packs/{slug}/files/{path}?version=` | token + `packs:download` + entitlement |
+| `GET` | `/entitlements?client_version=` | token + `entitlements:read` |
+
+`/entitlements` returns a **bare array** — `[{pack_slug, latest_version,
+source, granted_at}]`, §11's literal shape. `/packs` returns `{packs: [...]}`
+and `/packs/{slug}` returns `{pack: {...}}`.
+
+Codes this package adds to the house error shape: `ENTITLEMENT_REQUIRED`
+(403), `PACK_VERSION_NOT_FOUND` (404), `FILE_NOT_FOUND` (404),
+`DOWNLOAD_LINK_EXPIRED` (403 — a stale signed URL, which the client retries by
+asking for a new one rather than by hiding the pack).
+
+### Three tiers of access
+
+1. **Optional auth** (`OptionalSanctumUser`) on the two catalog routes. The
+   shop must answer a signed-out client, and add `owned` when a token happens
+   to be there; `auth:sanctum` can't express that. A bad token degrades to
+   anonymous — browsing is never a failure state.
+2. **Token + ability + entitlement** on anything that *names* bytes. These
+   never send bytes: they `302` to a signed URL.
+3. **Signed, no token** (`VerifySignedDownload`) on the routes that *move*
+   bytes, so `HTTPRequest.download_file` can stream straight to
+   `user://dlc/<slug>.incoming/`. TTL is `coloringbook.signed_url_ttl_minutes`
+   (10).
+
+`published` packs are listable; `published` **and `retired`** are downloadable
+— delisting must never take away books a household owns (§7.3). `draft` is
+invisible to both.
+
+### Free-claim semantics
+
+`packs.is_free` is not ownership. Entitlement **rows drive everything**, so a
+free pack **auto-grants itself a `source = 'free'` row** the first time an
+authenticated device hits `manifest`, `download` or `files` for it. Therefore:
+
+- `owned` in the catalog and membership of `GET /entitlements` both mean *a
+  live row*, so a free pack reads `{is_free: true, owned: false}` until first
+  fetch. The client offers a download for `is_free || owned`, and a purchase
+  only for `!is_free && !owned`.
+- **A revoked entitlement stays revoked, free packs included** — the grant only
+  fires when there is no row at all. Un-revoking is a deliberate admin act.
+- Grants are idempotent on `(user_id, pack_id)` and survive the unique-index
+  race two tablets can cause.
+- `user_id`/`pack_id` are not fillable: who owns what is never something a
+  request body gets to say.
+
+### `pack:publish`
+
+```
+php artisan pack:publish {dir} [--pack=slug] [--free|--paid]
+```
+
+`{dir}` is a built pack directory — a §7.2 `manifest.json` plus the files its
+`files` map lists. It validates structurally (manifest parses and is a
+supported `manifest_version`, every listed path exists with matching bytes and
+sha256, every `book_uid` present, slug-shaped, unique in the pack and not
+already owned by another pack, every page's display/idmap/regions listed,
+`image_size` and `region_count` sane) and reports **every** problem at once via
+`PackPublishException::$errors`.
+
+Then it imports: content-addressed copies to `assets/<sha[0:2]>/<sha>`, catalog
+rows, `packs/<slug>/v<N>/pack.zip` plus the unpacked `files/` tree for deltas,
+and a `pack_versions` row with the manifest and the archive digest, published.
+
+Three things worth knowing before building on it:
+
+- **The server assigns the version.** `pack_version` in the manifest is
+  advisory; publishing again is always `max + 1`, and published rows are never
+  rewritten. A disagreement is a warning, not an error.
+- **Books and pages are rebuilt** from the newest release rather than merged.
+  Progress and paint key off `book_uid` and page index, never these row ids.
+- **`books/<book_uid>/book.json` is synthesised** when the builder didn't ship
+  one, and added to the manifest's `files` map so it carries a digest like
+  everything else (§7.2's self-describing install tree).
+
+The real work is `App\Actions\Packs\PublishPackDirectory`, which is the only
+code path that creates a `pack_versions` row — WP5's admin upload should call
+it rather than reimplement it.
+
+### Delta downloads and path safety
+
+`/packs/{slug}/files/{path}` serves a path **only if it is a key in that
+version's manifest `files` map**. That allow-list is the load-bearing defence;
+`PackManifest::isSafeRelativePath()` (traversal, absolute paths, drive letters,
+backslashes, control characters) is the second layer and the single definition
+shared by the publisher and the router.
+
+### Testing packs
+
+`Tests\Concerns\PublishesPacks` publishes `tests/Fixtures/packs/forest-friends`
+through the real action, so a test downloads the bytes a player would get.
+The fixture is ~7 KB: two books, three pages, 8×8 lossless PNGs with `#000000`
+lines and flat per-region ID-map colours, and a pack cover that doubles as a
+book cover (one blob, two `assets.kind` rows). `fakePackStorage()` first —
+content-addressed writes are the first thing publishing does.
+
+### Known gap for WP5
+
+Pack covers are only reachable through the entitled delta route, so the shop
+cannot render a cover for a pack nobody owns yet. §11 defines no public cover
+route; add one (or serve covers from the `public` disk) when the shop UI lands.

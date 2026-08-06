@@ -37,6 +37,7 @@ use Laravel\Sanctum\TransientToken;
  * @property-read Collection<int, ChildProfile> $childProfiles
  * @property-read Collection<int, Device> $devices
  * @property-read Collection<int, BookProgress> $bookProgress
+ * @property-read Collection<int, Entitlement> $entitlements
  */
 #[Fillable(['name', 'email', 'password'])]
 #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
@@ -100,6 +101,18 @@ class User extends Authenticatable implements PasskeyUser
     public function bookProgress(): HasMany
     {
         return $this->hasMany(BookProgress::class);
+    }
+
+    /**
+     * Every pack this account has a claim on, revoked ones included — the
+     * server is the entitlement authority, the client never decides
+     * (DLC_SERVER.md §9). Scope with `->live()` for "currently owns".
+     *
+     * @return HasMany<Entitlement, $this>
+     */
+    public function entitlements(): HasMany
+    {
+        return $this->hasMany(Entitlement::class);
     }
 
     /**

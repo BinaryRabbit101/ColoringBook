@@ -1,0 +1,103 @@
+{
+    "manifest_version": 1,
+    "pack_slug": "forest-friends",
+    "pack_version": 3,
+    "title": "Forest Friends",
+    "blurb": "Two little books about two little animals.",
+    "cover": "cover.png",
+    "min_client_version": "0.7.0",
+    "books": [
+        {
+            "book_uid": "coyote-2026",
+            "title": "Coyote",
+            "cover": "books/coyote-2026/page_01.png",
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "Page 1",
+                    "display": "books/coyote-2026/page_01.png",
+                    "idmap": "books/coyote-2026/page_01_idmap.png",
+                    "regions": "books/coyote-2026/page_01_regions.json",
+                    "image_size": [
+                        8,
+                        8
+                    ],
+                    "region_count": 2
+                },
+                {
+                    "page_index": 1,
+                    "title": "Page 2",
+                    "display": "books/coyote-2026/page_02.png",
+                    "idmap": "books/coyote-2026/page_02_idmap.png",
+                    "regions": "books/coyote-2026/page_02_regions.json",
+                    "image_size": [
+                        8,
+                        8
+                    ],
+                    "region_count": 2
+                }
+            ]
+        },
+        {
+            "book_uid": "badger-2026",
+            "title": "Badger",
+            "cover": "books/badger-2026/page_01.png",
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "Page 1",
+                    "display": "books/badger-2026/page_01.png",
+                    "idmap": "books/badger-2026/page_01_idmap.png",
+                    "regions": "books/badger-2026/page_01_regions.json",
+                    "image_size": [
+                        8,
+                        8
+                    ],
+                    "region_count": 1
+                }
+            ]
+        }
+    ],
+    "files": {
+        "books/badger-2026/page_01.png": {
+            "bytes": 117,
+            "sha256": "9464a1ef54423549ca505e9d28bf25bec506bf2a03e0a064fa12e66ac8fae689"
+        },
+        "books/badger-2026/page_01_idmap.png": {
+            "bytes": 116,
+            "sha256": "955211836c8f5b9ca72328e2bc971c83e87049ec2bd45d45dd1a81e43c60d80a"
+        },
+        "books/badger-2026/page_01_regions.json": {
+            "bytes": 621,
+            "sha256": "d533d5898f06a46efd85ee4b108cda265b4fdf5fe496aae2c19a380d4d3c5a6e"
+        },
+        "books/coyote-2026/page_01.png": {
+            "bytes": 110,
+            "sha256": "bc593c6709d7ed7e3123cd2a879403ebf297139b21be34deb56344c270092575"
+        },
+        "books/coyote-2026/page_01_idmap.png": {
+            "bytes": 110,
+            "sha256": "bc593c6709d7ed7e3123cd2a879403ebf297139b21be34deb56344c270092575"
+        },
+        "books/coyote-2026/page_01_regions.json": {
+            "bytes": 1143,
+            "sha256": "a0f5ba731195dff4e38853c44d6a90b53e7b9a0595f2e910c28230850b5b09b7"
+        },
+        "books/coyote-2026/page_02.png": {
+            "bytes": 114,
+            "sha256": "e5f7220f3068e58b4403f2f805590e7b25ddcc82a3660b3e82a3b962df40fe18"
+        },
+        "books/coyote-2026/page_02_idmap.png": {
+            "bytes": 114,
+            "sha256": "e5f7220f3068e58b4403f2f805590e7b25ddcc82a3660b3e82a3b962df40fe18"
+        },
+        "books/coyote-2026/page_02_regions.json": {
+            "bytes": 1143,
+            "sha256": "e8d9eec1064afe8481d3b64dda8d6d848c6790a416430975a8416e1f3e9c63df"
+        },
+        "cover.png": {
+            "bytes": 124,
+            "sha256": "b65d3f3904934a30492c0055664d3bf66867580217966aa8784aa7fc97c0756c"
+        }
+    }
+}
