@@ -86,6 +86,11 @@ func _ready() -> void:
 
 func _run() -> void:
 	print("=== M4 flow smoke test ===")
+	# M5 added persistence, and this test must not see it: a paint layer saved by
+	# an earlier run would be restored into page 2 and break "page 2 starts at 0
+	# coverage". Point saves at a scratch root and wipe it.
+	GameState.set_save_root("user://flow_smoke/state")
+	GameState.erase_all_progress()
 	# M4 is exercised in child mode: generous threshold, one big forgiving brush.
 	GameState.mode = PaletteDef.MODE_CHILD
 

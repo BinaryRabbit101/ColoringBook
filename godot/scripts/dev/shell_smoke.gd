@@ -1,0 +1,714 @@
+extends Control
+## Automated verification for Milestone 5 -- the app shell and persistence.
+##
+## Run WINDOWED (it paints into a SubViewport and reads it back, which renders
+## nothing under --headless / the dummy rasteriser):
+##
+##   <godot_exe> --path <project> res://scenes/dev/shell_smoke.tscn
+##
+## Extra user args (after a bare `--`):
+##   --stay             leave the app running afterwards, on whatever screen it
+##                      reached, WITHOUT deleting the scratch save
+##   --shot-dir <dir>   where title.png / mode_select.png / book_complete.png go
+##                      (default user://shell_smoke/shots)
+##
+## [b]Persistence is isolated.[/b] The harness drives the REAL [code]GameState[/code]
+## but points it at [constant TEST_SAVE_ROOT] and wipes that directory before and
+## after the run, so repeated runs are deterministic and the player's own save (and
+## the other smoke tests) are never touched.
+##
+## Checks, in order:
+##   a  main.tscn boots to the title; tap -> mode select -> child -> shelf; the
+##      settings gear opens and closes; picking the book opens page 1/2
+##   b  strokes in region 4, then Back: the save file, its schema, the book entry
+##      and the paint PNG all exist on disk
+##   c  re-entering the book resumes the same page with the pixels AND the
+##      coverage restored
+##   d  both pages completed -> BookComplete -> "Color again" wipes paint + status
+##      and reopens the book clean at 1/2
+##   e  settings "erase all progress" (two-step confirm) empties the save and the
+##      paint directory
+##   f  changing mode mid-book swaps the palette component and the completion
+##      threshold live
+##   g  NOTIFICATION_WM_CLOSE_REQUEST writes the save
+##   h  a corrupt save, and a save from a FUTURE schema, both start fresh without
+##      crashing (the future one is backed up first)
+##
+## Exit code is 0 only if every check passes.
+
+const MAIN_SCENE := preload("res://scenes/main.tscn")
+const BOOK_PATH := "res://resources/books/test_book/book.tres"
+
+## Scratch root for everything this run writes. Wiped at both ends.
+const TEST_SAVE_ROOT := "user://shell_smoke/state"
+## Everything under here is removed on cleanup.
+const TEST_ROOT := "user://shell_smoke"
+
+## The region painted in check (b) and looked for again in check (c).
+const PROBE_REGION := 4
+## Per-channel tolerance (0..255) when matching a restored pixel to the brush.
+const COLOR_TOLERANCE := 2
+## Sweep spacing for the flood helper, as a fraction of the brush RADIUS.
+const FLOOD_ROW_RATIO := 1.15
+## Seconds any "wait for the app to get there" poll is allowed to take.
+const NAV_TIMEOUT := 8.0
+## Longer budget for things that involve painting a whole page.
+const PAINT_TIMEOUT := 45.0
+
+@onready var _host: Control = $Host
+
+var _checks := 0
+var _failures := 0
+
+var _main: Main
+var _book: BookDef
+var _shot_dir := "user://shell_smoke/shots"
+
+## Page coordinate painted in check (b), and the colour used, so check (c) can
+## look for exactly those pixels again.
+var _probe_point := Vector2.ZERO
+var _probe_color := Color.MAGENTA
+
+
+func _ready() -> void:
+	get_window().size = Vector2i(1280, 820)
+	# The coverage readback stalls on the presentation queue under FIFO v-sync
+	# (see coloring_page.gd); the run is minutes shorter on mailbox.
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_MAILBOX)
+	_shot_dir = _arg_value("--shot-dir", _shot_dir)
+	if not DirAccess.dir_exists_absolute(_shot_dir):
+		DirAccess.make_dir_recursive_absolute(_shot_dir)
+	await get_tree().process_frame
+	await _run()
+
+
+func _run() -> void:
+	print("=== M5 shell smoke test ===")
+	_isolate_persistence()
+
+	_book = load(BOOK_PATH) as BookDef
+	if _book == null:
+		_expect(false, "%s loads as a BookDef" % BOOK_PATH)
+		_finish(1)
+		return
+
+	await _check_boot_and_navigation()
+	await _check_paint_and_save()
+	await _check_resume()
+	await _check_complete_and_again()
+	await _check_erase_all()
+	await _check_mode_change_mid_book()
+	await _check_quit_save()
+	_check_broken_saves()
+
+	print("\n=== %d/%d checks passed ===" % [_checks - _failures, _checks])
+	if "--stay" in OS.get_cmdline_user_args():
+		print("[dev] --stay given; the app is live and the scratch save at %s was kept."
+			% ProjectSettings.globalize_path(TEST_SAVE_ROOT))
+		return
+	_cleanup()
+	_finish(0 if _failures == 0 else 1)
+
+
+## Everything this run writes goes into a scratch directory that is empty when it
+## starts. Without this, a previous run's paint layer would be restored into the
+## book and every "starts clean" assertion below would be a lie.
+func _isolate_persistence() -> void:
+	_delete_recursive(TEST_ROOT)
+	GameState.set_save_root(TEST_SAVE_ROOT)
+	print("   save root: %s" % ProjectSettings.globalize_path(GameState.get_save_path()))
+
+
+func _cleanup() -> void:
+	# reload=false: do not read the player's real save just to throw it away.
+	GameState.set_save_root("", false)
+	_delete_recursive(TEST_ROOT)
+	print("   cleaned up %s" % ProjectSettings.globalize_path(TEST_ROOT))
+
+
+func _finish(code: int) -> void:
+	print("exit code: %d" % code)
+	get_tree().quit(code)
+
+
+# ============================================ a: boot, navigation, settings ==
+
+func _check_boot_and_navigation() -> void:
+	print("\n-- check a: boot -> title -> mode select -> shelf -> page --")
+
+	_expect(
+		String(ProjectSettings.get_setting("application/run/main_scene", "")) == "res://scenes/main.tscn",
+		"project.godot run/main_scene is res://scenes/main.tscn (%s)"
+		% ProjectSettings.get_setting("application/run/main_scene", "unset")
+	)
+
+	_main = MAIN_SCENE.instantiate() as Main
+	_main.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_host.add_child(_main)
+	await _wait_for_screen(Main.SCREEN_TITLE)
+
+	var title := _main.get_current_screen() as TitleScreen
+	_expect(title != null, "main.tscn boots to the title screen (%s)" % _main.get_current_screen_id())
+	if title == null:
+		return
+	_expect(title.get_crayon_count() > 0,
+		"the title screen laid out %d crayons" % title.get_crayon_count())
+	_expect(not _main.get_gear_button().visible, "the settings gear is hidden on the title")
+	await _settle_layout()
+	await _screenshot("title.png")
+
+	# --- tap to start --------------------------------------------------------
+	title.get_tap_button().pressed.emit()
+	var reached_modes := await _wait_for_screen(Main.SCREEN_MODE_SELECT)
+	_expect(reached_modes, "tapping the title goes to mode select (%s)" % _main.get_current_screen_id())
+	var modes := _main.get_current_screen() as ModeSelect
+	if modes == null:
+		return
+	var cards := modes.get_cards()
+	_expect(cards.size() == 2, "mode select shows 2 cards (%d)" % cards.size())
+	var smallest := INF
+	for card in cards:
+		smallest = minf(smallest, minf(card.size.x, card.size.y))
+	_expect(smallest >= ModeSelect.MIN_TOUCH_TARGET,
+		"every card is at least %.0f px on its short side (%.0f)"
+		% [ModeSelect.MIN_TOUCH_TARGET, smallest])
+	_expect(not modes.is_back_visible(), "no Cancel button on the first-run mode select")
+	await _screenshot("mode_select.png")
+
+	# --- child mode ----------------------------------------------------------
+	modes.get_card(PaletteDef.MODE_CHILD).pressed.emit()
+	var reached_shelf := await _wait_for_screen(Main.SCREEN_BOOK_SELECT)
+	_expect(reached_shelf, "choosing Child goes to the shelf (%s)" % _main.get_current_screen_id())
+	_expect(GameState.mode == PaletteDef.MODE_CHILD,
+		"GameState.mode is 'child' (%s)" % GameState.mode)
+
+	# --- the settings gear (an OVERLAY, because book_select.tscn is frozen) ---
+	_expect(_main.get_gear_button().visible, "the settings gear is showing on the shelf")
+	_main.get_gear_button().pressed.emit()
+	await get_tree().process_frame
+	var panel := _main.get_settings_panel()
+	_expect(panel != null, "the gear opened the settings panel")
+	if panel != null:
+		_expect(panel.get_version_text().contains(
+			String(ProjectSettings.get_setting("application/config/version", ""))),
+			"the panel shows the version ('%s')" % panel.get_version_text())
+		_expect(panel.get_mode_text().to_lower().contains("child"),
+			"the panel shows the current mode ('%s')" % panel.get_mode_text())
+		_expect(not panel.is_confirming(), "the erase confirm step starts hidden")
+		panel.get_close_button().pressed.emit()
+		await get_tree().process_frame
+	_expect(_main.get_settings_panel() == null, "closing the panel removed the overlay")
+
+	# --- pick the book -------------------------------------------------------
+	var shelf := _main.get_current_screen() as BookSelect
+	var cells := shelf.get_cells()
+	_expect(cells.size() == 1, "the shelf shows the test book (%d cell(s))" % cells.size())
+	if cells.is_empty():
+		return
+	cells[0].pressed.emit()
+	var reached_page := await _wait_for_screen(Main.SCREEN_COLORING)
+	_expect(reached_page, "picking the book opens the coloring page (%s)" % _main.get_current_screen_id())
+	var coloring := _main.get_current_screen() as ColoringPage
+	_expect(coloring != null and coloring.get_page_label_text() == "1/2",
+		"the page label reads 1/2 ('%s')" % (coloring.get_page_label_text() if coloring else "-"))
+	_expect(not _main.get_gear_button().visible, "the gear is hidden while a page is open")
+
+
+# ================================================ b: paint, leave, save file ==
+
+func _check_paint_and_save() -> void:
+	print("\n-- check b: paint region %d, leave the book, inspect the save --" % PROBE_REGION)
+	var coloring := _main.get_current_screen() as ColoringPage
+	if coloring == null:
+		_expect(false, "the coloring page is open")
+		return
+	var page_view := coloring.get_page_view()
+	var tracker := coloring.get_coverage_tracker()
+
+	var data := page_view.get_region_data(PROBE_REGION)
+	_expect(not data.is_empty(), "page 1 has region %d" % PROBE_REGION)
+	if data.is_empty():
+		return
+	_probe_point = data["centroid"]
+	_probe_color = page_view.brush_color
+	_expect(page_view.get_region_id_at(_probe_point) == PROBE_REGION,
+		"the region's centroid %s really belongs to it" % _probe_point)
+
+	# A few real strokes through the centroid, through the same entry points the
+	# touch path uses.
+	for i in 3:
+		var y := _probe_point.y + float(i - 1) * 28.0
+		page_view.begin_stroke(Vector2(_probe_point.x - 70.0, y))
+		page_view.continue_stroke(Vector2(_probe_point.x + 70.0, y))
+		page_view.end_stroke()
+		await _wait_for_coverage(coloring)
+
+	var painted_coverage := tracker.region_coverage(PROBE_REGION)
+	_expect(painted_coverage > 0.0,
+		"region %d has coverage after painting (%.3f)" % [PROBE_REGION, painted_coverage])
+	_expect(not tracker.is_page_complete(), "the page is NOT complete, so nothing flipped")
+
+	# --- back: the save point --------------------------------------------------
+	(coloring.get_node("Ui/Toolbar/Row/BackButton") as Button).pressed.emit()
+	var back_to_shelf := await _wait_for_screen(Main.SCREEN_BOOK_SELECT)
+	_expect(back_to_shelf, "Back returns to the shelf (%s)" % _main.get_current_screen_id())
+
+	# --- the file on disk ------------------------------------------------------
+	var save_path := GameState.get_save_path()
+	_expect(FileAccess.file_exists(save_path),
+		"the save file exists (%s)" % ProjectSettings.globalize_path(save_path))
+	var data_dict := _read_save()
+	_expect(not data_dict.is_empty(), "the save file parses as JSON")
+	if data_dict.is_empty():
+		return
+	_expect(int(data_dict.get("version", 0)) == GameState.SAVE_VERSION,
+		"schema version is %d (%s)" % [GameState.SAVE_VERSION, data_dict.get("version")])
+	_expect(String(data_dict.get("mode", "")) == PaletteDef.MODE_CHILD,
+		"the saved mode is 'child' (%s)" % data_dict.get("mode"))
+	var books: Dictionary = data_dict.get("books", {})
+	_expect(books.has(BOOK_PATH),
+		"the book is keyed by its resource_path (keys: %s)" % [books.keys()])
+	if not books.has(BOOK_PATH):
+		return
+	var entry: Dictionary = books[BOOK_PATH]
+	_expect(int(entry.get("current_page_index", -1)) == 0,
+		"current_page_index is 0 (%s)" % entry.get("current_page_index"))
+	var pages: Array = entry.get("pages", [])
+	_expect(pages.size() == _book.page_count(),
+		"a status per page (%d of %d)" % [pages.size(), _book.page_count()])
+	_expect(pages.size() > 0 and String(pages[0]) == GameState.STATUS_IN_PROGRESS,
+		"page 1 is '%s' (%s)" % [GameState.STATUS_IN_PROGRESS, pages[0] if pages.size() > 0 else "-"])
+
+	var paint_path := GameState.get_paint_path(_book, 0)
+	_expect(FileAccess.file_exists(paint_path),
+		"the paint layer was written to %s" % ProjectSettings.globalize_path(paint_path))
+	_expect(paint_path.contains("/%s/" % GameState.book_slug(BOOK_PATH)),
+		"the paint path uses the book slug '%s'" % GameState.book_slug(BOOK_PATH))
+
+
+# ========================================================== c: resume a book ==
+
+func _check_resume() -> void:
+	print("\n-- check c: re-entering the book restores the page, the pixels and the coverage --")
+	var shelf := _main.get_current_screen() as BookSelect
+	if shelf == null:
+		_expect(false, "the shelf is showing")
+		return
+	shelf.get_cells()[0].pressed.emit()
+	var reopened := await _wait_for_screen(Main.SCREEN_COLORING)
+	_expect(reopened, "the book reopens (%s)" % _main.get_current_screen_id())
+	var coloring := _main.get_current_screen() as ColoringPage
+	if coloring == null:
+		return
+	await _wait_until(func() -> bool: return not coloring.has_pending_restore(), NAV_TIMEOUT)
+	await _settle_layout()
+
+	_expect(coloring.get_page_label_text() == "1/2",
+		"it resumes on the same page ('%s')" % coloring.get_page_label_text())
+	_expect(GameState.current_page_index == 0, "the GameState cursor is page 0")
+
+	var paint := coloring.get_page_view().get_paint_image()
+	_expect(paint != null, "the paint layer reads back")
+	if paint == null:
+		return
+	if paint.get_format() != Image.FORMAT_RGBA8:
+		paint.convert(Image.FORMAT_RGBA8)
+	var pixel := paint.get_pixel(int(_probe_point.x), int(_probe_point.y))
+	var worst := maxi(
+		absi(pixel.r8 - _probe_color.r8),
+		maxi(absi(pixel.g8 - _probe_color.g8), absi(pixel.b8 - _probe_color.b8))
+	)
+	_expect(pixel.a8 >= 250, "the restored core pixel is opaque (a=%d)" % pixel.a8)
+	_expect(worst <= COLOR_TOLERANCE,
+		"the restored core pixel is still #%s (worst channel delta %d/255)"
+		% [_probe_color.to_html(false), worst])
+
+	var coverage := coloring.get_coverage_tracker().region_coverage(PROBE_REGION)
+	_expect(coverage > 0.0,
+		"the tracker resumed with region %d at %.3f coverage" % [PROBE_REGION, coverage])
+	_expect(not coloring.is_page_pre_completed(),
+		"a partly-coloured page is not treated as already finished")
+
+
+# ================================ d: finish the book, then "Color again" ==
+
+func _check_complete_and_again() -> void:
+	print("\n-- check d: finish both pages -> BookComplete -> Color again --")
+	var coloring := _main.get_current_screen() as ColoringPage
+	if coloring == null:
+		_expect(false, "the coloring page is open")
+		return
+
+	var strokes_1 := await _fill_page(coloring)
+	print("   page 1 filled with %d strokes" % strokes_1)
+	# The flip is asynchronous; wait for the second page to be interactive.
+	var on_page_2 := await _wait_until(
+		func() -> bool: return coloring.get_page_label_text() == "2/2" and not coloring.is_transitioning(),
+		PAINT_TIMEOUT
+	)
+	_expect(on_page_2, "page 1 completed and the book flipped to 2/2 ('%s')"
+		% coloring.get_page_label_text())
+	await _wait_until(func() -> bool: return not coloring.has_pending_restore(), NAV_TIMEOUT)
+
+	_expect(GameState.get_page_status(BOOK_PATH, 0) == GameState.STATUS_COMPLETE,
+		"page 1 was saved as '%s' (%s)"
+		% [GameState.STATUS_COMPLETE, GameState.get_page_status(BOOK_PATH, 0)])
+	_expect(FileAccess.file_exists(GameState.get_paint_path(_book, 0)),
+		"page 1's finished paint layer is on disk")
+
+	var strokes_2 := await _fill_page(coloring)
+	print("   page 2 filled with %d strokes" % strokes_2)
+	var celebrated := await _wait_for_screen(Main.SCREEN_BOOK_COMPLETE, PAINT_TIMEOUT)
+	_expect(celebrated, "finishing the last page shows BookComplete (%s)" % _main.get_current_screen_id())
+	var complete := _main.get_current_screen() as BookComplete
+	if complete == null:
+		return
+	_expect(complete.get_book() == _book, "the celebration names the finished book")
+	_expect(GameState.is_book_complete(_book), "every page is recorded complete")
+	# Let the headline finish its pop-in, or the screenshot catches it mid-fade.
+	await get_tree().create_timer(BookComplete.POP_SECONDS + 0.2).timeout
+	await _settle_layout()
+	await _screenshot("book_complete.png")
+
+	var paint_0 := GameState.get_paint_path(_book, 0)
+	var paint_1 := GameState.get_paint_path(_book, 1)
+	_expect(FileAccess.file_exists(paint_0) and FileAccess.file_exists(paint_1),
+		"both pages' paint layers exist before 'Color again'")
+
+	# --- Color again ---------------------------------------------------------
+	complete.get_again_button().pressed.emit()
+	var restarted := await _wait_for_screen(Main.SCREEN_COLORING)
+	_expect(restarted, "'Color again' reopens the book (%s)" % _main.get_current_screen_id())
+	var fresh := _main.get_current_screen() as ColoringPage
+	if fresh == null:
+		return
+	await _wait_until(func() -> bool: return not fresh.has_pending_restore(), NAV_TIMEOUT)
+	await _settle_layout()
+
+	_expect(not FileAccess.file_exists(paint_0) and not FileAccess.file_exists(paint_1),
+		"'Color again' deleted both saved paint layers")
+	_expect(GameState.get_page_status(BOOK_PATH, 0) == GameState.STATUS_UNTOUCHED
+			and GameState.get_page_status(BOOK_PATH, 1) == GameState.STATUS_UNTOUCHED,
+		"both page statuses were reset (%s, %s)"
+		% [GameState.get_page_status(BOOK_PATH, 0), GameState.get_page_status(BOOK_PATH, 1)])
+	_expect(fresh.get_page_label_text() == "1/2",
+		"the restarted book is back at 1/2 ('%s')" % fresh.get_page_label_text())
+	_expect(is_zero_approx(fresh.get_coverage_tracker().page_coverage()),
+		"the page is blank again (coverage %.3f)" % fresh.get_coverage_tracker().page_coverage())
+
+
+# ============================================= e: settings "erase all" ==
+
+func _check_erase_all() -> void:
+	print("\n-- check e: settings -> erase all progress (with confirm) --")
+	# Leave something behind first, so "erased" means something.
+	GameState.mark_page_status(_book, 0, GameState.STATUS_IN_PROGRESS)
+	_expect(not _read_save().get("books", {}).is_empty(), "there is progress to erase")
+
+	var panel := _main.open_settings()
+	await get_tree().process_frame
+	_expect(panel != null, "settings opens over the coloring page")
+	if panel == null:
+		return
+	panel.get_erase_button().pressed.emit()
+	_expect(panel.is_confirming(), "erasing asks for confirmation first")
+	panel.get_cancel_button().pressed.emit()
+	_expect(not panel.is_confirming(), "cancelling backs out of the confirm step")
+	_expect(not _read_save().get("books", {}).is_empty(), "cancelling erased nothing")
+
+	panel.get_erase_button().pressed.emit()
+	panel.get_confirm_button().pressed.emit()
+	await get_tree().process_frame
+
+	var saved := _read_save()
+	_expect(int(saved.get("version", 0)) == GameState.SAVE_VERSION,
+		"the save file is still a valid v%d file" % GameState.SAVE_VERSION)
+	_expect((saved.get("books", {}) as Dictionary).is_empty(),
+		"every book entry is gone (%s)" % [(saved.get("books", {}) as Dictionary).keys()])
+	_expect(_count_files(GameState.get_paint_root()) == 0,
+		"the paint directory holds no files (%d)" % _count_files(GameState.get_paint_root()))
+
+	_main.close_settings()
+	await get_tree().process_frame
+	_expect(_main.get_settings_panel() == null, "the panel closed")
+
+
+# ================================================ f: mode change mid-book ==
+
+func _check_mode_change_mid_book() -> void:
+	print("\n-- check f: change mode while a book is open --")
+	var coloring := _main.get_current_screen() as ColoringPage
+	if coloring == null:
+		_expect(false, "a book is still open (%s)" % _main.get_current_screen_id())
+		return
+	var child_palette := GameState.get_palette_for_mode(PaletteDef.MODE_CHILD)
+	var adult_palette := GameState.get_palette_for_mode(PaletteDef.MODE_ADULT)
+	_expect(coloring.get_palette() is PaletteChild,
+		"the open book started with the child palette (%s)" % _script_name(coloring.get_palette()))
+	_expect(is_equal_approx(coloring.get_coverage_tracker().get_threshold(),
+			child_palette.completion_threshold),
+		"...and the child threshold %.2f" % coloring.get_coverage_tracker().get_threshold())
+
+	var panel := _main.open_settings()
+	await get_tree().process_frame
+	panel.get_change_mode_button().pressed.emit()
+	await get_tree().process_frame
+	var overlay := _main.get_mode_select_overlay()
+	_expect(overlay != null, "'Change' opened the mode picker over the book")
+	_expect(_main.get_current_screen_id() == Main.SCREEN_COLORING,
+		"the book is still the current SCREEN behind the overlay (%s)" % _main.get_current_screen_id())
+	if overlay == null:
+		return
+	_expect(overlay.is_back_visible(), "the overlay picker offers a way back")
+
+	overlay.get_card(PaletteDef.MODE_ADULT).pressed.emit()
+	await get_tree().process_frame
+	_expect(GameState.mode == PaletteDef.MODE_ADULT, "the mode is now 'adult' (%s)" % GameState.mode)
+	_expect(_main.get_mode_select_overlay() == null, "the overlay closed itself")
+	_expect(_main.get_current_screen() == coloring, "the same coloring page is still open")
+
+	_expect(coloring.get_palette() is PaletteAdult,
+		"the palette component was rebuilt as PaletteAdult (%s)" % _script_name(coloring.get_palette()))
+	_expect(is_equal_approx(coloring.get_coverage_tracker().get_threshold(),
+			adult_palette.completion_threshold),
+		"the completion threshold is now %.2f (%.2f)"
+		% [adult_palette.completion_threshold, coloring.get_coverage_tracker().get_threshold()])
+	_expect(is_equal_approx(coloring.get_coverage_tracker().get_threshold(), 0.92),
+		"...which is the strict adult 0.92")
+
+
+# ==================================================== g: saving on quit ==
+
+func _check_quit_save() -> void:
+	print("\n-- check g: NOTIFICATION_WM_CLOSE_REQUEST writes the save --")
+	var written: Array[String] = []
+	var handler := func(path: String) -> void: written.append(path)
+	GameState.save_written.connect(handler)
+	# Delivered to main only, not through the SceneTree, so the run survives it.
+	_main.propagate_notification(NOTIFICATION_WM_CLOSE_REQUEST)
+	await get_tree().process_frame
+	GameState.save_written.disconnect(handler)
+
+	_expect(written.size() >= 1, "the close notification produced %d save(s)" % written.size())
+	_expect(FileAccess.file_exists(GameState.get_save_path()), "the save file is on disk")
+	_expect(int(_read_save().get("version", 0)) == GameState.SAVE_VERSION,
+		"and it is a valid v%d file" % GameState.SAVE_VERSION)
+	_expect(_main.is_inside_tree(), "the app did not quit itself")
+
+
+# ================================================= h: broken save files ==
+
+func _check_broken_saves() -> void:
+	print("\n-- check h: corrupt and future save files --")
+	GameState.mark_page_status(_book, 0, GameState.STATUS_COMPLETE)
+	GameState.set_mode(PaletteDef.MODE_ADULT)
+	_expect(not GameState.get_book_progress(BOOK_PATH).get("pages", []).is_empty(),
+		"there is in-memory progress before the corrupt read")
+
+	_write_text(GameState.get_save_path(), "{ this is not json ]]")
+	var loaded := GameState.load_save()
+	_expect(not loaded, "load_save() reports that nothing was loaded")
+	_expect((GameState.get_book_progress(BOOK_PATH).get("pages", []) as Array).is_empty(),
+		"the in-memory progress was reset")
+	_expect(GameState.mode == GameState.DEFAULT_MODE,
+		"the mode fell back to the shipped default '%s' (%s)"
+		% [GameState.DEFAULT_MODE, GameState.mode])
+	_expect(is_instance_valid(_main), "nothing crashed")
+
+	# --- a save from a build that does not exist yet -------------------------
+	var backup := GameState.get_backup_save_path()
+	if FileAccess.file_exists(backup):
+		DirAccess.remove_absolute(backup)
+	_write_text(GameState.get_save_path(),
+		'{"version": 99, "mode": "adult", "books": {"%s": {"current_page_index": 5, "pages": []}}}'
+		% BOOK_PATH)
+	var future_loaded := GameState.load_save()
+	_expect(not future_loaded, "a v99 save is refused")
+	_expect(FileAccess.file_exists(backup),
+		"...and backed up to %s" % ProjectSettings.globalize_path(backup))
+	_expect(FileAccess.get_file_as_string(backup).contains("\"version\": 99"),
+		"the backup is the original bytes")
+	_expect(not GameState.has_book_progress(BOOK_PATH), "the future save's progress was NOT applied")
+
+	# --- a missing save file is silent ---------------------------------------
+	DirAccess.remove_absolute(GameState.get_save_path())
+	_expect(not GameState.load_save(), "a missing save file starts fresh")
+	_expect(GameState.save_now() and FileAccess.file_exists(GameState.get_save_path()),
+		"and a fresh save can be written over it")
+
+
+# ================================================================= helpers ==
+
+func _read_save() -> Dictionary:
+	var path := GameState.get_save_path()
+	if not FileAccess.file_exists(path):
+		return {}
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	return parsed if typeof(parsed) == TYPE_DICTIONARY else {}
+
+
+## The registered class_name of a node's script ([method Object.get_class] only
+## ever reports the engine base class, "Control", for a scripted node).
+static func _script_name(node: Object) -> String:
+	if node == null:
+		return "none"
+	var script := node.get_script() as Script
+	if script == null:
+		return node.get_class()
+	var global_name := script.get_global_name()
+	return global_name if global_name != "" else node.get_class()
+
+
+static func _write_text(path: String, text: String) -> void:
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(text)
+	file.close()
+
+
+static func _count_files(root: String) -> int:
+	if not DirAccess.dir_exists_absolute(root):
+		return 0
+	var directory := DirAccess.open(root)
+	if directory == null:
+		return 0
+	var total := directory.get_files().size()
+	for name in directory.get_directories():
+		total += _count_files(root.path_join(name))
+	return total
+
+
+static func _delete_recursive(path: String) -> void:
+	if not DirAccess.dir_exists_absolute(path):
+		return
+	var directory := DirAccess.open(path)
+	if directory == null:
+		return
+	for name in directory.get_files():
+		DirAccess.remove_absolute(path.path_join(name))
+	for name in directory.get_directories():
+		_delete_recursive(path.path_join(name))
+	DirAccess.remove_absolute(path)
+
+
+# ------------------------------------------------------------ paint helpers --
+
+## Paints every region of the current page until the tracker calls it done.
+func _fill_page(screen: ColoringPage) -> int:
+	var page_view := screen.get_page_view()
+	var strokes := 0
+	for region_id in page_view.get_region_ids():
+		if screen.is_transitioning():
+			break
+		strokes += await _flood_region(screen, region_id)
+	return strokes
+
+
+func _flood_region(screen: ColoringPage, region_id: int) -> int:
+	var page_view := screen.get_page_view()
+	var tracker := screen.get_coverage_tracker()
+	if page_view.get_region_data(region_id).is_empty():
+		return 0
+	var bounds := _region_bounds(page_view, region_id)
+	var step := maxi(int(page_view.brush_size * 0.5 * FLOOD_ROW_RATIO), 8)
+
+	var rows: Array[int] = []
+	var y := bounds.position.y + 2
+	while y < bounds.end.y - 2:
+		rows.append(y)
+		y += step
+	rows.append(bounds.end.y - 2)
+
+	var strokes := 0
+	for row in rows:
+		if tracker != null and tracker.is_region_done(region_id):
+			break
+		if screen.is_transitioning():
+			break
+		var start_x := _first_x_in_region(page_view, region_id, bounds, row)
+		if start_x < 0:
+			continue
+		page_view.begin_stroke(Vector2(float(start_x) + 0.5, float(row) + 0.5))
+		page_view.continue_stroke(Vector2(float(bounds.end.x) - 0.5, float(row) + 0.5))
+		page_view.end_stroke()
+		strokes += 1
+		await _wait_for_coverage(screen)
+	return strokes
+
+
+static func _first_x_in_region(page_view: PageView, region_id: int, bounds: Rect2i, row: int) -> int:
+	var x := bounds.position.x
+	while x < bounds.end.x:
+		if page_view.get_region_id_at(Vector2(float(x) + 0.5, float(row) + 0.5)) == region_id:
+			return x
+		x += 2
+	return -1
+
+
+static func _region_bounds(page_view: PageView, region_id: int) -> Rect2i:
+	var outline: PackedVector2Array = page_view.get_region_data(region_id)["outline"]
+	var minimum := outline[0]
+	var maximum := outline[0]
+	for point in outline:
+		minimum = minimum.min(point)
+		maximum = maximum.max(point)
+	return Rect2i(Vector2i(minimum.floor()), Vector2i(maximum.ceil()) - Vector2i(minimum.floor()))
+
+
+func _wait_for_coverage(screen: ColoringPage) -> void:
+	for i in 60:
+		if not screen.has_pending_coverage():
+			return
+		await get_tree().process_frame
+
+
+# ----------------------------------------------------------------- waiting --
+
+## Waits until [param screen_id] is the current screen and no transition is in
+## flight.
+func _wait_for_screen(screen_id: String, timeout: float = NAV_TIMEOUT) -> bool:
+	return await _wait_until(
+		func() -> bool:
+			return _main.get_current_screen_id() == screen_id and not _main.is_transitioning(),
+		timeout
+	)
+
+
+func _wait_until(condition: Callable, timeout_seconds: float) -> bool:
+	var deadline := Time.get_ticks_msec() + int(timeout_seconds * 1000.0)
+	while Time.get_ticks_msec() < deadline:
+		if bool(condition.call()):
+			return true
+		await get_tree().process_frame
+	return false
+
+
+func _settle_layout() -> void:
+	for i in 4:
+		await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+
+
+func _screenshot(file_name: String) -> void:
+	await RenderingServer.frame_post_draw
+	var path := _shot_dir.path_join(file_name)
+	var error := get_viewport().get_texture().get_image().save_png(path)
+	print("   screenshot: %s (%s)" % [
+		ProjectSettings.globalize_path(path), "ok" if error == OK else "error %d" % error
+	])
+
+
+func _expect(condition: bool, description: String) -> void:
+	_checks += 1
+	if not condition:
+		_failures += 1
+	print("%s - %s" % ["PASS" if condition else "FAIL", description])
+
+
+static func _arg_value(flag: String, fallback: String) -> String:
+	var args := OS.get_cmdline_user_args()
+	var index := args.find(flag)
+	if index >= 0 and index + 1 < args.size():
+		return args[index + 1]
+	return fallback

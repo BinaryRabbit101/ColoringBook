@@ -1,0 +1,115 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/screens/book_complete.gd" id="1_book_complete"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_again"]
+bg_color = Color(0.788235, 0.478431, 0.152941, 1)
+corner_radius_top_left = 14
+corner_radius_top_right = 14
+corner_radius_bottom_right = 14
+corner_radius_bottom_left = 14
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_books"]
+bg_color = Color(0.352941, 0.309804, 0.278431, 1)
+corner_radius_top_left = 14
+corner_radius_top_right = 14
+corner_radius_bottom_right = 14
+corner_radius_bottom_left = 14
+
+[node name="BookComplete" type="Control"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_book_complete")
+
+[node name="Backdrop" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.121569, 0.109804, 0.101961, 1)
+
+[node name="Confetti" type="CPUParticles2D" parent="."]
+position = Vector2(576, -30)
+amount = 200
+lifetime = 4.5
+preprocess = 2.5
+randomness = 0.65
+lifetime_randomness = 0.35
+emission_shape = 3
+emission_rect_extents = Vector2(600, 8)
+spread = 32.0
+gravity = Vector2(0, 250)
+initial_velocity_min = 80.0
+initial_velocity_max = 230.0
+angular_velocity_min = -320.0
+angular_velocity_max = 320.0
+angle_min = -180.0
+angle_max = 180.0
+scale_amount_min = 0.55
+scale_amount_max = 1.35
+
+[node name="Center" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="Column" type="VBoxContainer" parent="Center"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 26
+alignment = 1
+
+[node name="Headline" type="Label" parent="Center/Column"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(1, 0.905882, 0.556863, 1)
+theme_override_colors/font_outline_color = Color(0.117647, 0.0862745, 0.054902, 1)
+theme_override_constants/outline_size = 16
+theme_override_font_sizes/font_size = 82
+text = "Book complete!"
+horizontal_alignment = 1
+
+[node name="BookLabel" type="Label" parent="Center/Column"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.827451, 0.788235, 0.717647, 1)
+theme_override_font_sizes/font_size = 28
+horizontal_alignment = 1
+
+[node name="Buttons" type="HBoxContainer" parent="Center/Column"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 28
+alignment = 1
+
+[node name="AgainButton" type="Button" parent="Center/Column/Buttons"]
+custom_minimum_size = Vector2(260, 72)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.129412, 0.101961, 0.0705882, 1)
+theme_override_font_sizes/font_size = 28
+theme_override_styles/normal = SubResource("StyleBoxFlat_again")
+theme_override_styles/hover = SubResource("StyleBoxFlat_again")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_again")
+text = "Color again"
+
+[node name="BooksButton" type="Button" parent="Center/Column/Buttons"]
+custom_minimum_size = Vector2(220, 72)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.972549, 0.94902, 0.905882, 1)
+theme_override_font_sizes/font_size = 28
+theme_override_styles/normal = SubResource("StyleBoxFlat_books")
+theme_override_styles/hover = SubResource("StyleBoxFlat_books")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_books")
+text = "Books"

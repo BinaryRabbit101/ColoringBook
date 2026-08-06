@@ -350,6 +350,11 @@ func _check_page_view_integration() -> void:
 func _check_game_state() -> void:
 	print("\n-- check 7: GameState --")
 	GameState.reload_palettes()
+	# M5: the mode is persisted, so a real save could have put the game in adult
+	# mode before this test ran. Point saves at an empty scratch root -- loading
+	# nothing restores the shipped defaults, which is exactly what is asserted
+	# below.
+	GameState.set_save_root("user://palette_smoke/state")
 	GameState.mode_changed.connect(_on_mode_changed)
 
 	_expect(GameState.mode == PaletteDef.MODE_CHILD,
