@@ -45,6 +45,11 @@ class PackResource extends JsonResource
             // Pack-relative, like every other path in a manifest: entitled
             // clients fetch it through /packs/{slug}/files/{path}.
             'cover' => $this->cover_path,
+            // …and the public one, so the shop can render a pack nobody owns
+            // yet (WP5). Null when the pack ships no cover at all.
+            'cover_url' => $this->cover_path === null
+                ? null
+                : route('api.v1.packs.cover', ['slug' => $this->slug]),
             'is_free' => $this->is_free,
             'owned' => $this->owned,
             'sort_order' => $this->sort_order,

@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\V1\EntitlementController;
 use App\Http\Controllers\Api\V1\PackController;
+use App\Http\Controllers\Api\V1\PackCoverController;
 use App\Http\Controllers\Api\V1\PackDownloadController;
 use App\Http\Middleware\OptionalSanctumUser;
 use App\Http\Middleware\VerifySignedDownload;
@@ -54,6 +55,17 @@ Route::middleware(OptionalSanctumUser::class)->group(function (): void {
     Route::get('packs', [PackController::class, 'index'])->name('packs.index');
     Route::get('packs/{slug}', [PackController::class, 'show'])->name('packs.show');
 });
+
+/*
+ * Public, unauthenticated, no signature — the shop's thumbnail (WP5).
+ *
+ * Every other pack byte needs a token plus an entitlement, which is exactly
+ * wrong for a cover: the point of the shop is to show packs a household does
+ * *not* own. Listable packs only, so a draft's cover is never a product.
+ * See App\Http\Controllers\Api\V1\PackCoverController for why this is a route
+ * rather than a copy on the `public` disk.
+ */
+Route::get('packs/{slug}/cover', PackCoverController::class)->name('packs.cover');
 
 Route::middleware(['auth:sanctum', 'abilities:packs:download'])->group(function (): void {
     Route::get('packs/{slug}/manifest', [PackDownloadController::class, 'manifest'])

@@ -147,6 +147,38 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Admin (WP5)
+    |--------------------------------------------------------------------------
+    |
+    | The single-operator publishing tool (DLC_SERVER.md §10). `ability` is
+    | the Sanctum ability an admin *token* must carry — the dev box's
+    | `pack build` script POSTs with one; the Inertia UI uses the web session
+    | instead and never sees a token.
+    |
+    | `giant_region_fraction` is the §10.1 giant-region threshold: a page whose
+    | largest region covers this share of the paintable pixels is a gap in the
+    | line art, not a region. The mapping pipeline applies the same idea on the
+    | dev box (`--giant-fraction`); this is the server's backstop.
+    |
+    */
+
+    'admin' => [
+        'ability' => env('COLORINGBOOK_ADMIN_ABILITY', 'admin'),
+
+        // Uploads: a whole pack zip, or one page artifact at a time.
+        'max_upload_kb' => (int) env('COLORINGBOOK_ADMIN_MAX_UPLOAD_KB', 262144),
+
+        // §10.1 validation.
+        'giant_region_fraction' => (float) env('COLORINGBOOK_GIANT_REGION_FRACTION', 0.9),
+
+        // Region-overlay previews: long edge in pixels, and how strongly the
+        // tint covers the display art.
+        'preview_max_px' => (int) env('COLORINGBOOK_PREVIEW_MAX_PX', 768),
+        'preview_tint_alpha' => (float) env('COLORINGBOOK_PREVIEW_TINT_ALPHA', 0.5),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Paint layers
     |--------------------------------------------------------------------------
     |

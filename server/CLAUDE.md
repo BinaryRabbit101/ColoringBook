@@ -367,11 +367,11 @@ lines and flat per-region ID-map colours, and a pack cover that doubles as a
 book cover (one blob, two `assets.kind` rows). `fakePackStorage()` first —
 content-addressed writes are the first thing publishing does.
 
-### Known gap for WP5
+### Known gap for WP5 — closed
 
-Pack covers are only reachable through the entitled delta route, so the shop
-cannot render a cover for a pack nobody owns yet. §11 defines no public cover
-route; add one (or serve covers from the `public` disk) when the shop UI lands.
+Pack covers were only reachable through the entitled delta route, so the shop
+could not render a cover for a pack nobody owns yet. WP5 added
+`GET /packs/{slug}/cover`; see "Covers are public, by route" below.
 
 ## WP4 — paint-layer sync
 
@@ -524,3 +524,200 @@ container survives between calls, so after any API request a bare `auth`
 (session) route will happily accept a bearer token and a "a game token cannot
 do this" test silently passes for the wrong reason. `useSessionGuard()` in that
 trait puts it back; call it between an API call and a dashboard call.
+
+## WP5 — admin upload, validation, preview, publish
+
+Design §10 (admin flow, and what the server validates versus what stays a dev
+tool), §11 "Admin". Routes live in `routes/api/admin.php` (tokens) and
+`routes/admin.php` (Inertia). It is a **single-operator tool**: no roles, no
+approval chain, no workflow states beyond `draft → published → retired`.
+
+### Two doors, one boolean
+
+`users.is_admin` is the whole authorisation model, and
+`App\Http\Middleware\EnsureAdmin` is the whole enforcement. It stands behind
+two stacks:
+
+| | `/api/v1/admin/*` | `/admin/*` (Inertia) |
+|---|---|---|
+| Who | the dev box's `pack build` script | a person in a browser |
+| Auth | `auth:sanctum` + `abilities:admin` | `auth` (Fortify session) |
+| Non-admin | `403 FORBIDDEN` | **`404`** |
+
+The 404 is deliberate: an ordinary parent should never learn the section
+exists, and `AppSidebar.vue` renders no nav entry unless `auth.user.is_admin`.
+
+The `admin` ability is **not** in `coloringbook.token.abilities`, so no game
+token can ever reach these routes, and an admin token cannot read anyone's
+colouring. Mint one with:
+
+```
+php artisan admin:token you@example.com [--name=pack-build] [--days=90]
+```
+
+There is no endpoint and no button that issues it — publishing a pack should
+require a shell on the server. `config('coloringbook.admin.ability')` names it.
+
+### The surface
+
+```
+POST /admin/assets                                multipart → {asset_ulid, sha256}
+GET  /admin/packs                                 every pack, drafts included
+POST /admin/packs                                 create a draft pack
+GET  /admin/packs/{slug}
+POST /admin/packs/{slug}/versions                 zip OR manifest+ulids → draft
+GET  /admin/packs/{slug}/versions/{v}/preview     the page list
+GET  .../preview/{book_uid}/{page}                one region-overlay PNG
+POST /admin/packs/{slug}/versions/{v}/publish     flips published_at
+POST /admin/entitlements                          promo/gift grant, and un-revoke
+```
+
+§11 lists one `preview`; it is two routes here because a page list is JSON and
+an overlay is a PNG, and a document carrying a pack's worth of base64 art would
+be unusable. The same two exist under `/admin/...` for the browser, since an
+`<img src>` cannot carry a bearer token.
+
+`POST /admin/assets` is idempotent by construction: content addressing means
+identical bytes resolve to the same row. Identity is `(sha256, kind)`, not
+`sha256` — one blob legitimately wears two roles.
+
+`POST /admin/entitlements` is a *re-*grant. `Entitlements::grant()` still never
+touches an existing row (a revoked pack stays revoked however often a client
+retries), so `Entitlements::regrant()` is the one way back and it lives behind
+an admin typing an email into a form. `purchase` and `free` are not offerable
+sources: one is written by store verification, the other writes itself on first
+download.
+
+### The draft/publish split
+
+`PublishPackDirectory` is still the only code path that creates a
+`pack_versions` row. WP5 extended it with a fourth argument rather than
+bypassing it:
+
+```php
+$publisher->handle($dir, $slug, $isFree, publishNow: false);
+```
+
+`false` writes every artifact and every catalog row but leaves `published_at`
+null **and leaves `packs.status` alone** — so a brand-new pack stays a draft
+and a retired pack stays retired while a fix is being drafted. `pack:publish`
+still passes `true` and behaves exactly as it did.
+
+`App\Actions\Admin\PublishPackVersion` is the other half: it stamps
+`published_at` and promotes a draft pack. Published rows are immutable, so
+publishing an already-published version is a
+`409 PACK_VERSION_ALREADY_PUBLISHED` rather than a no-op — silently agreeing
+would leave every device believing it is up to date.
+
+Upload flow, shared between the two doors:
+
+1. `StagePackDirectory` — unpacks the zip **entry by entry** (never
+   `extractTo`, which will happily write `../../.env`), checking each path
+   against `PackManifest::isSafeRelativePath()` and capping the unpacked size;
+   or re-materialises the tree from `manifest` + `path → asset_ulid`.
+2. `SubmitPackVersion` — `PackManifestValidator` (structural) first, then
+   `PackValidation` (pixels) only if the structure held, because "the regions
+   JSON disagrees with the ID map" is noise when neither file is the one the
+   manifest listed. Failures are a `422 PACK_VALIDATION_FAILED` whose
+   `error.details` carry `{errors[], warnings[]}` — every problem at once.
+3. `PublishPackDirectory`, as a draft.
+
+### `PackValidation` — the §10.1 checks
+
+`App\Services\PackValidation` is the pixel half that `PackManifestValidator`
+deliberately isn't. Per page: display and ID map are identical dimensions; the
+manifest's `image_size` matches; the regions JSON is schema v1 and its own
+`image_size` matches; **the JSON ids and the ID map's non-black colours are the
+same set, counted in both directions**; `#000000` is present; `region_count`
+agrees with the JSON; and the largest region covers less than
+`coloringbook.admin.giant_region_fraction` (0.9) of the *paintable* pixels.
+
+The bijection is the one that earns its keep: a one-way check passes happily on
+a JSON that is a subset of a newer run, and the page then has shapes nobody can
+tap. A giant region is a **gap in the line art** — the artist must close it,
+which is exactly why the server reports it rather than trying to fix it.
+
+Minimum region area is not re-checked: the pipeline drops specks below
+`--min-area` before it ever writes an ID map. Masks are optional and never part
+of this contract (BL-9).
+
+It runs on the admin upload path only — `pack:publish` keeps its existing
+structural-only behaviour, so the CLI's contract didn't move under WP3's tests.
+
+Reading `*_regions.json`: canonical schema v1 is the pipeline's own output
+(`version`, `image_size`, `regions[{id, id_color, outline, holes, centroid,
+area_px}]`). The reader also accepts `schema_version` for `version` and an `id`
+that is already `#RRGGBB`, because both spellings exist in fixtures; everything
+resolves to a region colour, which is all the bijection cares about.
+
+`App\Services\RegionImage` wraps GD for both this and the preview, and exists
+for two reasons that are easy to get wrong: it forces palette PNGs to
+truecolour (`imagecolorat` on a palette image returns an *index*, which makes
+every check downstream nonsense) and it masks the alpha byte off, because
+`id = R<<16 | G<<8 | B`.
+
+### Preview mechanics
+
+`App\Services\PackPreview` composites each region of the ID map as a flat tint
+under the display art — the same debug overlay the game has, in the browser
+(§10.1). Tints are **random-but-stable** (hashed from the region's own ID-map
+colour), so a page looks the same on every reload and two adjacent regions the
+artist thinks are one shape show as two colours; a fixed palette would hide
+exactly the failure being looked for. `#000000` is left alone, so line work
+shows through as drawn.
+
+The ID map is downscaled **nearest-neighbour** (`imagecopyresized`) and the
+display art resampled (`imagecopyresampled`): a smooth resample of an ID map
+averages neighbouring ids and invents colours belonging to no region. Output is
+capped at `coloringbook.admin.preview_max_px` on the long edge and cached at
+`packs/<slug>/v<N>/previews/<book_uid>/page_<i>.png`.
+
+Source bytes come from the release's unpacked `files/` tree, which exists for
+drafts too — so a draft is reviewable before anything is published.
+
+### Covers are public, by route
+
+`GET /api/v1/packs/{slug}/cover` — no auth, no signature, `listable` packs
+only, `Cache-Control: public, max-age=86400` with the digest as the ETag.
+`PackResource` gained a `cover_url` beside the pack-relative `cover`.
+
+The alternative was copying covers onto the `public` disk at publish time. That
+is one fewer PHP request per thumbnail, but it splits a pack's bytes across two
+storage roots, needs `storage:link` in every deploy, and leaves a
+published-then-retired pack's cover reachable forever with nothing in the
+database saying so. A route keeps **one** content-addressed store and keeps the
+decision where the rest of the catalog's status rules already live.
+
+### Admin UI
+
+`resources/js/pages/admin/{Packs,Pack,Preview,Entitlements}.vue`, starter-kit
+components, plain string URLs rather than Wayfinder helpers. The web
+controllers call the same actions and the same FormRequests as the API; where
+the API answers a bad pack with a 422 and a list, the UI bounces to the pack
+page with that list in the session (`pack_errors` / `pack_warnings`), because a
+reviewer needs to read six problems at once.
+
+### Testing
+
+`Tests\Concerns\AdminsPacks` provides `adminToken()`, `packUpload()` (a real
+zip of a fixture directory) and the fixture paths. `fakePackStorage()` first,
+as always.
+
+- `tests/Fixtures/packs/meadow-mates` — a second, deliberately separate pack
+  from WP3's `forest-friends`. §10.1 is stricter than the structural checks
+  WP3's fixture was written against (its badger page is a single region, i.e.
+  100 % of the paintable pixels), so WP5 needed a pack that is *valid* end to
+  end: 16×16 pages, two black bars leaving four 7×7 quadrants, regions JSON in
+  the canonical schema-v1 shape.
+- `tests/Fixtures/pages/<case>` — one page each, broken in exactly one way
+  (`dimension-mismatch`, `json-id-missing-from-idmap`,
+  `idmap-colour-missing-from-json`, `no-black`, `giant-region`,
+  `image-size-mismatch`, `bad-schema`). The unit tests assert both that the
+  right problem was found *and* that nothing else was.
+
+### Platform note
+
+If `composer test` dies inside Pint with a phar path pointing at a *different*
+worktree, that is opcache's shared segment holding another checkout's
+compilation of the same Pint phar, not your code. `php -d opcache.enable_cli=0
+<composer> test` steps around it.

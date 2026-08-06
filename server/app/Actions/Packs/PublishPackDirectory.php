@@ -24,7 +24,8 @@ use ZipArchive;
  * resolves each page to its artifacts and writes `manifest.json` beside them.
  * This action is what turns that directory into catalog rows plus shippable
  * bytes, and it is the *only* code path that creates a `pack_versions` row —
- * `pack:publish` calls it today, WP5's admin upload will call it tomorrow.
+ * `pack:publish` calls it with `$publishNow = true`; WP5's admin upload calls
+ * it with `false` and lets the reviewer stamp `published_at` afterwards.
  *
  * Three invariants it exists to enforce:
  *
@@ -51,11 +52,26 @@ class PublishPackDirectory
      * @param  bool|null  $isFree  Force the pack's free flag; null keeps
      *                             whatever the manifest or the existing row
      *                             says.
+     * @param  bool  $publishNow  `true` (the CLI's behaviour) stamps
+     *                            `published_at` and marks the pack published
+     *                            in one step. `false` creates the release as a
+     *                            **draft**: every artifact is written and every
+     *                            row exists, but `published_at` stays null and
+     *                            the pack's own status is left alone, so
+     *                            nothing is visible to the catalog until an
+     *                            admin has looked at the region-overlay
+     *                            preview and pressed publish (§10.2). WP5's
+     *                            upload endpoint is the only caller that
+     *                            passes `false`.
      *
      * @throws PackPublishException
      */
-    public function handle(string $directory, ?string $slugOverride = null, ?bool $isFree = null): PublishedPack
-    {
+    public function handle(
+        string $directory,
+        ?string $slugOverride = null,
+        ?bool $isFree = null,
+        bool $publishNow = true,
+    ): PublishedPack {
         $directory = rtrim($directory, "/\\ \t\n\r\0\x0B");
 
         if (! is_dir($directory)) {
@@ -90,14 +106,21 @@ class PublishPackDirectory
             throw new PackPublishException($errors);
         }
 
-        return DB::transaction(fn (): PublishedPack => $this->import($manifest, $directory, $slug, $isFree));
+        return DB::transaction(
+            fn (): PublishedPack => $this->import($manifest, $directory, $slug, $isFree, $publishNow),
+        );
     }
 
-    private function import(PackManifest $manifest, string $directory, string $slug, ?bool $isFree): PublishedPack
-    {
+    private function import(
+        PackManifest $manifest,
+        string $directory,
+        string $slug,
+        ?bool $isFree,
+        bool $publishNow,
+    ): PublishedPack {
         $warnings = [];
 
-        $pack = $this->upsertPack($manifest, $slug, $isFree);
+        $pack = $this->upsertPack($manifest, $slug, $isFree, $publishNow);
         $version = (int) ($pack->versions()->max('version') ?? 0) + 1;
 
         $declared = $manifest->declaredVersion();
@@ -134,13 +157,13 @@ class PublishPackDirectory
             'archive_bytes' => $archive['bytes'],
             'archive_sha256' => $archive['sha256'],
             'min_client_version' => $minClientVersion,
-            'published_at' => now(),
+            'published_at' => $publishNow ? now() : null,
         ]);
 
         return new PublishedPack($packVersion, $warnings);
     }
 
-    private function upsertPack(PackManifest $manifest, string $slug, ?bool $isFree): Pack
+    private function upsertPack(PackManifest $manifest, string $slug, ?bool $isFree, bool $publishNow): Pack
     {
         /** @var Pack $pack */
         $pack = Pack::query()->firstOrNew(['slug' => $slug]);
@@ -148,7 +171,13 @@ class PublishPackDirectory
         $pack->title = $manifest->title();
         $pack->blurb = $manifest->blurb();
         $pack->cover_path = $manifest->cover();
-        $pack->status = Pack::STATUS_PUBLISHED;
+
+        // A draft release must never flip the pack itself into the catalog —
+        // a retired pack stays retired while a fix is being drafted, and a
+        // brand-new pack stays a draft until someone publishes a version.
+        if ($publishNow) {
+            $pack->status = Pack::STATUS_PUBLISHED;
+        }
 
         $declaredFree = $manifest->data['is_free'] ?? null;
 

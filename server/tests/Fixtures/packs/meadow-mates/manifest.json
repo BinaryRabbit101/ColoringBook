@@ -1,0 +1,72 @@
+{
+    "manifest_version": 1,
+    "pack_slug": "meadow-mates",
+    "pack_version": 1,
+    "title": "Meadow Mates",
+    "blurb": "One little book about a meadow.",
+    "cover": "cover.png",
+    "min_client_version": "0.1.0",
+    "books": [
+        {
+            "book_uid": "meadow-2026",
+            "title": "Meadow",
+            "cover": "books/meadow-2026/page_01.png",
+            "pages": [
+                {
+                    "page_index": 0,
+                    "title": "Page 1",
+                    "display": "books/meadow-2026/page_01.png",
+                    "idmap": "books/meadow-2026/page_01_idmap.png",
+                    "regions": "books/meadow-2026/page_01_regions.json",
+                    "image_size": [
+                        16,
+                        16
+                    ],
+                    "region_count": 4
+                },
+                {
+                    "page_index": 1,
+                    "title": "Page 2",
+                    "display": "books/meadow-2026/page_02.png",
+                    "idmap": "books/meadow-2026/page_02_idmap.png",
+                    "regions": "books/meadow-2026/page_02_regions.json",
+                    "image_size": [
+                        16,
+                        16
+                    ],
+                    "region_count": 4
+                }
+            ]
+        }
+    ],
+    "files": {
+        "books/meadow-2026/page_01.png": {
+            "bytes": 122,
+            "sha256": "2f741870f895de9cf99892d768f51978fe6967de79d6dea5de54a6cfdc8e8954"
+        },
+        "books/meadow-2026/page_01_idmap.png": {
+            "bytes": 128,
+            "sha256": "d5698cee0001417a438e8b3f61c24c429f4e5b777dad969b0a46654843a6a56b"
+        },
+        "books/meadow-2026/page_01_regions.json": {
+            "bytes": 531,
+            "sha256": "0c6396986dd905167b58bacfd00d8b7e3d9de9711d02b28db2f5c080435917a0"
+        },
+        "books/meadow-2026/page_02.png": {
+            "bytes": 120,
+            "sha256": "05886e3abe2e88ed5a211cd26a578e0d3ad92eb984322310edff911e28f5365d"
+        },
+        "books/meadow-2026/page_02_idmap.png": {
+            "bytes": 128,
+            "sha256": "d5698cee0001417a438e8b3f61c24c429f4e5b777dad969b0a46654843a6a56b"
+        },
+        "books/meadow-2026/page_02_regions.json": {
+            "bytes": 531,
+            "sha256": "70bdb2665a19cbb38fe56acf0913b766773991d4fc6a75c5a933ae8d9f8cec0a"
+        },
+        "cover.png": {
+            "bytes": 139,
+            "sha256": "2439d93e3aa92d8860587cf8a9ad08f5d94523c491f59e2693c25c26dd4f42fd"
+        }
+    }
+}

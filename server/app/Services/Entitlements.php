@@ -144,6 +144,57 @@ class Entitlements
         return $entitlement;
     }
 
+    /**
+     * The admin's deliberate act: grant, or bring a **revoked** claim back to
+     * life (WP5, §10.2).
+     *
+     * `grant()` never touches an existing row, on purpose — a revoked pack
+     * must stay revoked no matter how often the client retries a download.
+     * That leaves exactly one way back, and this is it: clearing `revoked_at`
+     * and re-stamping `granted_at`, so the row reads as a fresh claim while
+     * remaining the same auditable row.
+     *
+     * Idempotent in both directions: re-granting a live claim is a no-op, and
+     * re-granting a revoked one un-revokes it once.
+     */
+    public function regrant(User $user, Pack $pack, string $source): Entitlement
+    {
+        $existing = $this->find($user, $pack);
+
+        if ($existing === null) {
+            return $this->grant($user, $pack, $source);
+        }
+
+        if ($existing->isLive()) {
+            return $existing;
+        }
+
+        $existing->revoked_at = null;
+        $existing->source = $source;
+        $existing->granted_at = now();
+        $existing->save();
+
+        return $existing;
+    }
+
+    /**
+     * Withdraw a claim without deleting it — a tombstone, so a refund stays
+     * auditable and coming back is a decision rather than an accident (§9).
+     */
+    public function revoke(User $user, Pack $pack): ?Entitlement
+    {
+        $existing = $this->find($user, $pack);
+
+        if ($existing === null || ! $existing->isLive()) {
+            return $existing;
+        }
+
+        $existing->revoked_at = now();
+        $existing->save();
+
+        return $existing;
+    }
+
     private function find(User $user, Pack $pack): ?Entitlement
     {
         /** @var Entitlement|null $entitlement */

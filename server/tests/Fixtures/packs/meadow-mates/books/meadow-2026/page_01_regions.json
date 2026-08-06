@@ -1,0 +1,11 @@
+{
+"version": 1,
+"source_image": "page_01.png",
+"image_size": [16, 16],
+"regions": [
+{"id":1,"id_color":"#000001","outline":[[0,0],[7,0],[7,7],[0,7]],"holes":[],"centroid":[3,3],"area_px":49},
+{"id":2,"id_color":"#000002","outline":[[9,0],[16,0],[16,7],[9,7]],"holes":[],"centroid":[12,3],"area_px":49},
+{"id":3,"id_color":"#000003","outline":[[0,9],[7,9],[7,16],[0,16]],"holes":[],"centroid":[3,12],"area_px":49},
+{"id":4,"id_color":"#000004","outline":[[9,9],[16,9],[16,16],[9,16]],"holes":[],"centroid":[12,12],"area_px":49}
+]
+}
