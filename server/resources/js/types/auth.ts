@@ -6,6 +6,9 @@ export type User = {
     email: string;
     avatar?: string;
     email_verified_at: string | null;
+    // The whole authorisation model for the publishing tool (DLC_SERVER.md
+    // §10.2): one boolean, no roles.
+    is_admin?: boolean;
     two_factor_enabled?: boolean;
     created_at: string;
     updated_at: string;

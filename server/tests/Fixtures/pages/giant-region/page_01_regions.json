@@ -1,0 +1,9 @@
+{
+"version": 1,
+"source_image": "page_01.png",
+"image_size": [16, 16],
+"regions": [
+{"id":1,"id_color":"#000001","outline":[[1,1],[15,1],[15,15],[1,15]],"holes":[],"centroid":[7.5,7.5],"area_px":192},
+{"id":2,"id_color":"#000002","outline":[[2,2],[4,2],[4,4],[2,4]],"holes":[],"centroid":[2.5,2.5],"area_px":4}
+]
+}
