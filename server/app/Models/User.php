@@ -36,6 +36,7 @@ use Laravel\Sanctum\TransientToken;
  * @property Carbon|null $updated_at
  * @property-read Collection<int, ChildProfile> $childProfiles
  * @property-read Collection<int, Device> $devices
+ * @property-read Collection<int, Entitlement> $entitlements
  */
 #[Fillable(['name', 'email', 'password'])]
 #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
@@ -88,6 +89,18 @@ class User extends Authenticatable implements PasskeyUser
     public function devices(): HasMany
     {
         return $this->hasMany(Device::class)->orderByDesc('last_seen_at');
+    }
+
+    /**
+     * Every pack this account has a claim on, revoked ones included — the
+     * server is the entitlement authority, the client never decides
+     * (DLC_SERVER.md §9). Scope with `->live()` for "currently owns".
+     *
+     * @return HasMany<Entitlement, $this>
+     */
+    public function entitlements(): HasMany
+    {
+        return $this->hasMany(Entitlement::class);
     }
 
     /**
