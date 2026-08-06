@@ -39,6 +39,13 @@ signal save_loaded(fresh: bool)
 ## Emitted after [method erase_all_progress] has wiped the save and the paint
 ## layers.
 signal progress_erased()
+## The interval autosave came round (BL-6). Anything holding state this class
+## cannot reach -- in practice the open [ColoringPage]'s paint layer -- flushes it
+## in response. [method save_now] runs straight afterwards regardless, so a
+## listener that does nothing still gets its progress written.
+signal autosave_due()
+## Emitted after [method erase_page_progress] has reset ONE page.
+signal page_progress_erased(book: BookDef, page_index: int)
 
 const MODE_CHILD := PaletteDef.MODE_CHILD
 const MODE_ADULT := PaletteDef.MODE_ADULT
@@ -69,6 +76,16 @@ const DEFAULT_SAVE_ROOT := "user://"
 ## there is nothing to load, so "no save file" and "first ever run" are the same
 ## state -- which is what makes the dev smokes deterministic.
 const DEFAULT_MODE := MODE_CHILD
+
+## Seconds between interval autosaves (BL-6).
+##
+## Picked at the top of the 30-60 s band the backlog asked for: a page takes a
+## child several minutes, so 45 s bounds what a crash or a killed tab can cost to
+## under a minute of colouring, while being rare enough that the paint-layer
+## readback and PNG write it triggers stay invisible. The tick is SKIPPED
+## entirely when nothing has changed since the last save, so an idle page costs
+## nothing at all.
+const AUTOSAVE_INTERVAL_SECONDS := 45.0
 
 ## Per-page statuses. "untouched" = never painted, "in_progress" = some paint,
 ## "complete" = every region passed the mode's coverage threshold.
@@ -117,6 +134,9 @@ var _books: Dictionary = {}
 var _autosave_enabled := true
 ## One warning per process for a broken save file, not one per read.
 var _reported_bad_save := false
+## Drives [signal autosave_due]. Created here rather than in a scene because the
+## autoload has no scene (godot-practices: autoloads are scripts).
+var _autosave_timer: Timer
 
 
 func _ready() -> void:
@@ -125,6 +145,7 @@ func _ready() -> void:
 	book_started.connect(_on_book_started)
 	current_page_changed.connect(_on_current_page_changed)
 	book_finished.connect(_on_book_finished)
+	_start_autosave_timer()
 	load_save()
 
 
@@ -294,8 +315,10 @@ func clear_book() -> void:
 #
 # Progress is tiny and is rewritten on every cursor move (see _ready). Paint
 # layers are megabytes and come from a GPU readback, so they are written only at
-# the three moments the design allows: a page completing, leaving a book, and the
-# app quitting (coloring-mechanics: get_paint_image() is never in the paint loop).
+# save POINTS, never in the paint loop (coloring-mechanics: get_paint_image() is
+# never in the paint loop): a page completing, leaving a book, navigating between
+# pages, the app quitting or backgrounding, the player pressing Save, and -- BL-6
+# -- an AUTOSAVE_INTERVAL_SECONDS tick that finds unsaved strokes.
 #
 # The save is keyed by BookDef.resource_path because that is the only stable
 # identity a book has -- display names are localisable and page counts change.
@@ -475,6 +498,32 @@ func mark_page_status(book: BookDef, page_index: int, status: String) -> void:
 	pages[page_index] = status
 	entry["pages"] = pages
 	_autosave()
+
+
+## Forgets ONE page of [param book]: deletes its saved paint layer and puts its
+## status back to untouched. Everything else about the book -- the cursor, the
+## other pages -- is left alone. This is what the page's "Start over" button runs
+## (BL-7).
+##
+## [b]The one place a status moves BACKWARDS.[/b] [method mark_page_status]
+## refuses to downgrade a completed page on purpose, so that a stale in_progress
+## write can never un-finish a page under the player; a deliberate reset is the
+## exception, and it writes the entry directly for exactly that reason.
+func erase_page_progress(book: BookDef, page_index: int) -> bool:
+	if book == null or page_index < 0 or not book.has_page(page_index):
+		return false
+	var path := get_paint_path(book, page_index)
+	if path != "" and FileAccess.file_exists(path):
+		DirAccess.remove_absolute(path)
+	var entry := _entry_for(book, true)
+	var pages: Array = entry["pages"]
+	while pages.size() <= page_index:
+		pages.append(STATUS_UNTOUCHED)
+	pages[page_index] = STATUS_UNTOUCHED
+	entry["pages"] = pages
+	save_now()
+	page_progress_erased.emit(book, page_index)
+	return true
 
 
 ## Forgets everything about [param book]: its cursor, its page statuses and every
@@ -705,14 +754,92 @@ func _entry_for(book: BookDef, create: bool) -> Dictionary:
 	var pages: Array = entry["pages"]
 	while pages.size() < book.page_count():
 		pages.append(STATUS_UNTOUCHED)
+	if book.page_count() > 0 and pages.size() > book.page_count():
+		_forget_pages_beyond(key, book.page_count(), pages.size())
+		pages.resize(book.page_count())
+		entry["current_page_index"] = clampi(
+			int(entry.get("current_page_index", 0)), 0, book.page_count() - 1
+		)
 	entry["pages"] = pages
 	return entry
+
+
+## Drops the saved paint layers of pages [param page_count]..[param old_size]-1,
+## i.e. pages a save still remembers that the book no longer has.
+##
+## Books can SHRINK: BL-9 folded the coyote book's two bogus pages back into the
+## one page the art always was, and a re-authored (or DLC-updated) book can do the
+## same. A save written before that lists statuses -- and leaves PNGs on disk --
+## for pages that are gone. Nothing crashes on them (every reader clamps against
+## [method BookDef.has_page]), but they would sit in [code]user://[/code] forever
+## and could make [method is_book_complete] answer about a page that no longer
+## exists, so the entry is trimmed the first time the book is touched after the
+## change. Sized to zero pages is NOT trimming material -- that is a broken book,
+## not a shorter one, and progress must survive it.
+func _forget_pages_beyond(key: String, page_count: int, old_size: int) -> void:
+	for index in range(page_count, old_size):
+		var path := get_paint_path_for_key(key, index)
+		if path != "" and FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
+	print_verbose("GameState: trimmed %d stale page entr(ies) from '%s'."
+		% [old_size - page_count, key])
 
 
 func _autosave() -> void:
 	if not _autosave_enabled:
 		return
 	save_now()
+
+
+# ------------------------------------------------------- interval autosave ----
+# BL-6. The event-driven save points (cursor moves, page complete, leaving a book,
+# quitting) all still stand; this is the safety net UNDER them, for the player who
+# colours one page for twenty minutes and never triggers any of them.
+#
+# The timer only announces the moment. It does NOT read the paint layer -- this
+# class cannot reach a SubViewport, and would not want to on a fixed schedule
+# anyway. The open screen listens to `autosave_due`, defers until the stroke in
+# progress has ended, and writes its own pixels.
+
+func _start_autosave_timer() -> void:
+	_autosave_timer = Timer.new()
+	_autosave_timer.name = "AutosaveTimer"
+	_autosave_timer.wait_time = AUTOSAVE_INTERVAL_SECONDS
+	_autosave_timer.autostart = true
+	# Autosaving must survive a paused tree (a settings overlay, a future pause
+	# screen): it is bookkeeping, not gameplay.
+	_autosave_timer.process_mode = Node.PROCESS_MODE_ALWAYS
+	_autosave_timer.timeout.connect(_on_autosave_timeout)
+	add_child(_autosave_timer)
+
+
+func _on_autosave_timeout() -> void:
+	autosave_due.emit()
+	_autosave()
+
+
+## Seconds between interval autosaves.
+func get_autosave_interval() -> float:
+	return _autosave_timer.wait_time if is_instance_valid(_autosave_timer) else 0.0
+
+
+## Retunes the interval and restarts the countdown. DEV/TEST ONLY -- the smoke
+## harnesses shorten it so they can watch a tick without waiting 45 s. Passing 0
+## or less stops interval autosaving altogether.
+func set_autosave_interval(seconds: float) -> void:
+	if not is_instance_valid(_autosave_timer):
+		return
+	if seconds <= 0.0:
+		_autosave_timer.stop()
+		return
+	_autosave_timer.wait_time = seconds
+	_autosave_timer.start()
+
+
+## Runs the interval autosave right now, without waiting for the timer. This is
+## what the manual "Save" button ends up calling.
+func request_autosave() -> void:
+	_on_autosave_timeout()
 
 
 # ------------------------------------------------------------ file helpers ----

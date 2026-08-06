@@ -5,6 +5,6 @@
 [resource]
 script = ExtResource("1_page_def")
 display_name = "Sun and Banner"
-base_image_path = "res://assets/books/test_book/page_02.png"
+display_image_path = "res://assets/books/test_book/page_02.png"
 id_map_path = "res://assets/books/test_book/page_02_idmap.png"
 regions_json_path = "res://assets/books/test_book/page_02_regions.json"

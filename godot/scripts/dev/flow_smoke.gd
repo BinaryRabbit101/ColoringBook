@@ -18,7 +18,8 @@ extends Control
 ##   2  CoverageTracker against page 1's real geometry, driven by SYNTHETIC paint
 ##      images -- no GPU, no PageView readback
 ##   3  BookSelect renders and reports the chosen book
-##   4  ColoringPage end to end: paint every region of page 1, the flip plays, the
+##   4  ColoringPage end to end: paint every region of page 1, it completes WITHOUT
+##      turning itself (BL-4), pressing the next-page arrow plays the flip, the
 ##      second page is really loaded, the palette still drives the brush
 ##   5  ... and finishing page 2 emits book_completed
 ##   6  the M2 and M3 smoke tests still pass, run as child processes
@@ -53,8 +54,10 @@ const REQUIRED_IDMAP_IMPORT_FLAGS := {
 	"process/fix_alpha_border": "false",
 }
 
-## Threshold injected into the unit-test trackers (the shipped child value).
-const UNIT_THRESHOLD := 0.7
+## Threshold injected into the unit-test trackers (the shipped child value, which
+## BL-5 tightened from 0.70 to 0.90 -- and which is now also the floor the tracker
+## clamps every authored threshold against).
+const UNIT_THRESHOLD := 0.9
 ## Per-channel tolerance (0..255) when checking painted pixels against a colour.
 const COLOR_TOLERANCE := 2
 ## Sweep spacing for the flood helper, as a fraction of the brush RADIUS.
@@ -161,8 +164,8 @@ func _check_resources() -> void:
 	)
 	_expect(_book.get_page(2) == null, "get_page() past the end returns null")
 	_expect(
-		_book.get_cover_path() == _book.get_page(0).base_image_path,
-		"cover falls back to page 1's base image (%s)" % _book.get_cover_path()
+		_book.get_cover_path() == _book.get_page(0).display_image_path,
+		"cover falls back to page 1's display image (%s)" % _book.get_cover_path()
 	)
 	_expect(_book.get_cover_texture() != null, "cover texture loads")
 
@@ -216,10 +219,10 @@ func _check_resources() -> void:
 		_expect(not idmap_image.is_compressed(),
 			"page_02 ID map is NOT VRAM-compressed (format %d)" % idmap_image.get_format())
 		_expect(not idmap_image.has_mipmaps(), "page_02 ID map has no mipmaps")
-		var base := load(page_02.base_image_path) as Texture2D
+		var base := load(page_02.display_image_path) as Texture2D
 		_expect(
 			base != null and idmap.get_size() == base.get_size(),
-			"page_02 ID map matches the base image size (%s)" % idmap.get_size()
+			"page_02 ID map matches the display image size (%s)" % idmap.get_size()
 		)
 		# The strongest guarantee: the imported texture is the source PNG, bit for
 		# bit. Reading the raw PNG logs "this will not work on export" -- correct
@@ -255,7 +258,7 @@ func _check_coverage_tracker() -> void:
 	_probe.add_child(probe)
 	await get_tree().process_frame
 	var page_01 := _book.get_page(0)
-	if not probe.load_page(page_01.base_image_path, page_01.id_map_path, page_01.regions_json_path):
+	if not probe.load_page(page_01.display_image_path, page_01.id_map_path, page_01.regions_json_path):
 		_expect(false, "probe PageView loaded page 1")
 		probe.queue_free()
 		return
@@ -548,8 +551,24 @@ func _check_coloring_flow() -> void:
 	_expect(_coverage_regressions.is_empty(),
 		"coverage never decreased across %d samples (%s)" % [_coverage_history.size(), _coverage_regressions])
 
-	# --- the flip ------------------------------------------------------------
+	# --- BL-4: a finished page does NOT turn itself --------------------------
 	await _wait_until(func() -> bool: return not screen.is_transitioning(), 12.0)
+	_expect(_flip_started_count == 0,
+		"completing page 1 did NOT flip on its own (%d flip(s))" % _flip_started_count)
+	_expect(screen.get_page_label_text() == "1/2",
+		"the player is still on the page they finished ('%s')" % screen.get_page_label_text())
+	_expect(screen.is_celebrating(), "the finished page is showing its 'page complete' state")
+	_expect(not screen.get_next_page_button().disabled,
+		"...and the next-page arrow is unlocked, so turning the page is the PLAYER's call")
+
+	# --- the flip, when the player asks for it -------------------------------
+	screen.get_next_page_button().pressed.emit()
+	var turned := await _wait_until(
+		func() -> bool:
+			return screen.get_page_label_text() == "2/2" and not screen.is_transitioning(),
+		12.0
+	)
+	_expect(turned, "pressing › turned the page ('%s')" % screen.get_page_label_text())
 	_expect(_flip_started_count == 1, "the page flip played (started %d)" % _flip_started_count)
 	_expect(_flip_finished_count == 1, "flip_finished was received (%d)" % _flip_finished_count)
 	_expect(not screen.get_page_flip().visible, "the flip overlay hid itself again")

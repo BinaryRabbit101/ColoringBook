@@ -82,6 +82,29 @@ extends Control
 ##    [constant NARROW_TOOLBAR_WIDTH] so five controls still fit across a 720 px
 ##    phone; the palette component already scrolls horizontally. Nothing else
 ##    needed changing -- the screen was already one vertical box.
+##
+## [b]Backlog additions (BL-4, BL-6, BL-7)[/b]:
+##
+## 1. [b]No auto-flip.[/b] Completing a page used to celebrate for half a second
+##    and then turn the page for the player. It now STAYS on the finished page
+##    with a persistent "page complete" state up, and unlocks the next-page arrow
+##    ([method can_go_to_page] already allowed exactly one page forward off a
+##    completed page). Pressing it plays the flip -- see [method go_to_page]: a
+##    forward step off a finished page is the one navigation that gets the
+##    ceremony, every other jump still swaps instantly. Finishing the LAST page
+##    still reports [signal book_completed] straight away; there is no next page
+##    to choose to turn to, and the celebration screen is the reward.
+## 2. [b]Autosave and a Save button.[/b] The screen owns the paint layer, so it
+##    owns the timing: it listens to [signal GameState.autosave_due] and flushes
+##    the page, DEFERRING past a stroke in progress (never read the paint layer
+##    mid-stroke -- the reader would race the stamp batch and the save would land
+##    half a stroke in). [member _paint_dirty] means an idle page costs nothing.
+##    The toolbar's Save button runs the same path and puts "Saved!" on screen.
+## 3. [b]Start over.[/b] The toolbar's second new button resets THIS page only:
+##    [method PageView.clear_paint], a fresh [CoverageTracker], and
+##    [method GameState.erase_page_progress] to make the reset stick on disk. It
+##    is guarded by an in-game two-button confirm overlay (never an OS/JS modal --
+##    this ships to the web, and those do not exist there).
 
 ## The player asked to leave the book.
 signal back_requested()
@@ -100,8 +123,15 @@ signal coverage_updated(region_id: int, coverage: float)
 signal paint_restored(page_index: int, restored: bool)
 ## Fired after the palette component has been rebuilt for a new mode.
 signal palette_rebuilt(mode: String)
+## The page's paint layer was written. [param manual] is true when the player
+## asked for it rather than a timer or a save point. Tests wait on this.
+signal page_saved(page_index: int, manual: bool)
+## [param page_index] was reset to blank by the player (BL-7).
+signal page_restarted(page_index: int)
 
-## Seconds the "page complete" flourish is on screen before the flip starts.
+## Seconds the "page complete" state takes to pop in. It then STAYS up: BL-4
+## turned the flourish into a state the player leaves when they choose, not a
+## countdown to an automatic flip.
 const CELEBRATION_DURATION := 0.55
 ## Frames to wait for the paint layer to catch up with a finished stroke.
 const MAX_SETTLE_FRAMES := 8
@@ -116,6 +146,8 @@ const NARROW_TOOLBAR_WIDTH := 620.0
 ## here because the restore path has to parent a canvas item into it -- see the
 ## class doc for why that is unavoidable while PageView is frozen.
 const PAINT_VIEWPORT_NODE := "PaintViewport"
+## Seconds the "Saved!" / "Page cleared" toast stays readable before it fades.
+const TOAST_SECONDS := 1.6
 
 
 ## One-shot full-page quad used to composite a saved paint layer back into the
@@ -152,7 +184,17 @@ class PaintRestoreQuad extends Node2D:
 @onready var _back_button: Button = $Ui/Toolbar/Row/BackButton
 @onready var _prev_button: Button = $Ui/Toolbar/Row/PrevButton
 @onready var _next_button: Button = $Ui/Toolbar/Row/NextButton
-@onready var _celebration: Label = $Celebration
+@onready var _save_button: Button = $Ui/Toolbar/Row/SaveButton
+@onready var _reset_button: Button = $Ui/Toolbar/Row/ResetButton
+@onready var _celebration: Control = $Celebration
+@onready var _celebration_title: Label = $Celebration/Center/Column/Title
+@onready var _celebration_hint: Label = $Celebration/Center/Column/Hint
+@onready var _toast: PanelContainer = $Toast
+@onready var _toast_label: Label = $Toast/Label
+@onready var _reset_confirm: Control = $ResetConfirm
+@onready var _reset_scrim: Button = $ResetConfirm/Scrim
+@onready var _reset_confirm_button: Button = $ResetConfirm/Center/Panel/Margin/Column/Row/ConfirmButton
+@onready var _reset_cancel_button: Button = $ResetConfirm/Center/Panel/Margin/Column/Row/CancelButton
 @onready var _flip: PageFlip = $PageFlip
 
 var _book: BookDef
@@ -178,21 +220,53 @@ var _navigating := false
 ## True while a saved paint layer is being composited back into the page.
 var _restoring := false
 ## Set when the RESTORED paint alone already completed the page. The completion
-## cascade (celebrate -> flip) is then suppressed: fireworks belong to the stroke
-## the player just made, not to re-opening a book they already finished.
+## cascade is then suppressed: fireworks belong to the stroke the player just
+## made, not to re-opening a book they already finished.
 var _pre_completed := false
+
+## True once a stroke has landed paint that has not been written to disk yet.
+## Cleared by every successful write. The interval autosave skips a clean page --
+## an idle book must not cost a readback and a megabyte of PNG every 45 s.
+var _paint_dirty := false
+## Set when a save was asked for while a stroke was still down. Never read the
+## paint layer mid-stroke: the save would capture half a stroke and the readback
+## would race the stamp batch. [method _on_stroke_ended] picks this up instead.
+var _save_deferred := false
+## True when the deferred save should announce itself as a manual one.
+var _deferred_save_manual := false
+## True while a save started by [method save_page_now] is in flight.
+var _saving := false
+## True while the page is showing its persistent "complete" state (BL-4).
+var _celebrating := false
+var _celebration_tween: Tween
+var _toast_tween: Tween
 
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_celebration.modulate.a = 0.0
+	_celebration.visible = false
+	_toast.modulate.a = 0.0
+	_toast.visible = false
+	_reset_confirm.visible = false
 	_back_button.pressed.connect(_on_back_pressed)
 	_prev_button.pressed.connect(_on_prev_pressed)
 	_next_button.pressed.connect(_on_next_pressed)
+	_save_button.pressed.connect(_on_save_pressed)
+	_reset_button.pressed.connect(_on_reset_pressed)
+	_reset_scrim.pressed.connect(_on_reset_cancelled)
+	_reset_cancel_button.pressed.connect(_on_reset_cancelled)
+	_reset_confirm_button.pressed.connect(_on_reset_confirmed)
 	_page_view.stroke_ended.connect(_on_stroke_ended)
+	# Touching the page dismisses the finished-page state: the player has decided
+	# to keep colouring, and the headline must not sit over their work.
+	_page_view.region_locked.connect(_on_region_locked)
 	# M5: the mode is changeable mid-book, so the palette is rebuilt on demand
 	# rather than only here.
 	GameState.mode_changed.connect(_on_mode_changed)
+	# BL-6: the interval autosave announces the moment; this screen is what can
+	# actually reach the pixels.
+	GameState.autosave_due.connect(_on_autosave_due)
 	# M6: portrait windows get a leaner toolbar.
 	resized.connect(_apply_toolbar_layout)
 	_apply_toolbar_layout()
@@ -233,7 +307,13 @@ func _apply_current_page() -> bool:
 	_page_generation += 1
 	_pending_regions.clear()
 	_pre_completed = false
-	if not _page_view.load_page(page.base_image_path, page.id_map_path, page.regions_json_path):
+	_paint_dirty = false
+	_save_deferred = false
+	_hide_celebration()
+	_set_reset_confirming(false)
+	# The DISPLAY image is what the player sees; a page mapped from a separate
+	# masking image (BL-9) still only ever renders this one.
+	if not _page_view.load_page(page.display_image_path, page.id_map_path, page.regions_json_path):
 		return false
 
 	_build_coverage()
@@ -248,7 +328,9 @@ func _apply_current_page() -> bool:
 func _build_coverage() -> void:
 	var palette := GameState.get_active_palette()
 	# The threshold is INJECTED. The tracker never reads GameState itself.
-	var threshold := palette.completion_threshold if palette != null else 0.7
+	var threshold := (
+		palette.completion_threshold if palette != null else CoverageTracker.DEFAULT_THRESHOLD
+	)
 	_coverage = CoverageTracker.new(threshold)
 	_coverage.build_from_page_view(_page_view)
 	_coverage.page_completed.connect(_on_coverage_page_completed)
@@ -300,20 +382,39 @@ func can_go_to_page(page_index: int) -> bool:
 	)
 
 
-## Saves the open page and swaps to [param page_index] with NO flip ceremony.
+## Saves the open page and swaps to [param page_index].
 ## Returns false when the jump is not allowed or the page fails to load.
+##
+## [b]One jump gets the flip[/b] (BL-4): stepping FORWARD off a page the player
+## has just finished. That is the moment the page turn belongs to -- it is the
+## reward for completing the page, now taken when the player asks for it instead
+## of being pushed on them the instant the last region filled. Every other jump
+## (back to an earlier page, forward to a page already reached) still swaps
+## instantly: flicking back to look at something must not cost a second of
+## ceremony.
 func go_to_page(page_index: int) -> bool:
 	if _completing or _navigating or not can_go_to_page(page_index):
 		return false
 	_navigating = true
 	_set_nav_enabled(false)
+	var with_flip := (
+		page_index == GameState.current_page_index + 1
+		and _coverage != null
+		and _coverage.is_page_complete()
+	)
 	# Save first: the file must always describe the page it is named after.
 	await persist_current_page_settled()
 	if not is_inside_tree():
 		_navigating = false
 		return false
-	GameState.set_page_index(page_index)
-	var loaded := _apply_current_page()
+
+	var loaded := true
+	if with_flip:
+		_hide_celebration()
+		loaded = await _flip_to_page(page_index)
+	else:
+		GameState.set_page_index(page_index)
+		loaded = _apply_current_page()
 	_navigating = false
 	_refresh_nav()
 	if loaded:
@@ -335,11 +436,15 @@ func _refresh_nav() -> void:
 	var busy := _completing or _navigating
 	_prev_button.disabled = busy or not can_go_to_page(GameState.current_page_index - 1)
 	_next_button.disabled = busy or not can_go_to_page(GameState.current_page_index + 1)
+	_save_button.disabled = busy or _saving
+	_reset_button.disabled = busy
 
 
 func _set_nav_enabled(enabled: bool) -> void:
 	_prev_button.disabled = not enabled
 	_next_button.disabled = not enabled
+	_save_button.disabled = not enabled
+	_reset_button.disabled = not enabled
 
 
 ## Portrait toolbar: five controls do not fit across a 720 px phone, and the page
@@ -511,6 +616,8 @@ func _write_paint(page_index: int, image: Image) -> bool:
 		return false
 	var saved := GameState.save_page_paint(_book, page_index, image)
 	GameState.mark_page_status(_book, page_index, _status_for_page(page_index))
+	if saved and page_index == GameState.current_page_index:
+		_paint_dirty = false
 	return saved
 
 
@@ -524,6 +631,165 @@ func _status_for_page(page_index: int) -> String:
 	if _coverage.page_coverage() > 0.0:
 		return GameState.STATUS_IN_PROGRESS
 	return GameState.STATUS_UNTOUCHED
+
+
+# ============================================= autosave & manual save (BL-6) ==
+# The event-driven save points (page complete, leaving the book, navigating,
+# quitting) are unchanged. What is new is the safety net under them: an interval
+# tick from GameState, and a button the player can press.
+#
+# Both land on the same method, and both obey the same rule: NEVER read the paint
+# layer while a stroke is down. A readback taken mid-stroke races the stamp batch
+# and writes half a stroke to disk; worse, the coverage cycle is already using the
+# readback queue. So a save asked for mid-stroke is REMEMBERED and runs from
+# stroke_ended instead, which is exactly where the paint layer is known settled.
+
+## Writes this page's paint layer and progress, unless a stroke is in progress
+## (then it is deferred until that stroke ends) or nothing has changed since the
+## last write. [param manual] only affects the on-screen feedback.
+## Returns true when a write actually happened.
+func save_page_now(manual: bool = false) -> bool:
+	if _book == null or not _page_view.is_page_loaded():
+		return false
+	if _page_view.is_stroke_active() or _readback_scheduled:
+		_save_deferred = true
+		_deferred_save_manual = _deferred_save_manual or manual
+		if manual:
+			_show_toast("Saving…")
+		return false
+	if not _paint_dirty:
+		# Nothing new on the page. Still write the small progress JSON on a manual
+		# press, so "Save" is never a no-op the player cannot see.
+		if manual:
+			GameState.save_now()
+			_show_toast("Saved!")
+			page_saved.emit(GameState.current_page_index, true)
+		return false
+
+	_saving = true
+	_refresh_nav()
+	var page_index := GameState.current_page_index
+	var written := await _persist_page_async(page_index)
+	_saving = false
+	if not is_inside_tree():
+		return written
+	_refresh_nav()
+	if written:
+		GameState.save_now()
+		page_saved.emit(page_index, manual)
+	if manual:
+		_show_toast("Saved!" if written else "Nothing to save")
+	return written
+
+
+func _on_save_pressed() -> void:
+	await save_page_now(true)
+
+
+## The interval tick. Silent by design -- an autosave the player notices is a
+## stutter, not a feature.
+func _on_autosave_due() -> void:
+	await save_page_now(false)
+
+
+## True while a save is waiting for the stroke in progress to end.
+func has_deferred_save() -> bool:
+	return _save_deferred
+
+
+## True when the page has strokes that are not on disk yet.
+func has_unsaved_paint() -> bool:
+	return _paint_dirty
+
+
+# =========================================================== start over (BL-7) ==
+# Resets THIS page and nothing else: the paint layer, the coverage tracker, the
+# saved PNG and the saved status. Guarded by a two-button in-game overlay -- never
+# an OS or JavaScript modal, because this ships to the web where those either do
+# not exist or block the whole canvas.
+
+func _on_reset_pressed() -> void:
+	_set_reset_confirming(true)
+
+
+func _on_reset_cancelled() -> void:
+	_set_reset_confirming(false)
+
+
+func _on_reset_confirmed() -> void:
+	_set_reset_confirming(false)
+	restart_current_page()
+
+
+## Shows or hides the confirm overlay. Public so a parent can reset the screen and
+## tests can assert the guard.
+func _set_reset_confirming(confirming: bool) -> void:
+	if is_instance_valid(_reset_confirm):
+		_reset_confirm.visible = confirming
+
+
+func is_reset_confirming() -> bool:
+	return is_instance_valid(_reset_confirm) and _reset_confirm.visible
+
+
+## Clears the current page back to blank paper: the paint SubViewport, the
+## coverage tracker, the saved PNG and the saved status. Other pages, and the
+## rest of the book's progress, are untouched. Returns false when there is no page.
+func restart_current_page() -> bool:
+	if _book == null or not _page_view.is_page_loaded():
+		return false
+	var page_index := GameState.current_page_index
+	# Bump the generation FIRST: a coverage readback already in flight was taken
+	# from the paint layer we are about to wipe, and must not be folded into the
+	# fresh tracker.
+	_page_generation += 1
+	_pending_regions.clear()
+	_paint_dirty = false
+	_save_deferred = false
+	_pre_completed = false
+	_completing = false
+	_hide_celebration()
+
+	_page_view.clear_paint()
+	GameState.erase_page_progress(_book, page_index)
+	_build_coverage()
+	_refresh_nav()
+	_show_toast("Page cleared")
+	page_restarted.emit(page_index)
+	return true
+
+
+# ==================================================================== feedback ==
+
+## A small, short-lived message over the page ("Saved!", "Page cleared"). The
+## whole of the UI feedback this screen owns -- everything else is the page.
+func _show_toast(text: String) -> void:
+	if not is_instance_valid(_toast):
+		return
+	_toast_label.text = text
+	_toast.visible = true
+	if _toast_tween != null and _toast_tween.is_valid():
+		_toast_tween.kill()
+	_toast.modulate.a = 0.0
+	_toast_tween = create_tween()
+	_toast_tween.tween_property(_toast, "modulate:a", 1.0, 0.15)
+	_toast_tween.tween_interval(TOAST_SECONDS)
+	_toast_tween.tween_property(_toast, "modulate:a", 0.0, 0.35)
+	_toast_tween.tween_callback(func() -> void:
+		if is_instance_valid(_toast):
+			_toast.visible = false
+	)
+
+
+func get_toast_text() -> String:
+	return _toast_label.text
+
+
+## True from the moment a toast is put up until its fade-out has finished. The
+## fade-IN is not waited on: the node is shown synchronously, and a caller that
+## just triggered the message must not have to wait out an animation to see it.
+func is_toast_visible() -> bool:
+	return is_instance_valid(_toast) and _toast.visible
 
 
 # ================================================================ mode swap ==
@@ -631,6 +897,22 @@ func get_back_button() -> Button:
 	return _back_button
 
 
+func get_save_button() -> Button:
+	return _save_button
+
+
+func get_reset_button() -> Button:
+	return _reset_button
+
+
+func get_reset_confirm_button() -> Button:
+	return _reset_confirm_button
+
+
+func get_reset_cancel_button() -> Button:
+	return _reset_cancel_button
+
+
 ## True while the toolbar is in its narrow (portrait) form.
 func is_toolbar_narrow() -> bool:
 	return not _title_label.visible
@@ -680,7 +962,11 @@ func _on_back_pressed() -> void:
 ## anything waiting on [method has_pending_coverage] sees a settled tracker the
 ## moment it reads false.
 func _on_stroke_ended(region_id: int) -> void:
+	# BL-6: the page now has paint that is not on disk, whatever the coverage
+	# cycle below decides to do about it.
+	_paint_dirty = true
 	if _coverage == null:
+		await _run_deferred_save()
 		return
 	_pending_regions[region_id] = true
 	if _readback_scheduled:
@@ -688,6 +974,26 @@ func _on_stroke_ended(region_id: int) -> void:
 	_readback_scheduled = true
 	await _run_coverage_cycles()
 	_readback_scheduled = false
+	await _run_deferred_save()
+
+
+## Runs a save that was asked for while the player was mid-stroke (BL-6). By the
+## time this is reached the stroke has ended AND its coverage has settled, so the
+## image written is a whole number of strokes.
+func _run_deferred_save() -> void:
+	if not _save_deferred or not is_inside_tree():
+		return
+	_save_deferred = false
+	var manual := _deferred_save_manual
+	_deferred_save_manual = false
+	await save_page_now(manual)
+
+
+## A stroke started: the player is colouring again, so the finished-page state
+## gets out of their way.
+func _on_region_locked(_region_id: int) -> void:
+	if _celebrating:
+		_hide_celebration()
 
 
 ## Drains [member _pending_regions], one readback per pass.
@@ -793,10 +1099,18 @@ func _settle_paint() -> void:
 
 # ================================================================= completion ==
 
+## The page just filled up.
+##
+## [b]BL-4: this no longer turns the page.[/b] It saves, then puts the page into a
+## persistent "complete" state and stops. The next-page arrow is now enabled (the
+## "exactly one page forward off a finished page" rule in [method can_go_to_page]
+## was always there), and pressing it is what plays the flip. The one exception is
+## the LAST page: there is nothing to turn to, so the book's own celebration
+## screen still follows immediately.
 func _on_coverage_page_completed() -> void:
 	if _restoring:
 		# The page was ALREADY finished when it was saved. Restoring it must not
-		# celebrate and flip the player past a page they only came back to look at.
+		# celebrate the player through a page they only came back to look at.
 		_pre_completed = true
 		GameState.mark_page_status(_book, GameState.current_page_index, GameState.STATUS_COMPLETE)
 		return
@@ -807,50 +1121,77 @@ func _on_coverage_page_completed() -> void:
 	var finished_index := GameState.current_page_index
 	page_completed.emit(finished_index)
 
-	# Save point: the finished page's pixels are written BEFORE the cursor moves,
-	# so the file always describes the page it is named after. Async (M6) -- the
-	# app is very much still running here.
+	# Save point: the finished page's pixels are written while the cursor still
+	# points at it, so the file always describes the page it is named after.
+	# Async (M6) -- the app is very much still running here.
 	await _persist_page_async(finished_index)
-
-	await _celebrate()
-
-	if GameState.advance_page():
-		await _flip_to_current_page()
+	if finished_index != GameState.current_page_index or not is_inside_tree():
 		_completing = false
-		_refresh_nav()
-		page_changed.emit(GameState.current_page_index)
-	else:
+		return
+
+	if GameState.is_on_last_page():
 		_completing = false
 		_refresh_nav()
 		GameState.finish_book()
 		book_completed.emit(_book)
+		return
+
+	_completing = false
+	_show_celebration()
+	_refresh_nav()
 
 
-## A short, wordy-free flourish. Deliberately minimal: M4 owns the flow, not the
-## confetti.
-func _celebrate() -> void:
-	_celebration.text = "Page complete!"
-	var tween := create_tween()
-	tween.tween_property(_celebration, "modulate:a", 1.0, CELEBRATION_DURATION * 0.3)
-	tween.tween_interval(CELEBRATION_DURATION * 0.4)
-	tween.tween_property(_celebration, "modulate:a", 0.0, CELEBRATION_DURATION * 0.3)
-	await tween.finished
+## The persistent "page complete" state (BL-4). It pops in and STAYS: it is the
+## page's new state, not a countdown to anything, and the hint under it names the
+## control that turns the page.
+func _show_celebration() -> void:
+	_celebrating = true
+	_celebration_title.text = "Page complete!"
+	_celebration_hint.text = "Tap  ›  when you want the next page"
+	_celebration.visible = true
+	_kill_celebration_tween()
+	_celebration_tween = create_tween()
+	_celebration_tween.tween_property(_celebration, "modulate:a", 1.0, CELEBRATION_DURATION * 0.45)
 
 
-## Freeze the current frame, swap the page behind that frozen frame, then turn it
-## away. Because the real (already loaded) page renders underneath the overlay,
-## the flip reveals it with no "to" texture and nothing pops when the overlay hides.
-func _flip_to_current_page() -> void:
+func _hide_celebration() -> void:
+	_celebrating = false
+	_kill_celebration_tween()
+	if is_instance_valid(_celebration):
+		_celebration.modulate.a = 0.0
+		_celebration.visible = false
+
+
+func _kill_celebration_tween() -> void:
+	if _celebration_tween != null and _celebration_tween.is_valid():
+		_celebration_tween.kill()
+	_celebration_tween = null
+
+
+## True while the finished-page state is on screen.
+func is_celebrating() -> bool:
+	return _celebrating
+
+
+## Freeze the current frame, load [param page_index] behind that frozen frame,
+## then turn it away. Because the real (already loaded) page renders underneath
+## the overlay, the flip reveals it with no "to" texture and nothing pops when the
+## overlay hides.
+func _flip_to_page(page_index: int) -> bool:
 	var from_texture := await _take_snapshot()
+	if not is_inside_tree():
+		return false
 	_flip.prepare(from_texture)
 	await get_tree().process_frame
 
-	_apply_current_page()
+	GameState.set_page_index(page_index)
+	var loaded := _apply_current_page()
 	await get_tree().process_frame
 	await RenderingServer.frame_post_draw
 
 	_flip.play_to(null, PageFlip.DEFAULT_DURATION)
 	await _flip.flip_finished
+	return loaded
 
 
 ## A texture of exactly what is on screen right now.

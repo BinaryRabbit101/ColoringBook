@@ -56,10 +56,13 @@ const MODE_ADULT := "adult"
 ## Read by M4's coverage tracker -- exported here so the value is authored data,
 ## never a constant in code.
 ##
-## Shipped values: child [b]0.70[/b] (generous -- a scribble that mostly fills the
-## region finishes it), adult [b]0.92[/b] (strict -- near-complete fill required).
-## Must be in (0, 1]; child must be lower than adult.
-@export_range(0.05, 1.0, 0.01) var completion_threshold: float = 0.7
+## Shipped values (BL-5 tightened both): child [b]0.90[/b] (forgiving -- the
+## player may leave a fringe of paper, but not a patch of it), adult [b]0.96[/b]
+## (strict -- near-complete fill required). Must be in (0, 1]; child must be lower
+## than adult, and both must clear
+## [constant CoverageTracker.MIN_REGION_THRESHOLD], which the tracker clamps
+## against so no authored value can make a blank-looking page "complete".
+@export_range(0.05, 1.0, 0.01) var completion_threshold: float = 0.9
 
 
 # ==================================================================== lookups ==
@@ -161,6 +164,13 @@ func validate() -> PackedStringArray:
 		problems.append("default_brush_hardness (%.2f) is outside [0, 1]" % default_brush_hardness)
 	if completion_threshold <= 0.0 or completion_threshold > 1.0:
 		problems.append("completion_threshold (%.2f) is outside (0, 1]" % completion_threshold)
+	elif completion_threshold < CoverageTracker.MIN_REGION_THRESHOLD:
+		# The tracker would clamp it anyway; say so here rather than let a palette
+		# claim a bar the game will not honour (BL-5).
+		problems.append(
+			"completion_threshold (%.2f) is below the %.2f floor the coverage tracker enforces"
+			% [completion_threshold, CoverageTracker.MIN_REGION_THRESHOLD]
+		)
 	if shades_per_family > 1 and colors.size() % shades_per_family != 0:
 		problems.append(
 			"shades_per_family %d does not divide %d colours" % [shades_per_family, colors.size()]

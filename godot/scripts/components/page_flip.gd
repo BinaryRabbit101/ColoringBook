@@ -6,12 +6,26 @@ extends Control
 ## texture and animates between them. It knows nothing about books, pages or the
 ## coloring screen -- the parent snapshots whatever it wants turned away.
 ##
-## [b]The look[/b]: the "from" frame becomes a leaf hinged at the LEFT edge of
-## the screen (the spine). The leaf's horizontal scale collapses toward the spine
-## while it rotates a few degrees and darkens, with a bright curl highlight riding
-## its leading edge and a shadow falling on the page underneath -- the read of a
-## paper page being lifted and turned. Pure transform + modulate tweens: no
-## shader, no render targets, cheap enough for the mobile pass.
+## [b]The look (BL-4)[/b]: a real page turn, done in one fragment shader
+## ([code]page_curl.gdshader[/code], which carries the geometry in its header).
+## The sheet is grabbed at its free edge and peeled toward the spine along a
+## LEANING fold line: a lit crease rolls across the page, the paper folds back
+## over itself showing its reverse with the printed side faintly bleeding through,
+## and a soft shadow travels ahead of the fold onto whatever is revealed
+## underneath. M4-M6 shipped a scale/rotate/darken fake of this; it read as a
+## slide, which is what BL-4 was raised about.
+##
+## [b]Why a shader and not a mesh[/b]: one full-screen quad, two texture fetches
+## at worst, no render target and no second pass -- the same cost as the old
+## TextureRect stack it replaces, and it works identically on the Mobile renderer
+## and in the web export. The only animated value is
+## [code]progress[/code] (0 -> 1), eased, so the whole transition is one tween on
+## one shader parameter.
+##
+## [b]Pixel-exact hand-off[/b]: at [code]progress == 0[/code] the shader is a
+## straight pass-through of the "from" texture, which is what lets
+## [method prepare] cover the live screen without a visible seam, and lets
+## [method play_to] reveal the real page underneath with no "to" texture at all.
 ##
 ## [b]Input[/b]: while playing, the component swallows pointer input so a stray
 ## finger cannot start a stroke on the half-revealed page. It stops swallowing the
@@ -28,25 +42,13 @@ signal flip_started()
 ## Default flip duration in seconds -- long enough to read as a page turn, short
 ## enough that a child colouring twelve pages never waits on it.
 const DEFAULT_DURATION := 0.8
-## Where the leaf ends up: not quite zero width, so the last frame still shows a
-## sliver of paper at the spine instead of popping out of existence.
-const END_SCALE_X := 0.015
-## Radians the leaf rotates about the spine as it turns.
-const END_ROTATION := -0.13
-## Leaf vertical scale at the end -- a page lifts slightly as it turns.
-const END_SCALE_Y := 1.04
-## Peak opacity of the shading laid over the turning leaf.
-const LEAF_SHADE_ALPHA := 0.42
-## Peak opacity of the shadow the leaf casts on the page underneath.
-const DROP_SHADOW_ALPHA := 0.30
+## Shader parameter the whole transition rides on.
+const PROGRESS_PARAM := "progress"
 
 @onready var _backdrop: TextureRect = $Backdrop
-@onready var _drop_shadow: TextureRect = $DropShadow
-@onready var _leaf: Control = $Leaf
-@onready var _leaf_texture: TextureRect = $Leaf/From
-@onready var _leaf_shade: ColorRect = $Leaf/Shade
-@onready var _curl: TextureRect = $Leaf/Curl
+@onready var _leaf: TextureRect = $Leaf
 
+var _material: ShaderMaterial
 var _tween: Tween
 var _playing := false
 
@@ -55,7 +57,9 @@ func _ready() -> void:
 	visible = false
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	set_process_input(false)
-	resized.connect(_layout_leaf)
+	_material = _leaf.material as ShaderMaterial
+	if _material == null:
+		push_error("PageFlip: the Leaf node is missing its page_curl ShaderMaterial.")
 	_reset_leaf()
 
 
@@ -67,7 +71,7 @@ func _ready() -> void:
 ## so the new page is never visible before the flip starts.
 func prepare(from_texture: Texture2D) -> void:
 	_kill_tween()
-	_leaf_texture.texture = from_texture
+	_leaf.texture = from_texture
 	_backdrop.texture = null
 	_reset_leaf()
 	visible = true
@@ -115,25 +119,27 @@ func get_duration() -> float:
 	return DEFAULT_DURATION
 
 
+## How far through the turn the sheet is, 0 (flat) .. 1 (gone). Tests read it;
+## the game does not.
+func get_progress() -> float:
+	if _material == null:
+		return 0.0
+	return float(_material.get_shader_parameter(PROGRESS_PARAM))
+
+
 # =================================================================== internal ==
 
+## One tween on one parameter. CUBIC/IN_OUT because a turned page starts slowly
+## (the paper has to be lifted), whips through the middle and settles rather than
+## stopping dead -- SINE, which the old transform version used, is too even to
+## read as a hand doing it.
 func _start_tween(duration: float) -> void:
-	_layout_leaf()
 	_playing = true
 	flip_started.emit()
 
 	_tween = create_tween()
-	_tween.set_parallel(true)
-	_tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	_tween.tween_property(_leaf, "scale:x", END_SCALE_X, duration)
-	_tween.tween_property(_leaf, "scale:y", END_SCALE_Y, duration)
-	_tween.tween_property(_leaf, "rotation", END_ROTATION, duration)
-	# Shading ramps in over the first two thirds and holds: the leaf is darkest
-	# when it is edge-on to the reader.
-	_tween.tween_property(_leaf_shade, "color:a", LEAF_SHADE_ALPHA, duration * 0.66)
-	_tween.tween_property(_curl, "modulate:a", 1.0, duration * 0.35)
-	_tween.tween_property(_drop_shadow, "modulate:a", DROP_SHADOW_ALPHA, duration * 0.5)
-	_tween.chain().tween_property(_drop_shadow, "modulate:a", 0.0, duration * 0.35)
+	_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	_tween.tween_method(_set_progress, 0.0, 1.0, duration)
 	_tween.finished.connect(_on_tween_finished)
 
 
@@ -158,23 +164,14 @@ func _kill_tween() -> void:
 
 
 func _reset_leaf() -> void:
-	if not is_instance_valid(_leaf):
-		return
-	_layout_leaf()
-	_leaf.scale = Vector2.ONE
-	_leaf.rotation = 0.0
-	_leaf_shade.color.a = 0.0
-	_curl.modulate.a = 0.0
-	_drop_shadow.modulate.a = 0.0
-	_backdrop.visible = false
+	_set_progress(0.0)
+	if is_instance_valid(_backdrop):
+		_backdrop.visible = false
 
 
-## The leaf is hinged at the middle of the LEFT edge -- the spine of the book.
-## Its rect comes from its full-rect anchors; only the pivot needs maintaining.
-func _layout_leaf() -> void:
-	if not is_instance_valid(_leaf):
-		return
-	_leaf.pivot_offset = Vector2(0.0, _leaf.size.y * 0.5)
+func _set_progress(value: float) -> void:
+	if _material != null:
+		_material.set_shader_parameter(PROGRESS_PARAM, value)
 
 
 # While playing, no pointer event reaches anything -- not the GUI, not

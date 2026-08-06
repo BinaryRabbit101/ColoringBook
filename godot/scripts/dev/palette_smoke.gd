@@ -11,8 +11,9 @@ extends Control
 ##   --shot <path>   save a PNG of the viewport to <path> before quitting
 ##
 ## Every pick goes through the same entry points the touch path uses: a real
-## BaseButton `pressed` emission, or the `select_color` / `select_brush_size`
-## handlers those presses call. Exit code is 0 only if every check passes.
+## BaseButton `pressed` emission, a `BrushSizeSlider.pick_at_local_x()` at a real
+## stop position, or the `select_color` / `select_brush_size` handlers those call.
+## Exit code is 0 only if every check passes.
 
 const CHILD_PALETTE := "res://resources/palettes/child_palette.tres"
 const ADULT_PALETTE := "res://resources/palettes/adult_palette.tres"
@@ -172,7 +173,7 @@ func _check_components_built() -> void:
 	for control in crayons:
 		all_crayons = all_crayons and control is CrayonButton
 	_expect(all_crayons, "every child control is a CrayonButton")
-	_expect(_child_palette.get_brush_size_buttons().is_empty(),
+	_expect(_child_palette.get_brush_size_controls().is_empty(),
 		"child exposes no size control (one forgiving brush)")
 
 	var swatches := _adult_palette.get_color_buttons()
@@ -181,13 +182,19 @@ func _check_components_built() -> void:
 	_expect(_adult_palette.get_family_column_count() == ADULT_FAMILY_COUNT,
 		"adult grid has %d shade-family columns (%d)"
 		% [ADULT_FAMILY_COUNT, _adult_palette.get_family_column_count()])
-	var dots := _adult_palette.get_brush_size_buttons()
-	_expect(dots.size() == ADULT_BRUSH_SIZE_COUNT,
-		"adult renders %d brush-size dots (%d)" % [ADULT_BRUSH_SIZE_COUNT, dots.size()])
-	var dots_grow := true
-	for i in range(1, dots.size()):
-		dots_grow = dots_grow and (dots[i] as BrushSizeDot).drawn_radius() > (dots[i - 1] as BrushSizeDot).drawn_radius()
-	_expect(dots_grow, "size dots are drawn at increasing diameters")
+	var slider := _adult_palette.get_brush_size_slider()
+	_expect(slider != null and slider.stop_count() == ADULT_BRUSH_SIZE_COUNT,
+		"adult renders one brush-size slider with %d stops (%d)"
+		% [ADULT_BRUSH_SIZE_COUNT, slider.stop_count() if slider else -1])
+	var stops_grow := slider != null
+	for i in range(1, slider.stop_count() if slider else 0):
+		stops_grow = (
+			stops_grow
+			and is_equal_approx(slider.get_size_at(i), _adult_def.get_brush_size(i))
+			and slider.knob_radius_for_index(i) > slider.knob_radius_for_index(i - 1)
+			and slider.local_x_for_index(i) > slider.local_x_for_index(i - 1)
+		)
+	_expect(stops_grow, "slider stops are the def's diameters, drawn larger left to right")
 
 	var swatch_colors_match := true
 	for i in swatches.size():
@@ -221,7 +228,7 @@ func _measure_targets(label: String) -> void:
 		% [label, PaletteChild.MIN_TOUCH_TARGET, child_min])
 
 	var adult_controls := _adult_palette.get_color_buttons()
-	adult_controls.append_array(_adult_palette.get_brush_size_buttons())
+	adult_controls.append_array(_adult_palette.get_brush_size_controls())
 	var adult_min := _smallest_target(adult_controls)
 	_expect(adult_min >= PaletteAdult.MIN_TOUCH_TARGET,
 		"[%s] every swatch/size-dot target >= %.0f px (smallest %.1f px)"
@@ -249,11 +256,12 @@ func _check_auto_selection() -> void:
 	_expect(_adult_sizes.size() == 1 and is_equal_approx(_adult_sizes[0], _adult_def.default_brush_size),
 		"adult auto-picked its default brush size %.0f px (%s)"
 		% [_adult_def.default_brush_size, _adult_sizes])
-	var selected_dot_index := _adult_def.get_default_brush_size_index()
-	var dots := _adult_palette.get_brush_size_buttons()
+	var default_size_index := _adult_def.get_default_brush_size_index()
+	var slider := _adult_palette.get_brush_size_slider()
 	_expect(
-		selected_dot_index < dots.size() and (dots[selected_dot_index] as BrushSizeDot).selected,
-		"the default size dot is the one shown selected (index %d)" % selected_dot_index
+		slider != null and slider.get_selected_index() == default_size_index,
+		"the slider knob sits on the default size stop (index %d, knob at %d)"
+		% [default_size_index, slider.get_selected_index() if slider else -1]
 	)
 
 
@@ -284,15 +292,18 @@ func _check_simulated_picks() -> void:
 	_expect(got_adult == expected_adult,
 		"adult swatch presses emitted the def's colours in order (%s)" % [_hex_list(got_adult)])
 
-	var dots := _adult_palette.get_brush_size_buttons()
+	# The slider's own pick entry point, driven at each stop's real x position --
+	# exactly what a finger sliding along the bar produces.
+	var slider := _adult_palette.get_brush_size_slider()
 	var expected_sizes: Array[float] = []
-	for index in dots.size():
+	for index in slider.stop_count():
 		expected_sizes.append(_adult_def.get_brush_size(index))
-		(dots[index] as BrushSizeDot).pressed.emit()
+		slider.pick_at_local_x(slider.local_x_for_index(index))
 	var got_sizes := _adult_sizes.slice(1)
 	_expect(got_sizes == expected_sizes,
-		"adult size-dot presses emitted the def's diameters (%s, expected %s)" % [got_sizes, expected_sizes])
-	_expect(is_equal_approx(_adult_palette.get_selected_brush_size(), _adult_def.get_brush_size(dots.size() - 1)),
+		"sliding across the brush-size bar emitted the def's diameters (%s, expected %s)"
+		% [got_sizes, expected_sizes])
+	_expect(is_equal_approx(_adult_palette.get_selected_brush_size(), _adult_def.get_brush_size(slider.stop_count() - 1)),
 		"adult reports the last picked brush size (%.0f px)" % _adult_palette.get_selected_brush_size())
 
 

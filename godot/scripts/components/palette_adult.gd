@@ -7,12 +7,20 @@ extends Control
 ## the full list; the coloring screen can swap the two without knowing which it
 ## holds. Differences: many more colours, laid out one column per shade family
 ## (light at the top, dark at the bottom, driven by
-## [member PaletteDef.shades_per_family]), and a working brush-size row whose
-## dots are drawn at diameters proportional to the sizes they select.
+## [member PaletteDef.shades_per_family]), and a working brush-size control.
 ##
 ## [method set_palette] auto-selects the palette's default brush size and the
 ## first colour, emitting [signal brush_size_picked] then [signal color_picked]
 ## once each.
+##
+## [b]Slide-to-select[/b] (BACKLOG BL-2): a swatch is picked as the finger lands
+## on it and the selection then follows the finger across the grid, via the
+## [PaletteSlideInput] both palettes share.
+##
+## [b]Brush size[/b] (BACKLOG BL-3): one [BrushSizeSlider] whose stops are the
+## palette's authored diameters, replacing the row of dot buttons. It reports an
+## index, which goes through [method select_brush_size] like every other pick, so
+## nothing downstream changed.
 
 ## The player picked a colour. Also emitted once by [method set_palette].
 signal color_picked(color: Color)
@@ -25,13 +33,16 @@ const MIN_TOUCH_TARGET := SwatchButton.MIN_TOUCH_TARGET
 
 var _palette: PaletteDef
 var _swatches: Array[SwatchButton] = []
-var _dots: Array[BrushSizeDot] = []
+var _slider: BrushSizeSlider
 var _selected_index := -1
 var _selected_size_index := -1
 var _selected_size := 0.0
 
 var _grid: HBoxContainer
+var _scroll: ScrollContainer
 var _size_row: HBoxContainer
+## Drag half of slide-to-select; the swatches themselves make the first pick.
+var _slide := PaletteSlideInput.new()
 
 
 func _ready() -> void:
@@ -39,10 +50,23 @@ func _ready() -> void:
 
 
 func _resolve_nodes() -> void:
+	if _scroll == null:
+		_scroll = get_node("Margin/Body/Scroll") as ScrollContainer
 	if _grid == null:
 		_grid = get_node("Margin/Body/Scroll/SwatchGrid") as HBoxContainer
 	if _size_row == null:
 		_size_row = get_node("Margin/Body/SizeRow") as HBoxContainer
+	# The swatch scroller only: a gesture that starts on the brush-size slider
+	# belongs to the slider.
+	_slide.configure(self, _scroll)
+
+
+## Slide-to-select runs BEFORE the GUI phase, like [PageView]'s painting, so one
+## touch code path serves mouse and finger alike. Claimed drags are marked handled
+## so the swatch grid cannot drag-scroll under the finger mid-slide.
+func _input(event: InputEvent) -> void:
+	if _slide.handle_input(event):
+		get_viewport().set_input_as_handled()
 
 
 # ================================================== shared palette contract ==
@@ -76,15 +100,15 @@ func select_color(index: int) -> void:
 
 
 ## Selects brush size [param index] (clamped) and emits [signal brush_size_picked].
-## A size-dot press calls exactly this.
+## Moving the slider calls exactly this.
 func select_brush_size(index: int) -> void:
 	if _palette == null:
 		return
 	var count := maxi(_palette.brush_size_count(), 1)
 	_selected_size_index = clampi(index, 0, count - 1)
 	_selected_size = _palette.get_brush_size(_selected_size_index)
-	for dot in _dots:
-		dot.selected = dot.size_index == _selected_size_index
+	if is_instance_valid(_slider):
+		_slider.set_selected_index(_selected_size_index)
 	brush_size_picked.emit(_selected_size)
 
 
@@ -118,12 +142,18 @@ func get_color_buttons() -> Array[Control]:
 	return buttons
 
 
-## The brush-size dots, smallest first.
-func get_brush_size_buttons() -> Array[Control]:
-	var buttons: Array[Control] = []
-	for dot in _dots:
-		buttons.append(dot)
-	return buttons
+## The brush-size control, as a one-entry list (the shared contract is a list
+## because child mode has none). See [method get_brush_size_slider].
+func get_brush_size_controls() -> Array[Control]:
+	var controls: Array[Control] = []
+	if is_instance_valid(_slider):
+		controls.append(_slider)
+	return controls
+
+
+## The brush-size slider itself, or null before [method set_palette]. Adult-only.
+func get_brush_size_slider() -> BrushSizeSlider:
+	return _slider
 
 
 ## Number of shade-family columns currently drawn.
@@ -150,46 +180,40 @@ func _build_grid(def: PaletteDef) -> void:
 			swatch.color_index = index
 			swatch.swatch_color = def.get_color(index)
 			swatch.tooltip_text = "#" + def.get_color(index).to_html(false)
+			# Slide-to-select: the pick happens as the finger LANDS, not when it
+			# lifts, so the selection can then follow it (see PaletteSlideInput).
+			swatch.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
 			swatch.pressed.connect(_on_swatch_pressed.bind(index))
 			column.add_child(swatch)
 			_swatches.append(swatch)
 			index += 1
 
+	_slide.set_targets(get_color_buttons(), select_color)
+
 
 func _build_size_row(def: PaletteDef) -> void:
-	var count := def.brush_size_count()
-	if count <= 0:
+	if def.brush_size_count() <= 0:
 		return
-	var largest := def.get_brush_size(count - 1)
-	var smallest := def.get_brush_size(0)
-	for i in count:
-		var dot := BrushSizeDot.new()
-		dot.name = "Size%d" % i
-		dot.size_index = i
-		dot.brush_size = def.get_brush_size(i)
-		# Ratio across the palette's own range, so three close sizes still read
-		# as three visibly different dots.
-		dot.size_ratio = (
-			0.0 if largest <= smallest
-			else (def.get_brush_size(i) - smallest) / (largest - smallest)
-		)
-		dot.tooltip_text = "%d px brush" % int(round(def.get_brush_size(i)))
-		dot.pressed.connect(_on_dot_pressed.bind(i))
-		_size_row.add_child(dot)
-		_dots.append(dot)
+	_slider = BrushSizeSlider.new()
+	_slider.name = "SizeSlider"
+	_slider.set_sizes(def.brush_sizes)
+	_slider.tooltip_text = "Brush size: %d-%d px" % [
+		int(round(def.get_brush_size(0))),
+		int(round(def.get_brush_size(def.brush_size_count() - 1))),
+	]
+	_slider.size_selected.connect(select_brush_size)
+	_size_row.add_child(_slider)
 
 
 func _on_swatch_pressed(index: int) -> void:
 	select_color(index)
 
 
-func _on_dot_pressed(index: int) -> void:
-	select_brush_size(index)
-
-
 func _clear() -> void:
 	_swatches.clear()
-	_dots.clear()
+	_slider = null
+	var no_targets: Array[Control] = []
+	_slide.set_targets(no_targets, Callable())
 	for container in [_grid, _size_row]:
 		if container == null:
 			continue

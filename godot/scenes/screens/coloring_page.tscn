@@ -1,4 +1,4 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=12 format=3]
 
 [ext_resource type="Script" path="res://scripts/screens/coloring_page.gd" id="1_coloring_page"]
 [ext_resource type="PackedScene" path="res://scenes/components/page_view.tscn" id="2_page_view"]
@@ -22,6 +22,49 @@ corner_radius_top_left = 12
 corner_radius_top_right = 12
 corner_radius_bottom_right = 12
 corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_save"]
+bg_color = Color(0.223529, 0.427451, 0.309804, 1)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_scrim"]
+bg_color = Color(0.0392157, 0.0313726, 0.027451, 0.65)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
+bg_color = Color(0.184314, 0.164706, 0.152941, 1)
+border_width_left = 3
+border_width_top = 3
+border_width_right = 3
+border_width_bottom = 3
+border_color = Color(0.415686, 0.360784, 0.301961, 1)
+corner_radius_top_left = 20
+corner_radius_top_right = 20
+corner_radius_bottom_right = 20
+corner_radius_bottom_left = 20
+shadow_color = Color(0, 0, 0, 0.470588)
+shadow_size = 24
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_danger"]
+bg_color = Color(0.588235, 0.180392, 0.156863, 1)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_toast"]
+bg_color = Color(0.121569, 0.196078, 0.152941, 0.882353)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.376471, 0.639216, 0.470588, 1)
+corner_radius_top_left = 14
+corner_radius_top_right = 14
+corner_radius_bottom_right = 14
+corner_radius_bottom_left = 14
 
 [node name="ColoringPage" type="Control"]
 anchors_preset = 15
@@ -72,6 +115,34 @@ theme_override_styles/normal = SubResource("StyleBoxFlat_back")
 theme_override_styles/hover = SubResource("StyleBoxFlat_back")
 theme_override_styles/pressed = SubResource("StyleBoxFlat_back")
 text = "< Books"
+
+[node name="SaveButton" type="Button" parent="Ui/Toolbar/Row"]
+custom_minimum_size = Vector2(120, 56)
+layout_mode = 2
+size_flags_vertical = 4
+focus_mode = 0
+theme_override_colors/font_color = Color(0.898039, 0.968627, 0.913725, 1)
+theme_override_font_sizes/font_size = 24
+theme_override_styles/normal = SubResource("StyleBoxFlat_save")
+theme_override_styles/hover = SubResource("StyleBoxFlat_save")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_save")
+theme_override_styles/disabled = SubResource("StyleBoxFlat_nav_off")
+text = "Save"
+tooltip_text = "Save this page now"
+
+[node name="ResetButton" type="Button" parent="Ui/Toolbar/Row"]
+custom_minimum_size = Vector2(148, 56)
+layout_mode = 2
+size_flags_vertical = 4
+focus_mode = 0
+theme_override_colors/font_color = Color(0.972549, 0.847059, 0.827451, 1)
+theme_override_font_sizes/font_size = 24
+theme_override_styles/normal = SubResource("StyleBoxFlat_danger")
+theme_override_styles/hover = SubResource("StyleBoxFlat_danger")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_danger")
+theme_override_styles/disabled = SubResource("StyleBoxFlat_nav_off")
+text = "Start over"
+tooltip_text = "Clear this page and start it again"
 
 [node name="PageTitle" type="Label" parent="Ui/Toolbar/Row"]
 layout_mode = 2
@@ -130,7 +201,7 @@ layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3
 
-[node name="Celebration" type="Label" parent="."]
+[node name="Celebration" type="Control" parent="."]
 modulate = Color(1, 1, 1, 0)
 layout_mode = 1
 anchors_preset = 15
@@ -138,6 +209,24 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
+mouse_filter = 2
+
+[node name="Center" type="CenterContainer" parent="Celebration"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="Column" type="VBoxContainer" parent="Celebration/Center"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 10
+
+[node name="Title" type="Label" parent="Celebration/Center/Column"]
+layout_mode = 2
 mouse_filter = 2
 theme_override_colors/font_color = Color(1, 0.905882, 0.556863, 1)
 theme_override_colors/font_outline_color = Color(0.117647, 0.0862745, 0.054902, 1)
@@ -147,5 +236,131 @@ text = "Page complete!"
 horizontal_alignment = 1
 vertical_alignment = 1
 
+[node name="Hint" type="Label" parent="Celebration/Center/Column"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.976471, 0.960784, 0.933333, 1)
+theme_override_colors/font_outline_color = Color(0.117647, 0.0862745, 0.054902, 1)
+theme_override_constants/outline_size = 10
+theme_override_font_sizes/font_size = 30
+text = "Tap › when you want the next page"
+horizontal_alignment = 1
+vertical_alignment = 1
+
 [node name="PageFlip" parent="." instance=ExtResource("3_page_flip")]
 layout_mode = 1
+
+[node name="Toast" type="PanelContainer" parent="."]
+modulate = Color(1, 1, 1, 0)
+layout_mode = 1
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -150.0
+offset_top = 92.0
+offset_right = 150.0
+offset_bottom = 156.0
+grow_horizontal = 2
+grow_vertical = 1
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_toast")
+
+[node name="Label" type="Label" parent="Toast"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.847059, 0.968627, 0.878431, 1)
+theme_override_font_sizes/font_size = 28
+text = "Saved!"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="ResetConfirm" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Scrim" type="Button" parent="ResetConfirm"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+focus_mode = 0
+theme_override_styles/normal = SubResource("StyleBoxFlat_scrim")
+theme_override_styles/hover = SubResource("StyleBoxFlat_scrim")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_scrim")
+theme_override_styles/focus = SubResource("StyleBoxFlat_scrim")
+
+[node name="Center" type="CenterContainer" parent="ResetConfirm"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="Panel" type="PanelContainer" parent="ResetConfirm/Center"]
+custom_minimum_size = Vector2(620, 0)
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
+
+[node name="Margin" type="MarginContainer" parent="ResetConfirm/Center/Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 30
+theme_override_constants/margin_top = 26
+theme_override_constants/margin_right = 30
+theme_override_constants/margin_bottom = 26
+
+[node name="Column" type="VBoxContainer" parent="ResetConfirm/Center/Panel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 18
+
+[node name="Header" type="Label" parent="ResetConfirm/Center/Panel/Margin/Column"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.972549, 0.803922, 0.478431, 1)
+theme_override_font_sizes/font_size = 36
+text = "Start this page over?"
+horizontal_alignment = 1
+
+[node name="Question" type="Label" parent="ResetConfirm/Center/Panel/Margin/Column"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.937255, 0.788235, 0.756863, 1)
+theme_override_font_sizes/font_size = 22
+text = "All the colour on THIS page goes away. Your other pages are safe."
+horizontal_alignment = 1
+autowrap_mode = 3
+
+[node name="Row" type="HBoxContainer" parent="ResetConfirm/Center/Panel/Margin/Column"]
+layout_mode = 2
+theme_override_constants/separation = 16
+alignment = 1
+
+[node name="ConfirmButton" type="Button" parent="ResetConfirm/Center/Panel/Margin/Column/Row"]
+custom_minimum_size = Vector2(250, 64)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.988235, 0.909804, 0.898039, 1)
+theme_override_font_sizes/font_size = 24
+theme_override_styles/normal = SubResource("StyleBoxFlat_danger")
+theme_override_styles/hover = SubResource("StyleBoxFlat_danger")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_danger")
+text = "Yes, start over"
+
+[node name="CancelButton" type="Button" parent="ResetConfirm/Center/Panel/Margin/Column/Row"]
+custom_minimum_size = Vector2(250, 64)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.972549, 0.94902, 0.905882, 1)
+theme_override_font_sizes/font_size = 24
+theme_override_styles/normal = SubResource("StyleBoxFlat_back")
+theme_override_styles/hover = SubResource("StyleBoxFlat_back")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_back")
+text = "Keep colouring"

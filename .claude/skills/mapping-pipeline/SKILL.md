@@ -17,7 +17,26 @@ Full spec: [docs/DESIGN.md](../../../docs/DESIGN.md) §3.1 & §4. The tool lives
 
 Outputs next to the source image: `page_01_idmap.png` + `page_01_regions.json`.
 
-Optional per-run overrides (M6) after the source path — `--line-alpha-min`, `--line-luminance-max`,
+### Display image vs masking image (BL-9)
+
+Every page has a **display image** (the art the player sees) and an **optional masking image** (line
+art that only decides where paint may go, never rendered). The positional argument is always the
+**mapping source**; when that is a mask, name the page's display art with `--display`:
+
+```
+  --script tools/generate_region_map.gd -- assets/books/coyote/source/coyote_outline_source.png \
+      --display assets/books/coyote/page_01.png
+```
+
+The artifacts are then written next to the **display** image (`page_01_idmap.png`,
+`page_01_regions.json`) because that is the page they belong to, and the mask is resampled to the
+display image's dimensions when they differ — the artist's mask is print-resolution while the
+shipped page fits the 2048 px budget, and an ID map that isn't pixel-for-pixel the display image is
+unusable. A mismatched **aspect** hard-fails instead (that is not the same drawing twice). The mask
+is never shipped and never loaded at runtime; `PageDef.mask_image_path` records it purely as the
+mapping source, so it may sit in the `.gdignore`d `source/` folder.
+
+Optional per-run overrides (M6) after the source path — `--display`, `--line-alpha-min`, `--line-luminance-max`,
 `--dilate`, `--min-area`, `--rdp`, `--giant-fraction`. The defaults are still the constants at the
 top of the script; the values actually used are printed in the run summary, so a page's mapping is
 always reproducible from its log. Prefer a flag over editing a constant: constants are shared by
@@ -37,6 +56,7 @@ every page in the project.
 {
   "version": 1,
   "source_image": "page_01.png",
+  "mask_image": "coyote_outline_source.png",
   "image_size": [w, h],
   "regions": [
     { "id": 3, "id_color": "#000003",
@@ -46,14 +66,17 @@ every page in the project.
 }
 ```
 
+`source_image` is the display page the artifacts belong to; `mask_image` appears only when a separate
+masking image was traced (BL-9), so a page's mapping stays reproducible from the JSON alone.
 Coordinates are image pixel space; `outline`/`holes` vertices are pixel-corner (marching-squares) coordinates while `centroid` is a pixel index, snapped to a pixel the region owns (`CENTROID_SNAP_TO_REGION`) so it's usable as a tap-hint even when the strict mean lands in a hole. `area_px` counts ID-map pixels (post-dilation). Consumers: hit-testing uses the **ID map**, not these polygons; polygons serve debug overlay, centroids/areas, coverage sample grids (see `coloring-mechanics`).
 
 ## Invariants & gotchas
 
-- ID map and base image must be **identical dimensions**; anti-aliased line edges belong to the **line** (unpaintable), never to a region — a 1-px halo of `#000000` around lines is correct and prevents edge bleed.
+- ID map and **display** image must be **identical dimensions**; anti-aliased line edges belong to the **line** (unpaintable), never to a region — a 1-px halo of `#000000` around lines is correct and prevents edge bleed.
 - The `_idmap.png` **import settings** must stay lossless: `compress/mode=0`, `mipmaps/generate=false`, `detect_3d/compress_to=0` (the default `1` silently VRAM-compresses on 3D detection), `process/fix_alpha_border=false`. Filtering is a per-usage sampler setting in Godot 4, not an import flag — set `TEXTURE_FILTER_NEAREST` where the ID map is sampled. If regions "bleed" at boundaries in-game, check the `.import` file first.
 - Generated files are build artifacts of the source PNG: **never hand-edit**; re-run the tool after any art change, and commit source + both outputs + `.import` together.
-- Adding a new page = drop the line-art PNG under `assets/books/<book>/`, run the tool, create/update the `PageDef` `.tres`, then verify with the in-game debug overlay (region tinting) before calling it done.
+- Adding a new page = drop the display PNG under `assets/books/<book>/` (plus its masking image under `source/`, if it has one), run the tool, create/update the `PageDef` `.tres` — `display_image_path` + optional `mask_image_path` + the two artifact paths — then verify with the in-game debug overlay (region tinting) before calling it done.
 - Keep thresholds/tolerances as script constants at the top of the file with comments — pages vary in line weight and will need tuning. Tune a single page with a CLI flag, not by editing the constant.
 - **Source art belongs to the artist**: keep the untouched original next to the page under `assets/books/<book>/source/` with an empty `.gdignore` in that folder (Godot skips it, the Android preset excludes it), and put the *shipped* page — snake_case, within the 2048 px budget — at `assets/books/<book>/page_NN.png`. Real art arrives with spaces in the filename and at print resolution; both are the pipeline's problem, not the artist's.
 - **What "it mapped" means for real art** (M6, the coyote book): a hand-drawn page maps to the regions the *artist actually closed*, which is usually far fewer than the shapes a human sees. Contour lines that stop in mid-air (fur ticks, a leg outline that fades into a ruff) enclose nothing, so the whole body comes back as one region. That is correct output, not a failure — the failure mode to watch for is the giant-region check firing, i.e. paint leaking *between* shapes through a gap. Check the ID map visually before believing either verdict.
+- **A mask is how the artist controls that** (BL-9): the coyote page's detail art is full of fur ticks and inner contours, but its regions come from a plain silhouette mask — coyote + paper, 2 regions. The player colours the whole animal in one sweep with every detail line still drawn on top. Reach for a mask whenever the visible art's line work is decoration rather than a colouring boundary.

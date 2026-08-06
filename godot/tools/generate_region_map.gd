@@ -9,9 +9,25 @@ extends SceneTree
 ##   <godot_exe> --headless --path <project> \
 ##       --script tools/generate_region_map.gd -- assets/books/<book>/page_01.png
 ##
+## The positional argument is the MAPPING SOURCE: the image whose lines decide
+## where paint may go. For a plain page that is the page art itself, and the
+## artifacts land next to it.
+##
+## Pages mapped from a separate masking image (BL-9) pass the mask as the source
+## and name the page's display art with --display:
+##   ... -- assets/books/coyote/source/coyote_outline_source.png \
+##          --display assets/books/coyote/page_01.png
+## The artifacts are then written next to the DISPLAY image (page_01_idmap.png,
+## page_01_regions.json), because that is the page they belong to, and the mask is
+## resized to the display image's dimensions when the two differ — the artist's
+## mask arrives at print resolution while the shipped page is inside the 2048 px
+## budget, and an ID map that does not match the display image pixel for pixel is
+## unusable. The mask itself is never shipped and never rendered.
+##
 ## Optional flags, after the source path (M6 — real art varies in line weight and
 ## the shipped defaults are not going to suit every page; overriding them per run
 ## beats editing constants and forgetting to put them back):
+##   --display <path>             page art the artifacts belong to (see above)
 ##   --line-alpha-min <0..1>      opacity floor for a pixel to count as ink
 ##   --line-luminance-max <0..1>  brightness ceiling for a pixel to count as ink
 ##   --dilate <px>                line-mask growth; 0 disables the halo
@@ -56,6 +72,9 @@ var LINE_DILATE_PX := DEFAULT_LINE_DILATE_PX
 var MIN_REGION_AREA_PX := DEFAULT_MIN_REGION_AREA_PX
 var RDP_TOLERANCE_PX := DEFAULT_RDP_TOLERANCE_PX
 var GIANT_REGION_FRACTION := DEFAULT_GIANT_REGION_FRACTION
+## --display: the page's visible art when the source above is a masking image.
+## Empty means "the source IS the page", which is the plain single-image case.
+var DISPLAY_IMAGE_PATH := ""
 ## Snap a centroid onto its own region when the area-weighted mean falls in a
 ## hole or outside a concave region. Consumers use centroids as "tap here"
 ## markers, so a centroid that is not inside its region is useless.
@@ -100,9 +119,19 @@ func _initialize() -> void:
 		return
 
 	image.convert(Image.FORMAT_RGBA8)
+	print("Source: %s (%dx%d)" % [source_path, image.get_width(), image.get_height()])
+
+	# With --display, the mapping source is a MASK and the artifacts belong to the
+	# page art instead: they are written next to it and must match its dimensions.
+	var page_path := source_path
+	if DISPLAY_IMAGE_PATH != "":
+		page_path = _to_res_path(DISPLAY_IMAGE_PATH)
+		if not _align_to_display(image, page_path):
+			quit(2)
+			return
+
 	_width = image.get_width()
 	_height = image.get_height()
-	print("Source: %s (%dx%d)" % [source_path, _width, _height])
 	print("Tunables: %s" % _tunable_summary())
 
 	_binarize(image.get_data())
@@ -121,7 +150,7 @@ func _initialize() -> void:
 		quit(1)
 		return
 
-	var base_path := source_path.get_basename()
+	var base_path := page_path.get_basename()
 	var idmap_path := base_path + "_idmap.png"
 	if not _write_idmap(idmap_path):
 		quit(1)
@@ -132,7 +161,8 @@ func _initialize() -> void:
 		_snap_centroids(regions)
 
 	var json_path := base_path + "_regions.json"
-	if not _write_regions_json(json_path, source_path.get_file(), regions):
+	var mask_file := source_path.get_file() if DISPLAY_IMAGE_PATH != "" else ""
+	if not _write_regions_json(json_path, page_path.get_file(), mask_file, regions):
 		quit(1)
 		return
 
@@ -155,6 +185,8 @@ func _apply_flags(args: PackedStringArray) -> bool:
 		var value := args[index + 1]
 		index += 2
 		match flag:
+			"--display":
+				DISPLAY_IMAGE_PATH = value
 			"--line-alpha-min":
 				LINE_ALPHA_MIN = clampf(value.to_float(), 0.0, 1.0)
 			"--line-luminance-max":
@@ -170,6 +202,39 @@ func _apply_flags(args: PackedStringArray) -> bool:
 			_:
 				printerr("FAIL: unknown flag '%s'. See the header of this script." % flag)
 				return false
+	return true
+
+
+## Makes the mask [param image] line up with the page art at [param page_path],
+## in place. Returns false (after printing why) when the page art cannot be read.
+##
+## Same size is the normal case and costs nothing. Different size means the mask
+## is the artist's print-resolution original and the page is the downscaled ship
+## version: resample the mask rather than making the artist do it, because the ID
+## map has to be pixel-for-pixel the size of the display image. Lanczos keeps thin
+## ink dark enough to survive binarization; the aspect ratio is checked so a mask
+## that is not the same drawing gets caught instead of being squashed.
+func _align_to_display(image: Image, page_path: String) -> bool:
+	var page_image := Image.load_from_file(page_path)
+	if page_image == null:
+		printerr("FAIL: --display image could not be loaded: %s" % page_path)
+		return false
+	var page_size := Vector2i(page_image.get_width(), page_image.get_height())
+	print("Display: %s (%dx%d) — artifacts are written next to it"
+		% [page_path, page_size.x, page_size.y])
+	if Vector2i(image.get_width(), image.get_height()) == page_size:
+		return true
+	var mask_aspect := float(image.get_width()) / float(image.get_height())
+	var page_aspect := float(page_size.x) / float(page_size.y)
+	if absf(mask_aspect - page_aspect) > 0.01:
+		printerr(("FAIL: mask aspect %.3f does not match display aspect %.3f. These are not "
+			+ "the same drawing at two resolutions; a squashed mask would map the wrong "
+			+ "pixels.") % [mask_aspect, page_aspect])
+		return false
+	print("   mask resized %dx%d -> %dx%d (lanczos) to match the display image"
+		% [image.get_width(), image.get_height(), page_size.x, page_size.y])
+	image.resize(page_size.x, page_size.y, Image.INTERPOLATE_LANCZOS)
+	image.convert(Image.FORMAT_RGBA8)
 	return true
 
 
@@ -573,13 +638,20 @@ func _snap_centroids(regions: Array[Dictionary]) -> void:
 
 # ------------------------------------------------------- JSON serialization --
 
+## [param source_file] is the page the artifacts belong to (the display image);
+## [param mask_file] is the masking image they were generated FROM, or "" when
+## the page was its own mapping source. "mask_image" is an additive, optional
+## schema-v1 field: consumers that predate it (PageView) ignore unknown keys, and
+## it is what makes a page's mapping reproducible from the JSON alone.
 func _write_regions_json(
-	path: String, source_file: String, regions: Array[Dictionary]
+	path: String, source_file: String, mask_file: String, regions: Array[Dictionary]
 ) -> bool:
 	var lines := PackedStringArray()
 	lines.append("{")
 	lines.append("\"version\": %d," % SCHEMA_VERSION)
 	lines.append("\"source_image\": %s," % JSON.stringify(source_file))
+	if mask_file != "":
+		lines.append("\"mask_image\": %s," % JSON.stringify(mask_file))
 	lines.append("\"image_size\": [%d, %d]," % [_width, _height])
 	lines.append("\"regions\": [")
 	var entries := PackedStringArray()

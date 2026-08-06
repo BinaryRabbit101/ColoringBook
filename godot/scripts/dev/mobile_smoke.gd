@@ -24,10 +24,13 @@ extends Control
 ##      readback is timed in the same run, under the same conditions, as the
 ##      before-number
 ##   c  the coyote book: discovery, validation, region counts, lossless ID-map
-##      import flags, and get_region_id_at() agreeing with every centroid
+##      import flags, and get_region_id_at() agreeing with every centroid --
+##      followed by (c2) BL-9's page model: ONE page whose visible art is the
+##      detail drawing and whose regions were traced from an optional, never-shipped
+##      masking image, with the test book guarding the no-mask case
 ##   d  page navigation rules: no skipping ahead, revisiting a reached page is
-##      allowed, completing a page unlocks the next one, and a jump saves first
-##      and does NOT play the flip
+##      allowed, completing a page unlocks the next one WITHOUT turning it (BL-4),
+##      and a jump BACK saves first and does not play the flip
 ##   e  portrait: the WINDOW is resized to PORTRAIT_WINDOW and the title screen,
 ##      mode select and coloring page are all checked and screenshotted through
 ##      the real stretch pipeline
@@ -40,16 +43,24 @@ extends Control
 
 const MAIN_SCENE := preload("res://scenes/main.tscn")
 const COLORING_PAGE_SCENE := preload("res://scenes/screens/coloring_page.tscn")
+const PAGE_VIEW_SCENE := preload("res://scenes/components/page_view.tscn")
 
 const TEST_BOOK_PATH := "res://resources/books/test_book/book.tres"
 const COYOTE_BOOK_PATH := "res://resources/books/coyote/book.tres"
 const COYOTE_IDMAP_IMPORTS: PackedStringArray = [
 	"res://assets/books/coyote/page_01_idmap.png.import",
-	"res://assets/books/coyote/page_02_idmap.png.import",
 ]
-## What the mapping pipeline produced for the coyote art (see the M6 report).
-## Page 1 is the silhouette: coyote + background. Page 2 is the detailed line art.
-const COYOTE_EXPECTED_REGIONS: PackedInt32Array = [2, 15]
+## What the mapping pipeline produced for the coyote art. ONE page (BL-9): the
+## artist's two images are the two halves of a single page -- the outline mask
+## (coyote + background = 2 regions) and the detail art the player actually sees.
+const COYOTE_EXPECTED_REGIONS: PackedInt32Array = [2]
+## The page's display art, and the masking image its regions were traced from.
+const COYOTE_DISPLAY_IMAGE := "res://assets/books/coyote/page_01.png"
+const COYOTE_MASK_IMAGE := "res://assets/books/coyote/source/coyote_outline_source.png"
+## Every Nth pixel of the alpha channel is compared by the stale-import guard.
+## 11 keeps ~335k samples out of a 3.7 Mpx page: instant, and no two drawings
+## agree on that many alpha samples by accident.
+const ALPHA_SAMPLE_STRIDE := 11
 
 ## Import flags the ID map must keep, or region ids bleed (DESIGN.md 3.2).
 const REQUIRED_IDMAP_IMPORT_FLAGS := {
@@ -121,7 +132,7 @@ func _run() -> void:
 
 	_check_renderer()
 	await _check_async_stall()
-	_check_coyote_book()
+	await _check_coyote_book()
 	await _check_page_navigation()
 	await _check_portrait()
 	await _check_safe_area()
@@ -311,13 +322,13 @@ func _check_coyote_book() -> void:
 			"page %d ('%s') mapped to %d regions (%d)"
 			% [i + 1, page.display_name, COYOTE_EXPECTED_REGIONS[i], regions.size()])
 
-		var base := load(page.base_image_path) as Texture2D
+		var base := load(page.display_image_path) as Texture2D
 		var idmap := load(page.id_map_path) as Texture2D
 		_expect(base != null and idmap != null, "page %d textures load" % (i + 1))
 		if base == null or idmap == null:
 			continue
 		_expect(base.get_size() == idmap.get_size(),
-			"page %d ID map matches the art size (%s)" % [i + 1, idmap.get_size()])
+			"page %d ID map matches the DISPLAY art size (%s)" % [i + 1, idmap.get_size()])
 		_expect(base.get_width() <= 2048 and base.get_height() <= 2048,
 			"page %d fits the 2048 px texture budget (%s)" % [i + 1, base.get_size()])
 		var idmap_image := idmap.get_image()
@@ -344,6 +355,120 @@ func _check_coyote_book() -> void:
 		_expect(strays.is_empty(),
 			"page %d: every centroid samples back to its own region id (%s)"
 			% [i + 1, "ok" if strays.is_empty() else ", ".join(strays)])
+
+	_check_display_mask_split()
+
+
+## BL-9's data model, on the one book that uses it: a page has a REQUIRED display
+## image and an OPTIONAL masking image. The mask drives the mapping pipeline and
+## is never rendered -- so it does not even have to be in the build.
+func _check_display_mask_split() -> void:
+	print("\n-- check c2: the display / optional-mask page model (BL-9) --")
+	var page := _coyote_book.get_page(0)
+	_expect(page.display_image_path == COYOTE_DISPLAY_IMAGE,
+		"the coyote page's display art is the DETAIL drawing (%s)" % page.display_image_path)
+	_expect(page.has_mask() and page.mask_image_path == COYOTE_MASK_IMAGE,
+		"...and it names the outline as its masking image (%s)" % page.mask_image_path)
+	_expect(page.get_mapping_source_path() == page.mask_image_path,
+		"the mapping source is the mask, not the display image")
+	_expect(FileAccess.file_exists(COYOTE_MASK_IMAGE),
+		"the mask is on the dev box, where the pipeline runs")
+	_expect(not ResourceLoader.exists(COYOTE_MASK_IMAGE),
+		"...but it is NOT imported as a game resource: nothing can render it")
+	_expect(page.validate().is_empty(),
+		"the page still validates with an unimported mask (%s)" % [page.validate()])
+
+	var json := page.load_regions_json()
+	_expect(String(json.get("source_image", "")) == COYOTE_DISPLAY_IMAGE.get_file(),
+		"the regions JSON belongs to the display page (%s)" % json.get("source_image"))
+	_expect(String(json.get("mask_image", "")) == COYOTE_MASK_IMAGE.get_file(),
+		"...and records the mask it was traced from (%s)" % json.get("mask_image"))
+	var display_texture := load(page.display_image_path) as Texture2D
+	var json_size: Array = json.get("image_size", [])
+	_expect(display_texture != null and json_size.size() == 2
+			and Vector2i(int(json_size[0]), int(json_size[1]))
+				== Vector2i(display_texture.get_size()),
+		"the mask was mapped at the DISPLAY image's resolution (%s)" % [json_size])
+
+	# The nastiest failure in this area is silent: change a page's art on disk, run
+	# the game OUTSIDE the editor, and Godot keeps serving the texture it imported
+	# last time -- every path assertion above still passes while the player looks at
+	# the old drawing. So compare the imported pixels with the PNG.
+	#
+	# ALPHA only, sampled. The page art is dark ink on transparency and its import
+	# leaves process/fix_alpha_border ON, which deliberately rewrites the RGB under
+	# transparent pixels -- ~4% of the bytes, by design (it is the ID map that must
+	# forbid that flag, not the art). Alpha is untouched by it and is what tells two
+	# different drawings apart. (Reading the source PNG logs "will not work on
+	# export": correct and expected, only this dev check ever opens it.)
+	var source_image := Image.load_from_file(page.display_image_path)
+	var imported: Image = display_texture.get_image() if display_texture != null else null
+	var shows_current_art := source_image != null and imported != null
+	if shows_current_art:
+		imported = _as_rgba8(imported)
+		source_image = _as_rgba8(source_image)
+		var fresh: PackedByteArray = imported.get_data()
+		var on_disk: PackedByteArray = source_image.get_data()
+		shows_current_art = fresh.size() == on_disk.size()
+		var index := 3
+		while shows_current_art and index < fresh.size():
+			shows_current_art = fresh[index] == on_disk[index]
+			index += 4 * ALPHA_SAMPLE_STRIDE
+	_expect(shows_current_art,
+		"the imported display texture IS the current page_01.png (stale-import guard)")
+
+	# The other half of the rule: a page with no mask maps itself, unchanged since
+	# M4. The test book is the regression guard for every book that never needs one.
+	for i in _test_book.page_count():
+		var plain := _test_book.get_page(i)
+		_expect(not plain.has_mask()
+				and plain.get_mapping_source_path() == plain.display_image_path
+				and plain.validate().is_empty(),
+			"test-book page %d has no mask and is its own mapping source" % (i + 1))
+
+	# And the runtime consequence, on the real art: the page the player sees is the
+	# detail drawing, while the clip comes from the mask-derived ID map. Painting
+	# inside the coyote's outline stays inside it even though the detail art draws
+	# extra lines across that same area.
+	var view := PAGE_VIEW_SCENE.instantiate() as PageView
+	_host.add_child(view)
+	view.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	view.size = Vector2(600.0, 600.0)
+	await get_tree().process_frame
+	var loaded := view.load_page(
+		page.display_image_path, page.id_map_path, page.regions_json_path
+	)
+	_expect(loaded, "PageView loads the page from the DISPLAY image + the mask's ID map")
+	if loaded:
+		_expect(display_texture != null and view.get_page_size() == Vector2i(display_texture.get_size()),
+			"the loaded page is the display image's size (%s)" % view.get_page_size())
+		# The smaller of the two regions is the coyote; the larger is the paper
+		# around it.
+		var body_id := 0
+		var body_centroid := Vector2.ZERO
+		var smallest_area := INF
+		for region_id in view.get_region_ids():
+			var data := view.get_region_data(region_id)
+			if float(data["area_px"]) < smallest_area:
+				smallest_area = float(data["area_px"])
+				body_id = region_id
+				body_centroid = data["centroid"]
+		_expect(view.begin_stroke(body_centroid),
+			"a press inside the coyote locks region %d" % body_id)
+		_expect(view.get_locked_region_id() == body_id,
+			"...and the stroke stays locked to it while it drags (%d)"
+			% view.get_locked_region_id())
+		view.end_stroke()
+	view.queue_free()
+
+
+## An RGBA8 copy of [param image], so two images can be compared byte-wise.
+static func _as_rgba8(image: Image) -> Image:
+	if image.get_format() == Image.FORMAT_RGBA8:
+		return image
+	var converted := image.duplicate() as Image
+	converted.convert(Image.FORMAT_RGBA8)
+	return converted
 
 
 func _check_import_flags(import_path: String, page_number: int) -> void:
@@ -392,19 +517,29 @@ func _check_page_navigation() -> void:
 	_expect(screen.get_page_label_text() == "1/2", "the page did not move ('%s')"
 		% screen.get_page_label_text())
 
-	# --- finishing page 1 unlocks page 2, and the FLIP takes us there ---------
+	# --- finishing page 1 unlocks page 2; the PLAYER takes the flip (BL-4) ----
 	var flips: Array[int] = []
 	screen.get_page_flip().flip_started.connect(func() -> void: flips.append(1))
 	var strokes := await _fill_page(screen)
 	print("   page 1 filled with %d strokes" % strokes)
+	var finished := await _wait_until(
+		func() -> bool:
+			return screen.get_coverage_tracker().is_page_complete() and not screen.is_transitioning(),
+		PAINT_TIMEOUT
+	)
+	_expect(finished, "page 1 completed ('%s')" % screen.get_page_label_text())
+	_expect(flips.is_empty(),
+		"...and did NOT turn itself: completion is not navigation (%d flip(s))" % flips.size())
+	_expect(not next.disabled, "...but it unlocked the next-page arrow")
+	next.pressed.emit()
 	var arrived := await _wait_until(
 		func() -> bool:
 			return screen.get_page_label_text() == "2/2" and not screen.is_transitioning(),
 		PAINT_TIMEOUT
 	)
-	_expect(arrived, "completing page 1 flipped to 2/2 ('%s')" % screen.get_page_label_text())
+	_expect(arrived, "the next-page arrow turned to 2/2 ('%s')" % screen.get_page_label_text())
 	await _wait_until(func() -> bool: return not screen.has_pending_restore(), NAV_TIMEOUT)
-	_expect(flips.size() == 1, "the completion flip played once (%d)" % flips.size())
+	_expect(flips.size() == 1, "the page turn played the flip once (%d)" % flips.size())
 
 	# --- now page 1 is reachable again ----------------------------------------
 	_expect(screen.furthest_reached_index() == 1, "the furthest page reached is index %d"

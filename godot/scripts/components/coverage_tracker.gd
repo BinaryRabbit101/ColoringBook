@@ -42,7 +42,7 @@ signal page_completed()
 ## Sample points per region we aim for, and the band the grid search must land
 ## in. 240 sits in the middle of the 100-400 band the design calls for:
 ##   * 240 points quantise coverage to ~0.4%, an order of magnitude finer than
-##     the gap between the child (0.70) and adult (0.92) thresholds;
+##     the gap between the child (0.90) and adult (0.96) thresholds;
 ##   * the whole page is then ~2000 point lookups per stroke end, two orders of
 ##     magnitude cheaper than the 1M-pixel scan the naive version would do;
 ##   * density is per-AREA, so a 1 kpx region and a 600 kpx background get the
@@ -55,9 +55,29 @@ const MAX_GRID_ATTEMPTS := 10
 
 ## Alpha byte at or above which a sample counts as painted. The brush is soft
 ## (hardness 0.6 in the child palette), so a sample on the feathered edge of a
-## dab can be part-transparent; half opacity is unambiguously "the player put
-## paint here" while ignoring the faintest fringe.
-const COVERED_ALPHA := 128
+## dab can be part-transparent.
+##
+## [b]BL-5 raised this from 128 to 160.[/b] 128 counted a half-transparent fringe
+## pixel as coloured, which is exactly the pixel that still reads as pale paper.
+## The dab is FULLY opaque out to [code]hardness[/code] of its radius (see
+## brush.gdshader), and consecutive dabs overlap by ~87% of their width, so
+## anything the player actually swept over lands far above 160 -- only the
+## outermost feather of a single isolated dab falls below it.
+const COVERED_ALPHA := 160
+
+## [b]Hard floor on the per-region completion fraction (BL-5).[/b] Each mode still
+## AUTHORS its own bar in [member PaletteDef.completion_threshold] -- the tracker
+## never reads GameState and never picks the number itself -- but no mode may set
+## one below this. A region with more than 15% of its samples still bare is not
+## "coloured in" by anybody's definition, and the shipped 0.70 child value was
+## finishing pages that plainly still had white in them.
+## [method set_threshold] clamps into [code][MIN_REGION_THRESHOLD, 1.0][/code].
+const MIN_REGION_THRESHOLD := 0.85
+
+## Threshold used when nothing is injected (no palette loaded -- authoring error
+## or a bare unit test). Deliberately the shipped CHILD value, so the fallback can
+## never be looser than the most generous mode actually ships.
+const DEFAULT_THRESHOLD := 0.90
 
 ## Reserved ID-map value: line art / not paintable.
 const UNPAINTABLE_ID := 0
@@ -66,7 +86,7 @@ const UNPAINTABLE_ID := 0
 
 ## Coverage fraction at which a region counts as done. INJECTED (from the active
 ## [PaletteDef]) -- this class never reads GameState.
-var _threshold := 0.7
+var _threshold := DEFAULT_THRESHOLD
 
 ## region id -> { points: PackedVector2Array, covered: PackedByteArray,
 ##                covered_count: int, done: bool }
@@ -78,15 +98,19 @@ var _page_done := false
 
 ## [param threshold] is the completion fraction, normally
 ## [member PaletteDef.completion_threshold].
-func _init(threshold: float = 0.7) -> void:
+func _init(threshold: float = DEFAULT_THRESHOLD) -> void:
 	set_threshold(threshold)
 
 
 ## Changes the completion fraction. Raising it can leave a region flagged done
 ## from before -- completion is sticky by design, a finished page must not
 ## un-finish under the player.
+##
+## Clamped into [code][MIN_REGION_THRESHOLD, 1.0][/code]: authored data chooses
+## how strict a mode is, but not whether the game will call a mostly-blank region
+## finished (BL-5).
 func set_threshold(threshold: float) -> void:
-	_threshold = clampf(threshold, 0.01, 1.0)
+	_threshold = clampf(threshold, MIN_REGION_THRESHOLD, 1.0)
 
 
 func get_threshold() -> float:

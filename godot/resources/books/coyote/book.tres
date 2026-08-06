@@ -1,11 +1,10 @@
-[gd_resource type="Resource" script_class="BookDef" load_steps=4 format=3]
+[gd_resource type="Resource" script_class="BookDef" load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scripts/resources/book_def.gd" id="1_book_def"]
 [ext_resource type="Resource" path="res://resources/books/coyote/pages/page_01.tres" id="2_page_01"]
-[ext_resource type="Resource" path="res://resources/books/coyote/pages/page_02.tres" id="3_page_02"]
 
 [resource]
 script = ExtResource("1_book_def")
 display_name = "Coyote"
 cover_image_path = ""
-pages = Array[PageDef]([ExtResource("2_page_01"), ExtResource("3_page_02")])
+pages = Array[PageDef]([ExtResource("2_page_01")])

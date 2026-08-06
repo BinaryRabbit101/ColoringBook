@@ -41,6 +41,10 @@ func _ready() -> void:
 
 
 ## Builds the brush material for a page of [param page_size] pixels.
+##
+## [param id_map] is the ONLY thing that clips a stroke, and it is the only image
+## the page's optional masking art (BL-9) ever reaches: the mask is consumed by
+## the mapping pipeline offline, never loaded here and never drawn.
 func configure(brush_shader: Shader, id_map: Texture2D, page_size: Vector2) -> void:
 	_page_size = page_size
 	_material = ShaderMaterial.new()

@@ -18,15 +18,21 @@ extends Control
 ## func get_selected_brush_size_index() -> int
 ## func get_selected_brush_size() -> float
 ## func get_color_buttons() -> Array[Control]
-## func get_brush_size_buttons() -> Array[Control]
+## func get_brush_size_controls() -> Array[Control]
 ## [/codeblock]
 ## [method set_palette] auto-selects the first colour and the palette's default
 ## brush size, emitting [signal brush_size_picked] then [signal color_picked]
 ## once each -- the brush is never colourless or sizeless.
 ##
 ## Child mode offers a single forgiving brush, so this component has no size
-## control and [method get_brush_size_buttons] is empty; it still declares and
+## control and [method get_brush_size_controls] is empty; it still declares and
 ## emits [signal brush_size_picked] so both palettes are interchangeable.
+##
+## [b]Slide-to-select[/b] (BACKLOG BL-2): a crayon is picked the moment the finger
+## lands on it ([constant BaseButton.ACTION_MODE_BUTTON_PRESS]) and the selection
+## then FOLLOWS the finger across the row until it lifts. The drag half lives in
+## [PaletteSlideInput], which both palettes share; the press half stays with the
+## buttons so hover, tooltips and [signal BaseButton.pressed] keep working.
 ##
 ## Self-contained: it is handed a [PaletteDef] and reaches nothing outside its
 ## own subtree. Signals up, calls down.
@@ -46,6 +52,9 @@ var _selected_size_index := -1
 var _selected_size := 0.0
 
 var _row: HBoxContainer
+var _scroll: ScrollContainer
+## Drag half of slide-to-select; the crayons themselves make the first pick.
+var _slide := PaletteSlideInput.new()
 
 
 func _ready() -> void:
@@ -53,8 +62,19 @@ func _ready() -> void:
 
 
 func _resolve_nodes() -> void:
+	if _scroll == null:
+		_scroll = get_node("Margin/Scroll") as ScrollContainer
 	if _row == null:
 		_row = get_node("Margin/Scroll/CrayonRow") as HBoxContainer
+	_slide.configure(self, _scroll)
+
+
+## Slide-to-select runs BEFORE the GUI phase, like [PageView]'s painting, so one
+## touch code path serves mouse and finger alike. Claimed drags are marked handled
+## so the crayon row cannot drag-scroll under the finger mid-slide.
+func _input(event: InputEvent) -> void:
+	if _slide.handle_input(event):
+		get_viewport().set_input_as_handled()
 
 
 # ================================================== shared palette contract ==
@@ -76,9 +96,14 @@ func set_palette(def: PaletteDef) -> void:
 		crayon.color_index = i
 		crayon.crayon_color = def.get_color(i)
 		crayon.tooltip_text = "#" + def.get_color(i).to_html(false)
+		# Slide-to-select: the pick happens as the finger LANDS, not when it lifts,
+		# so the selection can then follow the finger (see PaletteSlideInput).
+		crayon.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
 		crayon.pressed.connect(_on_crayon_pressed.bind(i))
 		_row.add_child(crayon)
 		_crayons.append(crayon)
+
+	_slide.set_targets(get_color_buttons(), select_color)
 
 	select_brush_size(def.get_default_brush_size_index())
 	select_color(0)
@@ -138,7 +163,7 @@ func get_color_buttons() -> Array[Control]:
 
 
 ## Always empty: child mode exposes no size control (see the class docs).
-func get_brush_size_buttons() -> Array[Control]:
+func get_brush_size_controls() -> Array[Control]:
 	return []
 
 
@@ -150,6 +175,8 @@ func _on_crayon_pressed(index: int) -> void:
 
 func _clear_row() -> void:
 	_crayons.clear()
+	var no_targets: Array[Control] = []
+	_slide.set_targets(no_targets, Callable())
 	if _row == null:
 		return
 	for child in _row.get_children():

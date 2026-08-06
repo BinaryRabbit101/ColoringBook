@@ -11,4 +11,4 @@ shades_per_family = 1
 brush_sizes = PackedFloat32Array(96)
 default_brush_size = 96.0
 default_brush_hardness = 0.6
-completion_threshold = 0.7
+completion_threshold = 0.9

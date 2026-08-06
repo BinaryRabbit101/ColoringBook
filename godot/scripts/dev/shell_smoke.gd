@@ -24,6 +24,8 @@ extends Control
 ##      and the paint PNG all exist on disk
 ##   c  re-entering the book resumes the same page with the pixels AND the
 ##      coverage restored
+##   c2 the toolbar's Save button writes the page on demand (BL-6), and its
+##      Start over button resets THAT page only, behind a two-button confirm (BL-7)
 ##   d  both pages completed -> BookComplete -> "Color again" wipes paint + status
 ##      and reopens the book clean at 1/2
 ##   e  settings "erase all progress" (two-step confirm) empties the save and the
@@ -97,6 +99,7 @@ func _run() -> void:
 	await _check_boot_and_navigation()
 	await _check_paint_and_save()
 	await _check_resume()
+	await _check_manual_save_and_restart()
 	await _check_complete_and_again()
 	await _check_erase_all()
 	await _check_mode_change_mid_book()
@@ -346,6 +349,69 @@ func _check_resume() -> void:
 		"a partly-coloured page is not treated as already finished")
 
 
+# ========================= c2: manual save (BL-6) and start over (BL-7) ==
+
+func _check_manual_save_and_restart() -> void:
+	print("\n-- check c2: the Save button, then Start over on this page only --")
+	var coloring := _main.get_current_screen() as ColoringPage
+	if coloring == null:
+		_expect(false, "the coloring page is open")
+		return
+	var page_view := coloring.get_page_view()
+	var paint_path := GameState.get_paint_path(_book, 0)
+
+	# --- Save on demand ------------------------------------------------------
+	# A fresh stroke, so there is genuinely something new to write.
+	page_view.begin_stroke(_probe_point + Vector2(0.0, 56.0))
+	page_view.continue_stroke(_probe_point + Vector2(60.0, 56.0))
+	page_view.end_stroke()
+	await _wait_for_coverage(coloring)
+	_expect(coloring.has_unsaved_paint(), "the new stroke marked the page unsaved")
+
+	var saves: Array[int] = []
+	coloring.page_saved.connect(func(index: int, manual: bool) -> void:
+		if manual:
+			saves.append(index)
+	)
+	coloring.get_save_button().pressed.emit()
+	var saved := await _wait_until(func() -> bool: return saves.size() == 1, NAV_TIMEOUT)
+	_expect(saved, "pressing Save wrote page 1 (%d event(s))" % saves.size())
+	_expect(not coloring.has_unsaved_paint(), "...and the page is no longer marked unsaved")
+	_expect(coloring.is_toast_visible() and coloring.get_toast_text() == "Saved!",
+		"...with visible feedback ('%s')" % coloring.get_toast_text())
+	_expect(FileAccess.file_exists(paint_path), "the paint layer is on disk")
+
+	# --- Start over asks first ------------------------------------------------
+	coloring.get_reset_button().pressed.emit()
+	_expect(coloring.is_reset_confirming(), "Start over asks for confirmation first")
+	coloring.get_reset_cancel_button().pressed.emit()
+	_expect(not coloring.is_reset_confirming(), "'Keep colouring' backs out of it")
+	_expect(FileAccess.file_exists(paint_path), "cancelling cleared nothing")
+
+	# --- ...and then resets THIS page only -----------------------------------
+	GameState.mark_page_status(_book, 1, GameState.STATUS_IN_PROGRESS)
+	coloring.get_reset_button().pressed.emit()
+	coloring.get_reset_confirm_button().pressed.emit()
+	await _settle_layout()
+
+	_expect(not FileAccess.file_exists(paint_path), "confirming deleted page 1's paint layer")
+	_expect(GameState.get_page_status(BOOK_PATH, 0) == GameState.STATUS_UNTOUCHED,
+		"page 1 is '%s' again (%s)"
+		% [GameState.STATUS_UNTOUCHED, GameState.get_page_status(BOOK_PATH, 0)])
+	_expect(GameState.get_page_status(BOOK_PATH, 1) == GameState.STATUS_IN_PROGRESS,
+		"page 2's progress was NOT touched (%s)" % GameState.get_page_status(BOOK_PATH, 1))
+	_expect(is_zero_approx(coloring.get_coverage_tracker().page_coverage()),
+		"the tracker is back to zero coverage (%.3f)"
+		% coloring.get_coverage_tracker().page_coverage())
+	var cleared := coloring.get_page_view().get_paint_image()
+	if cleared != null and cleared.get_format() != Image.FORMAT_RGBA8:
+		cleared.convert(Image.FORMAT_RGBA8)
+	_expect(cleared != null and cleared.get_pixel(int(_probe_point.x), int(_probe_point.y)).a8 == 0,
+		"the paint layer itself really is blank paper again")
+	# Put page 2 back the way check d expects to find it.
+	GameState.erase_page_progress(_book, 1)
+
+
 # ================================ d: finish the book, then "Color again" ==
 
 func _check_complete_and_again() -> void:
@@ -357,12 +423,21 @@ func _check_complete_and_again() -> void:
 
 	var strokes_1 := await _fill_page(coloring)
 	print("   page 1 filled with %d strokes" % strokes_1)
+	# BL-4: the finished page stays put; turning it is the player's call.
+	var finished := await _wait_until(
+		func() -> bool:
+			return coloring.get_coverage_tracker().is_page_complete() \
+				and not coloring.is_transitioning(),
+		PAINT_TIMEOUT
+	)
+	_expect(finished, "page 1 completed and stayed on 1/2 ('%s')" % coloring.get_page_label_text())
+	coloring.get_next_page_button().pressed.emit()
 	# The flip is asynchronous; wait for the second page to be interactive.
 	var on_page_2 := await _wait_until(
 		func() -> bool: return coloring.get_page_label_text() == "2/2" and not coloring.is_transitioning(),
 		PAINT_TIMEOUT
 	)
-	_expect(on_page_2, "page 1 completed and the book flipped to 2/2 ('%s')"
+	_expect(on_page_2, "the next-page arrow turned the book to 2/2 ('%s')"
 		% coloring.get_page_label_text())
 	await _wait_until(func() -> bool: return not coloring.has_pending_restore(), NAV_TIMEOUT)
 
@@ -489,8 +564,8 @@ func _check_mode_change_mid_book() -> void:
 			adult_palette.completion_threshold),
 		"the completion threshold is now %.2f (%.2f)"
 		% [adult_palette.completion_threshold, coloring.get_coverage_tracker().get_threshold()])
-	_expect(is_equal_approx(coloring.get_coverage_tracker().get_threshold(), 0.92),
-		"...which is the strict adult 0.92")
+	_expect(is_equal_approx(coloring.get_coverage_tracker().get_threshold(), 0.96),
+		"...which is the strict adult 0.96 BL-5 tightened it to")
 
 
 # ==================================================== g: saving on quit ==
@@ -545,6 +620,37 @@ func _check_broken_saves() -> void:
 	_expect(FileAccess.get_file_as_string(backup).contains("\"version\": 99"),
 		"the backup is the original bytes")
 	_expect(not GameState.has_book_progress(BOOK_PATH), "the future save's progress was NOT applied")
+
+	# --- a save that remembers pages the book no longer has (BL-9) -----------
+	# Books SHRINK: BL-9 folded the coyote book's two bogus pages back into one,
+	# and a re-authored or DLC-updated book can lose a page the same way. A save
+	# written before that must not crash anything, must not keep answering for the
+	# page that is gone, and must not leave its paint layer in user:// forever.
+	_write_text(GameState.get_save_path(),
+		('{"version": 1, "mode": "child", "books": {"%s": '
+		+ '{"current_page_index": 3, "pages": ["complete", "in_progress", "complete", "complete"]}}}')
+		% BOOK_PATH)
+	_expect(GameState.load_save(), "a save listing 4 pages for a 2-page book loads")
+	var orphan := GameState.get_paint_path_for_key(BOOK_PATH, 2)
+	DirAccess.make_dir_recursive_absolute(orphan.get_base_dir())
+	_write_text(orphan, "not really a png, but it is a file on disk")
+	# Any path that touches the entry trims it; this one also proves completion is
+	# still sticky while the trim happens underneath it.
+	GameState.mark_page_status(_book, 0, GameState.STATUS_IN_PROGRESS)
+	var trimmed := GameState.get_book_progress(BOOK_PATH)
+	_expect((trimmed.get("pages", []) as Array).size() == _book.page_count(),
+		"the entry was trimmed to the book's %d pages (%d)"
+		% [_book.page_count(), (trimmed.get("pages", []) as Array).size()])
+	_expect(String((trimmed.get("pages", []) as Array)[0]) == GameState.STATUS_COMPLETE,
+		"the surviving pages kept their statuses")
+	_expect(int(trimmed.get("current_page_index", -1)) == _book.page_count() - 1,
+		"the saved cursor was clamped into the shorter book (%s)"
+		% trimmed.get("current_page_index"))
+	_expect(not FileAccess.file_exists(orphan),
+		"the removed page's paint layer was deleted from user://")
+	_expect(GameState.get_page_status(BOOK_PATH, 2) == GameState.STATUS_UNTOUCHED
+			and is_instance_valid(_main),
+		"asking about the page that no longer exists is untouched, not a crash")
 
 	# --- a missing save file is silent ---------------------------------------
 	DirAccess.remove_absolute(GameState.get_save_path())

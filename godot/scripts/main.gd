@@ -27,10 +27,11 @@ extends Control
 ## a book is open) the mode picker are overlays for the same reason -- changing
 ## mode must not throw the player out of the book they are colouring.
 ##
-## [b]Save points[/b]: leaving a book and finishing a page are handled inside
-## [ColoringPage] (only it can reach the paint layer). Quitting is handled here,
-## because [code]NOTIFICATION_WM_CLOSE_REQUEST[/code] has to flush the OPEN page's
-## pixels before [code]GameState[/code] writes the JSON.
+## [b]Save points[/b]: leaving a book, finishing a page and the BL-6 interval
+## autosave are handled inside [ColoringPage] (only it can reach the paint layer).
+## Quitting, backgrounding and losing focus are handled here, because those
+## notifications have to flush the OPEN page's pixels before
+## [code]GameState[/code] writes the JSON.
 ##
 ## [b]M6: main owns the quit.[/b] It turns off
 ## [member SceneTree.auto_accept_quit] and calls [method SceneTree.quit] itself,
@@ -176,9 +177,25 @@ func _ready() -> void:
 ## back.
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_PAUSED:
+		# Backgrounded on mobile: the OS may never give this process another frame,
+		# so the blocking flush is the only safe one.
 		flush_and_save()
+	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		# BL-6: alt-tabbed, or the browser tab lost focus. The app is still running
+		# and still has frames, so this takes the ASYNC path -- and the same
+		# "never mid-stroke" rule as every other autosave.
+		_autosave_now()
 	elif what == NOTIFICATION_WM_CLOSE_REQUEST:
 		_close()
+
+
+## Non-blocking save of whatever the player would lose right now (BL-6). Used by
+## the moments where the app keeps running; [method flush_and_save] is for the
+## moments where it does not.
+func _autosave_now() -> void:
+	if _current_screen is ColoringPage:
+		await (_current_screen as ColoringPage).save_page_now(false)
+	GameState.save_now()
 
 
 ## Writes everything the player would lose right now. Safe to call at any time.

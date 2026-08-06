@@ -13,6 +13,13 @@ extends Control
 ##
 ## Layer order, back to front: paper -> paint SubViewport texture -> line art ->
 ## debug overlay.
+##
+## [b]The "base" image is the page's DISPLAY art[/b] ([member PageDef.display_image_path]):
+## the drawing the player sees, with paint appearing beneath its line work. A page
+## may have been MAPPED from a separate masking image (BL-9), but that mask is
+## build input for [code]tools/generate_region_map.gd[/code] only -- it is never
+## passed here and never rendered. Everything this component clips against is the
+## ID map, exactly as before.
 
 ## Emitted once a page's textures and region data are in place.
 signal page_loaded(page_size: Vector2i)
@@ -48,7 +55,8 @@ const OUT_OF_BOUNDS_ID := -1
 # ------------------------------------------------------------- page injection --
 
 @export_group("Page")
-## Line-art PNG. Injected by the parent; empty in the component itself.
+## The page's visible art (the display image). Injected by the parent; empty in
+## the component itself. Never a masking image -- see the class doc.
 @export_file("*.png") var base_image_path: String = ""
 ## Region ID-map PNG (lossless, id = R<<16|G<<8|B, #000000 = lines).
 @export_file("*.png") var id_map_path: String = ""
@@ -83,6 +91,14 @@ const OUT_OF_BOUNDS_ID := -1
 		_apply_line_art_material()
 
 @export_group("View")
+## How much of the fit-to-view zoom the page OPENS at (BL-1). 1.0 fills the view
+## edge to edge, which puts the outermost regions right on the boundary where a
+## fingertip cannot comfortably reach them; anything below 1.0 leaves a margin of
+## paper all the way round, so edge regions are as easy to colour as middle ones.
+## Only the initial framing: pinch/wheel zoom and pan are unaffected, and the zoom
+## LIMITS stay relative to the true fit (see [member min_zoom_factor]), so the
+## player can still zoom further out than this.
+@export_range(0.2, 1.0, 0.01) var default_zoom_factor: float = 0.85
 ## Smallest zoom, as a multiple of the fit-to-view zoom.
 @export_range(0.05, 1.0, 0.01) var min_zoom_factor: float = 0.5
 ## Largest zoom, as a multiple of the fit-to-view zoom.
@@ -143,8 +159,10 @@ func _ready() -> void:
 
 # =============================================================== page loading ==
 
-## Loads a page. Returns false and pushes an error if anything is missing or the
-## ID map does not match the base image.
+## Loads a page. [param base_path] is the page's DISPLAY image (never its mask);
+## [param idmap_path] is whatever the mapping pipeline produced for it, from the
+## mask when the page has one. Returns false and pushes an error if anything is
+## missing or the ID map does not match the display image.
 func load_page(base_path: String, idmap_path: String, regions_path: String) -> bool:
 	_loaded = false
 	cancel_stroke()
@@ -530,15 +548,18 @@ func get_zoom() -> float:
 	return _page_root.scale.x
 
 
-## Centres the page and scales it to fit, and resets the zoom limits around that.
+## Centres the page and scales it to [member default_zoom_factor] of the
+## fit-to-view zoom, and resets the zoom limits around the true fit.
 func fit_page_to_view() -> void:
 	if not _loaded or size.x <= 0.0 or size.y <= 0.0:
 		return
 	_fit_zoom = minf(size.x / float(_page_size.x), size.y / float(_page_size.y))
 	if _fit_zoom <= 0.0:
 		_fit_zoom = 1.0
-	_page_root.scale = Vector2(_fit_zoom, _fit_zoom)
-	_page_root.position = (size - Vector2(_page_size) * _fit_zoom) * 0.5
+	# The limits are anchored to the true fit; only the framing gets the margin.
+	var opening_zoom := clampf(_fit_zoom * default_zoom_factor, _min_zoom(), _max_zoom())
+	_page_root.scale = Vector2(opening_zoom, opening_zoom)
+	_page_root.position = (size - Vector2(_page_size) * opening_zoom) * 0.5
 	_view_user_adjusted = false
 
 

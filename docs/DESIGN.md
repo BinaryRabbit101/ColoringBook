@@ -54,11 +54,14 @@ Progress (which pages are colored, per book, per mode) persists to `user://` via
 
 Produced offline by the **mapping pipeline** (§4), shipped with the page art. Two artifacts per page:
 
+**Display vs mask (BL-9).** Every page has one **display image** — the art the player sees, with paint appearing beneath its line work — and an **optional masking image**: separate line art that decides where paint may go. When a page has a mask, the mask is the pipeline's input and is *never* loaded or rendered at runtime (it need not even be in the build); when it has none, the display image is its own mapping source. Either way the two artifacts below are generated at, and named after, the **display** page.
+
 1. **`<page>_regions.json`** — vector data:
    ```json
    {
      "version": 1,
      "source_image": "page_01.png",
+     "mask_image": "coyote_outline_source.png",
      "image_size": [2048, 2048],
      "regions": [
        {
@@ -72,8 +75,8 @@ Produced offline by the **mapping pipeline** (§4), shipped with the page art. T
      ]
    }
    ```
-   `outline`/`holes` are polygons in image pixel space (marching-squares traced, simplified); vertices are pixel-corner coordinates, while `centroid` is a pixel index. `centroid` is snapped to a pixel the region actually owns (an area-weighted mean can land inside a hole — useless as a tap-hint marker). `area_px` counts ID-map pixels (post line-dilation), making the ID map and JSON agree exactly.
-2. **`<page>_idmap.png`** — a lossless **region ID map**: same dimensions as the base image, every pixel of region *N* has the flat color encoding *N* (`#000000` reserved: lines / not paintable). This is the runtime workhorse.
+   `source_image` names the display page the artifacts belong to; `mask_image` is present only when the regions were traced from a separate masking image, and exists so a page's mapping is reproducible from the JSON alone. `outline`/`holes` are polygons in image pixel space (marching-squares traced, simplified); vertices are pixel-corner coordinates, while `centroid` is a pixel index. `centroid` is snapped to a pixel the region actually owns (an area-weighted mean can land inside a hole — useless as a tap-hint marker). `area_px` counts ID-map pixels (post line-dilation), making the ID map and JSON agree exactly.
+2. **`<page>_idmap.png`** — a lossless **region ID map**: same dimensions as the display image, every pixel of region *N* has the flat color encoding *N* (`#000000` reserved: lines / not paintable). This is the runtime workhorse.
 
 **Runtime roles:**
 - **Hit-test (press → region id):** sample the ID map pixel at the press point (fast, exact, handles holes for free). The JSON polygons are the authored/portable representation and serve editor tooling, debug overlays, and centroid/area queries (e.g. completion, "tap hint" markers).
@@ -128,7 +131,7 @@ godot/
     generate_region_map.gd   # the mapping pipeline (§4) — dev-only, headless
 ```
 
-Custom `Resource` types (`class_name`): `BookDef`, `PageDef` (paths to base/idmap/regions + display name), `PaletteDef` (mode, colors, brush sizes). Data in `.tres`, logic in nodes.
+Custom `Resource` types (`class_name`): `BookDef`, `PageDef` (display name + paths to the display image, the optional mask, the idmap and the regions JSON), `PaletteDef` (mode, colors, brush sizes). Data in `.tres`, logic in nodes.
 
 One autoload: `GameState`. Screens communicate upward via signals; `main.tscn` swaps screens and injects dependencies (e.g. hands `PageDef` + `PaletteDef` to the coloring screen).
 
@@ -151,6 +154,12 @@ One autoload: `GameState`. Screens communicate upward via signals; `main.tscn` s
 
 ```
 <godot_exe> --headless --path godot --script tools/generate_region_map.gd -- assets/books/<book>/page_01.png
+```
+
+The positional argument is the **mapping source**. A page mapped from a separate masking image passes the mask there and names its display art with `--display`, which is where the artifacts are written (and whose resolution the mask is resampled to, since the artist's mask arrives at print size):
+
+```
+... -- assets/books/coyote/source/coyote_outline_source.png --display assets/books/coyote/page_01.png
 ```
 
 Steps:

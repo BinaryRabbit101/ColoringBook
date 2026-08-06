@@ -20,9 +20,10 @@ const BOOK_FILE_NAMES: PackedStringArray = ["book.tres", "book.res"]
 ## Book title as the player sees it.
 @export var display_name: String = ""
 
-## Cover art. Leave empty to use page 1's line art, which is what the test book
-## does -- a page's own base image is a perfectly good cover and avoids shipping
-## a second copy of the same drawing.
+## Cover art. Leave empty to use page 1's display image, which is what every book
+## does so far -- a page's own visible art is a perfectly good cover and avoids
+## shipping a second copy of the same drawing. (Page 1's DISPLAY image: a page's
+## optional masking image is never shown, cover included.)
 @export_file("*.png") var cover_image_path: String = ""
 
 ## The pages, in the order they are coloured. Index 0 is page 1.
@@ -47,12 +48,12 @@ func has_page(index: int) -> bool:
 	return index >= 0 and index < pages.size()
 
 
-## Path of the cover image: the authored one, else page 1's base image, else "".
+## Path of the cover image: the authored one, else page 1's display image, else "".
 func get_cover_path() -> String:
 	if cover_image_path != "":
 		return cover_image_path
 	var first := get_page(0)
-	return first.base_image_path if first != null else ""
+	return first.display_image_path if first != null else ""
 
 
 func get_cover_texture() -> Texture2D:
@@ -126,7 +127,7 @@ func validate() -> PackedStringArray:
 	if cover_image_path != "" and not ResourceLoader.exists(cover_image_path):
 		problems.append("cover_image_path '%s' does not exist" % cover_image_path)
 	if get_cover_path() == "":
-		problems.append("no cover art (no cover_image_path and no page 1 base image)")
+		problems.append("no cover art (no cover_image_path and no page 1 display image)")
 	return problems
 
 
