@@ -1,18 +1,54 @@
 extends SceneTree
-## Dev tool — generates the Milestone 1 test line-art page.
+## Dev tool — generates the hand-made test line-art pages for `test_book`.
 ##
 ## Usage:
-##   <godot_exe> --headless --path godot --script tools/generate_test_page.gd [-- <res://out.png>]
+##   <godot_exe> --headless --path godot --script tools/generate_test_page.gd
+##   <godot_exe> ... --script tools/generate_test_page.gd -- --layout 2 --out res://.../page_02.png
+##   <godot_exe> ... --script tools/generate_test_page.gd -- <res://out.png>   (legacy positional)
 ##
-## The page is white with anti-aliased dark outlines that enclose eight regions:
-## seven shape interiors plus the background. One shape (a circle) is nested
-## inside another (a square) so the mapping pipeline has a hole to trace, and the
-## shapes mix straight edges (rectangles, triangle) with curved ones (circles,
-## ellipse, stadium/capsule).
+## Two layouts ship, both 1024x1024 white pages with anti-aliased dark outlines:
+##
+## [b]--layout 1[/b] (default, page_01) — eight regions: seven shape interiors
+## plus the background. A circle nested inside a square gives the mapping
+## pipeline a hole to trace; the shapes mix straight edges (rectangles, triangle)
+## with curved ones (circles, ellipse, stadium/capsule).
+##
+## [b]--layout 2[/b] (page_02) — a deliberately DIFFERENT arrangement so the
+## page-flip flow has real second-page data: eight regions again, but built from
+## a concentric sun (ring + core: the nested pair), a diamond, a banner
+## rectangle, an ellipse, a horizontal capsule and a small circle. Nothing sits
+## where a layout-1 shape sat, so a coordinate that is line art on page 1 is
+## paintable on page 2 (and vice versa) — which is exactly how the flow smoke
+## test proves the page really swapped.
+##
+## Invoking with NO arguments reproduces page_01 byte-for-byte; layout 1's
+## drawing code is untouched.
 
 # --------------------------------------------------------------- tunables ---
-## Default destination. Overridable with a single user argument after `--`.
+## Default destination. Overridable with `--out <path>` or a single positional
+## user argument after `--`.
 const DEFAULT_OUTPUT_PATH := "res://assets/books/test_book/page_01.png"
+## Default layout id. Overridable with `--layout <n>`.
+const DEFAULT_LAYOUT := 1
+## Layout id -> { draw: method name, name, outlines, nested, regions }. The
+## expected region count is what the mapping pipeline must report and what the
+## flow smoke test asserts against the generated JSON.
+const LAYOUTS := {
+	1: {
+		"draw": "_draw_layout_1",
+		"name": "shape sampler",
+		"outlines": 7,
+		"nested": 1,
+		"regions": 8,
+	},
+	2: {
+		"draw": "_draw_layout_2",
+		"name": "sun, diamond and banner",
+		"outlines": 7,
+		"nested": 1,
+		"regions": 8,
+	},
+}
 ## Page dimensions in pixels.
 const PAGE_WIDTH := 1024
 const PAGE_HEIGHT := 1024
@@ -31,10 +67,44 @@ var _coverage := PackedFloat32Array()
 
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
-	var output_path := args[0] if args.size() > 0 else DEFAULT_OUTPUT_PATH
+	var layout := DEFAULT_LAYOUT
+	var output_path := ""
+	var arg_index := 0
+	while arg_index < args.size():
+		var arg: String = args[arg_index]
+		match arg:
+			"--layout":
+				if arg_index + 1 >= args.size():
+					printerr("--layout needs a number")
+					quit(2)
+					return
+				layout = int(args[arg_index + 1])
+				arg_index += 2
+			"--out":
+				if arg_index + 1 >= args.size():
+					printerr("--out needs a path")
+					quit(2)
+					return
+				output_path = args[arg_index + 1]
+				arg_index += 2
+			_:
+				if arg.begins_with("--"):
+					printerr("Unknown option: %s" % arg)
+					quit(2)
+					return
+				# Legacy positional form: `-- <res://out.png>`.
+				output_path = arg
+				arg_index += 1
+	if output_path == "":
+		output_path = DEFAULT_OUTPUT_PATH
+
+	if not LAYOUTS.has(layout):
+		printerr("Unknown layout %d (known: %s)" % [layout, LAYOUTS.keys()])
+		quit(2)
+		return
 
 	_coverage.resize(PAGE_WIDTH * PAGE_HEIGHT)
-	_draw_page()
+	call(String(LAYOUTS[layout]["draw"]))
 
 	var bytes := PackedByteArray()
 	bytes.resize(PAGE_WIDTH * PAGE_HEIGHT * 4)
@@ -61,16 +131,19 @@ func _initialize() -> void:
 		quit(1)
 		return
 
+	var info: Dictionary = LAYOUTS[layout]
 	print("Wrote %s (%dx%d, line width %.1f px)" % [
 		output_path, PAGE_WIDTH, PAGE_HEIGHT, LINE_WIDTH
 	])
-	print("Shapes drawn: 7 closed outlines (one nested) -> 8 expected regions incl. background")
+	print("Layout %d (%s): %d closed outlines (%d nested) -> %d expected regions incl. background" % [
+		layout, info["name"], int(info["outlines"]), int(info["nested"]), int(info["regions"])
+	])
 	quit(0)
 
 
-## Lays out the test page. Coordinates are hand-tuned so no two shapes come
+## Layout 1 (page_01). Coordinates are hand-tuned so no two shapes come
 ## closer than ~10 px, leaving a clean channel of background between them.
-func _draw_page() -> void:
+func _draw_layout_1() -> void:
 	# 1. Square with a circle nested inside it -> region with a hole.
 	_stroke_rect(Rect2(64.0, 64.0, 400.0, 400.0))
 	_stroke_circle(Vector2(264.0, 264.0), 120.0)
@@ -86,6 +159,29 @@ func _draw_page() -> void:
 	_stroke_ellipse(Vector2(250.0, 760.0), Vector2(185.0, 140.0))
 	# 6. Stadium/capsule — straight sides with curved caps.
 	_stroke_capsule(Vector2(660.0, 930.0), Vector2(920.0, 930.0), 55.0)
+
+
+## Layout 2 (page_02) — the second page of the test book. Same rules as layout 1
+## (>= ~10 px of clear background between any two outlines, one nested pair), but
+## every shape is in a different place and of a different kind, so the two pages
+## are trivially distinguishable by an ID-map lookup at a fixed coordinate.
+func _draw_layout_2() -> void:
+	# 1. Concentric "sun": ring + core. The core is the nested region (a hole in
+	#    the ring), this layout's counterpart to layout 1's circle-in-a-square.
+	_stroke_circle(Vector2(270.0, 250.0), 180.0)
+	_stroke_circle(Vector2(270.0, 250.0), 80.0)
+	# 2. Diamond (straight edges, rotated 45 degrees -- no axis-aligned edges).
+	_stroke_polygon(PackedVector2Array([
+		Vector2(760.0, 90.0), Vector2(940.0, 250.0), Vector2(760.0, 410.0), Vector2(580.0, 250.0)
+	]))
+	# 3. Wide banner rectangle, left of centre.
+	_stroke_rect(Rect2(80.0, 520.0, 480.0, 180.0))
+	# 4. Ellipse, right of the banner.
+	_stroke_ellipse(Vector2(810.0, 600.0), Vector2(150.0, 110.0))
+	# 5. Horizontal capsule along the bottom left.
+	_stroke_capsule(Vector2(200.0, 860.0), Vector2(500.0, 860.0), 70.0)
+	# 6. Small circle, bottom right (the smallest region on the page).
+	_stroke_circle(Vector2(820.0, 860.0), 90.0)
 
 
 # ------------------------------------------------------------- primitives ---

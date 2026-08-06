@@ -64,3 +64,14 @@ Full design: [docs/DESIGN.md](../../../docs/DESIGN.md) §1–3. These are the ru
 - `GameState` autoload (`autoload/game_state.gd`): `mode`, `set_mode()`, `mode_changed` signal, `get_active_palette()`, `get_palette_scene_path()`. Extend it for book/page state and persistence (M5) — no second autoload.
 - Palette components (`palette_child.tscn` crayon row / `palette_adult.tscn` swatch grid): identical contract — `set_palette(def)` (auto-emits `brush_size_picked` then `color_picked` once each, so the brush is always primed), `color_picked(color)`, `brush_size_picked(size)`. Wiring a coloring screen = instantiate `GameState.get_palette_scene_path()`, connect those two signals to `PageView.brush_color`/`brush_size`, set `brush_hardness` from the def, call `set_palette`.
 - Smoke test: `<godot_exe> --path godot res://scenes/dev/palette_smoke.tscn` (windowed; `-- --stay` to inspect, `-- --shot <path>` saves a screenshot). Keep green alongside paint_smoke.
+
+### Implemented (M4) — books, coverage, flip
+
+- `PageDef`/`BookDef` resources (`scripts/resources/`); books are **discovered**, never preloaded: `BookDef.discover()` scans `res://resources/books/*/book.tres` — adding a book = adding a folder.
+- `CoverageTracker` (RefCounted, `scripts/components/coverage_tracker.gd`): ~240 sample points/region (polygon-inside, hole-and-line-filtered against the ID map), threshold **injected** from the active `PaletteDef`, one `get_paint_image()` readback per stroke end (coalesced while in flight; skipped when all pending regions done), coverage monotonic. `update_all(image)` restores coverage from a saved paint layer (persistence hook).
+- **Known hazard for M6**: the synchronous readback stalls ~0.5s under FIFO vsync (presentation pacing, not bandwidth — ~2ms with mailbox/disabled vsync). Proper fix: `RenderingDevice.texture_get_data_async()`.
+- Screens (`scenes/screens/`): `BookSelect` emits `book_chosen(book)`; `ColoringPage.load_book(book, start_index)` hosts PageView + mode palette + toolbar, emits `back_requested` / `book_completed(book)`. Screens never swap themselves — M5's `main.tscn` orchestrates. Set `GameState.mode` **before** instantiating ColoringPage (palette scene + threshold read at build time).
+- `PageFlip` (`scenes/components/`): `prepare(from_texture)` freeze → swap page behind → `play_to(null)` reveals live content pixel-exact; 0.8s, `flip_finished`, swallows input only while playing.
+- `GameState` book cursor: `start_book()`, `advance_page() -> bool`, `get_current_page()`, `current_page_label()`, `finish_book()`; signals `book_started`/`current_page_changed`/`book_finished`. Persist by `resource_path` + page index (M5).
+- Full-flow smoke: `<godot_exe> --path godot res://scenes/dev/flow_smoke.tscn` (windowed) — also re-runs paint & palette smokes as child processes. Keep all three green.
+- Gotcha: GDScript lambdas capture locals **by value** — use an array/dict cell for mutable counters in test callbacks.

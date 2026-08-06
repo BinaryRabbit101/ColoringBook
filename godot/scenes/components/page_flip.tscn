@@ -1,0 +1,97 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://scripts/components/page_flip.gd" id="1_page_flip"]
+
+[sub_resource type="Gradient" id="Gradient_drop_shadow"]
+offsets = PackedFloat32Array(0, 0.28, 1)
+colors = PackedColorArray(0, 0, 0, 1, 0, 0, 0, 0.42, 0, 0, 0, 0)
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_drop_shadow"]
+gradient = SubResource("Gradient_drop_shadow")
+width = 128
+height = 8
+
+[sub_resource type="Gradient" id="Gradient_curl"]
+offsets = PackedFloat32Array(0, 0.45, 0.82, 1)
+colors = PackedColorArray(1, 1, 1, 0, 1, 0.988235, 0.941176, 0.32, 1, 1, 0.984314, 0.85, 0.831373, 0.772549, 0.678431, 0.95)
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_curl"]
+gradient = SubResource("Gradient_curl")
+width = 96
+height = 8
+
+[node name="PageFlip" type="Control"]
+visible = false
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("1_page_flip")
+
+[node name="Backdrop" type="TextureRect" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+expand_mode = 1
+
+[node name="DropShadow" type="TextureRect" parent="."]
+modulate = Color(1, 1, 1, 0)
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+texture = SubResource("GradientTexture2D_drop_shadow")
+expand_mode = 1
+
+[node name="Leaf" type="Control" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="From" type="TextureRect" parent="Leaf"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+expand_mode = 1
+
+[node name="Shade" type="ColorRect" parent="Leaf"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.0470588, 0.0313726, 0.0117647, 0)
+
+[node name="Curl" type="TextureRect" parent="Leaf"]
+modulate = Color(1, 1, 1, 0)
+layout_mode = 1
+anchors_preset = 11
+anchor_left = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -54.0
+grow_horizontal = 0
+grow_vertical = 2
+mouse_filter = 2
+texture = SubResource("GradientTexture2D_curl")
+expand_mode = 1

@@ -1,0 +1,769 @@
+extends Control
+## Automated verification for Milestone 4 -- books, pages, coverage, flip, shelf.
+##
+## Run WINDOWED (the integration checks paint into a SubViewport, which renders
+## nothing under --headless / the dummy rasteriser):
+##
+##   <godot_exe> --path <project> res://scenes/dev/flow_smoke.tscn
+##
+## Extra user args (after a bare `--`):
+##   --stay                 leave the window open on the shelf instead of quitting
+##   --shot-dir <dir>       where book_select.png / flip_moment.png are written
+##                          (default user://flow_smoke)
+##   --skip-subsmokes       do not re-run the M2/M3 smoke tests as child processes
+##
+## Checks, in order:
+##   1  BookDef / PageDef resources load, validate, and page_02's generated data
+##      matches its generator layout with lossless ID-map import settings
+##   2  CoverageTracker against page 1's real geometry, driven by SYNTHETIC paint
+##      images -- no GPU, no PageView readback
+##   3  BookSelect renders and reports the chosen book
+##   4  ColoringPage end to end: paint every region of page 1, the flip plays, the
+##      second page is really loaded, the palette still drives the brush
+##   5  ... and finishing page 2 emits book_completed
+##   6  the M2 and M3 smoke tests still pass, run as child processes
+##
+## Exit code is 0 only if every check passes.
+
+const BOOK_PATH := "res://resources/books/test_book/book.tres"
+const PAGE_01_TRES := "res://resources/books/test_book/pages/page_01.tres"
+const PAGE_02_TRES := "res://resources/books/test_book/pages/page_02.tres"
+const PAGE_02_IDMAP_IMPORT := "res://assets/books/test_book/page_02_idmap.png.import"
+
+const PAGE_VIEW_SCENE := preload("res://scenes/components/page_view.tscn")
+const BOOK_SELECT_SCENE := preload("res://scenes/screens/book_select.tscn")
+const COLORING_PAGE_SCENE := preload("res://scenes/screens/coloring_page.tscn")
+
+## What tools/generate_test_page.gd's layout 2 promises: 8 regions including the
+## background, one of them nested inside another (the sun's core inside its ring).
+const PAGE_02_EXPECTED_REGIONS := 8
+const PAGE_02_EXPECTED_NESTED := 1
+
+## Import flags the ID map must keep, or region ids bleed (DESIGN.md 3.2).
+const REQUIRED_IDMAP_IMPORT_FLAGS := {
+	"compress/mode": "0",
+	"mipmaps/generate": "false",
+	"detect_3d/compress_to": "0",
+	"process/fix_alpha_border": "false",
+}
+
+## Threshold injected into the unit-test trackers (the shipped child value).
+const UNIT_THRESHOLD := 0.7
+## Per-channel tolerance (0..255) when checking painted pixels against a colour.
+const COLOR_TOLERANCE := 2
+## Sweep spacing for the flood helper, as a fraction of the brush RADIUS.
+const FLOOD_ROW_RATIO := 1.15
+## Coarse step used when hunting for a coordinate that tells the two pages apart.
+const PAGE_DIFF_SCAN_STEP := 4
+
+@onready var _host: Control = $Host
+@onready var _probe: Control = $Probe
+
+var _checks := 0
+var _failures := 0
+
+var _book: BookDef
+var _shot_dir := "user://flow_smoke"
+
+# Recorded flow events.
+var _flip_started_count := 0
+var _flip_finished_count := 0
+var _page_changed_events: Array[int] = []
+var _page_completed_events: Array[int] = []
+var _book_completed_events: Array[BookDef] = []
+var _coverage_history: Dictionary = {}
+var _coverage_regressions: Array[String] = []
+
+
+func _ready() -> void:
+	get_window().size = Vector2i(1280, 900)
+	_shot_dir = _arg_value("--shot-dir", _shot_dir)
+	if not DirAccess.dir_exists_absolute(_shot_dir):
+		DirAccess.make_dir_recursive_absolute(_shot_dir)
+	await get_tree().process_frame
+	await _run()
+
+
+func _run() -> void:
+	print("=== M4 flow smoke test ===")
+	# M4 is exercised in child mode: generous threshold, one big forgiving brush.
+	GameState.mode = PaletteDef.MODE_CHILD
+
+	_check_resources()
+	await _check_coverage_tracker()
+	await _check_book_select()
+	await _check_coloring_flow()
+	_check_sub_smokes()
+
+	print("\n=== %d/%d checks passed ===" % [_checks - _failures, _checks])
+	if "--stay" in OS.get_cmdline_user_args():
+		print("[dev] --stay given; not quitting. Pick the book to colour it by hand.")
+		await _stay_on_the_shelf()
+		return
+	_finish(0 if _failures == 0 else 1)
+
+
+## Leaves a live shelf -> coloring page loop up for the human pass.
+func _stay_on_the_shelf() -> void:
+	for child in _host.get_children():
+		child.queue_free()
+	await get_tree().process_frame
+	var shelf := BOOK_SELECT_SCENE.instantiate() as BookSelect
+	_host.add_child(shelf)
+	shelf.load_books()
+	shelf.book_chosen.connect(func(book: BookDef) -> void:
+		shelf.queue_free()
+		var screen := COLORING_PAGE_SCENE.instantiate() as ColoringPage
+		_host.add_child(screen)
+		screen.load_book(book)
+		screen.back_requested.connect(func() -> void:
+			screen.queue_free()
+			await get_tree().process_frame
+			await _stay_on_the_shelf()
+		)
+	)
+
+
+func _finish(code: int) -> void:
+	print("exit code: %d" % code)
+	get_tree().quit(code)
+
+
+# ============================================================ 1: resources ==
+
+func _check_resources() -> void:
+	print("\n-- check 1: BookDef / PageDef resources and page_02 data --")
+
+	_book = load(BOOK_PATH) as BookDef
+	_expect(_book != null, "%s loads as a BookDef" % BOOK_PATH)
+	if _book == null:
+		return
+	_expect(_book.validate().is_empty(), "book validates (%s)" % [_book.validate()])
+	_expect(_book.display_name != "", "book has a display name ('%s')" % _book.display_name)
+	_expect(_book.page_count() == 2, "book has 2 pages (%d)" % _book.page_count())
+	_expect(
+		_book.get_page(0) == load(PAGE_01_TRES) and _book.get_page(1) == load(PAGE_02_TRES),
+		"pages are page_01.tres then page_02.tres, in order"
+	)
+	_expect(_book.get_page(2) == null, "get_page() past the end returns null")
+	_expect(
+		_book.get_cover_path() == _book.get_page(0).base_image_path,
+		"cover falls back to page 1's base image (%s)" % _book.get_cover_path()
+	)
+	_expect(_book.get_cover_texture() != null, "cover texture loads")
+
+	for i in _book.page_count():
+		var page := _book.get_page(i)
+		_expect(page.validate().is_empty(),
+			"page %d ('%s') validates (%s)" % [i + 1, page.display_name, page.validate()])
+
+	# Discovery, not a preload list.
+	var discovered := BookDef.discover()
+	_expect(discovered.size() == 1, "BookDef.discover() found 1 book by scanning (%d)" % discovered.size())
+	_expect(discovered.size() == 1 and discovered[0] == _book,
+		"the discovered book is the same cached resource instance")
+
+	# --- page_02's generated data --------------------------------------------
+	var page_02 := _book.get_page(1)
+	var json := page_02.load_regions_json()
+	_expect(not json.is_empty(), "page_02 regions JSON parses")
+	if json.is_empty():
+		return
+	_expect(int(json.get("version", 0)) == 1, "page_02 JSON is schema version 1")
+	_expect(String(json.get("source_image", "")) == "page_02.png",
+		"page_02 JSON names its source image (%s)" % json.get("source_image"))
+	var regions: Array = json.get("regions", [])
+	_expect(regions.size() == PAGE_02_EXPECTED_REGIONS,
+		"page_02 has the %d regions layout 2 promises (%d)" % [PAGE_02_EXPECTED_REGIONS, regions.size()])
+	var nested := 0
+	for region_variant in regions:
+		var region: Dictionary = region_variant
+		# The background's holes are the shapes sitting on it; a nested region is
+		# a hole in a NON-background region -- exactly the sun's ring/core pair.
+		if int(region["id"]) != 1 and (region.get("holes", []) as Array).size() > 0:
+			nested += 1
+	_expect(nested == PAGE_02_EXPECTED_NESTED,
+		"page_02 has %d nested region(s) (%d)" % [PAGE_02_EXPECTED_NESTED, nested])
+
+	var idmap := load(page_02.id_map_path) as Texture2D
+	_expect(idmap != null, "page_02 ID map texture loads")
+	if idmap != null:
+		var idmap_image := idmap.get_image()
+		_expect(not idmap_image.is_compressed(),
+			"page_02 ID map is NOT VRAM-compressed (format %d)" % idmap_image.get_format())
+		_expect(not idmap_image.has_mipmaps(), "page_02 ID map has no mipmaps")
+		var base := load(page_02.base_image_path) as Texture2D
+		_expect(
+			base != null and idmap.get_size() == base.get_size(),
+			"page_02 ID map matches the base image size (%s)" % idmap.get_size()
+		)
+		# The strongest guarantee: the imported texture is the source PNG, bit for
+		# bit. Reading the raw PNG logs "this will not work on export" -- correct
+		# and expected: the source art is a DEV file, and only this dev check ever
+		# opens it. The game always goes through the importer.
+		var source := Image.load_from_file(page_02.id_map_path)
+		var imported := idmap_image
+		if imported.get_format() != source.get_format():
+			imported = imported.duplicate()
+			imported.convert(source.get_format())
+		_expect(imported.get_data() == source.get_data(),
+			"page_02 ID map round-trips byte-identically through the importer")
+
+	_check_import_flags(PAGE_02_IDMAP_IMPORT)
+
+
+func _check_import_flags(import_path: String) -> void:
+	var text := FileAccess.get_file_as_string(import_path)
+	_expect(text != "", "%s is readable" % import_path)
+	for key in REQUIRED_IDMAP_IMPORT_FLAGS:
+		var expected: String = REQUIRED_IDMAP_IMPORT_FLAGS[key]
+		var line := "%s=%s" % [key, expected]
+		_expect(text.contains(line), "page_02 ID map .import keeps %s" % line)
+
+
+# ====================================================== 2: coverage tracker ==
+# No GPU, no PageView readback: real region geometry from page 1, synthetic paint
+# images, injected threshold.
+
+func _check_coverage_tracker() -> void:
+	print("\n-- check 2: CoverageTracker (synthetic paint, injected threshold) --")
+	var probe := PAGE_VIEW_SCENE.instantiate() as PageView
+	_probe.add_child(probe)
+	await get_tree().process_frame
+	var page_01 := _book.get_page(0)
+	if not probe.load_page(page_01.base_image_path, page_01.id_map_path, page_01.regions_json_path):
+		_expect(false, "probe PageView loaded page 1")
+		probe.queue_free()
+		return
+
+	var page_size := probe.get_page_size()
+	var region_ids := probe.get_region_ids()
+
+	# --- grids ---------------------------------------------------------------
+	var tracker := CoverageTracker.new(UNIT_THRESHOLD)
+	var tracked := tracker.build_from_page_view(probe)
+	_expect(tracked == region_ids.size(),
+		"a sample grid was built for all %d regions (%d)" % [region_ids.size(), tracked])
+	_expect(is_equal_approx(tracker.get_threshold(), UNIT_THRESHOLD),
+		"threshold is the injected %.2f (%.2f)" % [UNIT_THRESHOLD, tracker.get_threshold()])
+
+	var densities := PackedStringArray()
+	var in_band := true
+	for region_id in region_ids:
+		var count := tracker.sample_count(region_id)
+		densities.append("%d:%d" % [region_id, count])
+		in_band = in_band and count >= CoverageTracker.MIN_SAMPLES_PER_REGION \
+			and count <= CoverageTracker.MAX_SAMPLES_PER_REGION
+	_expect(in_band,
+		"every region samples %d-%d points (region:samples = %s, total %d)"
+		% [CoverageTracker.MIN_SAMPLES_PER_REGION, CoverageTracker.MAX_SAMPLES_PER_REGION,
+			", ".join(densities), tracker.total_sample_count()])
+
+	# Every sample point must be a pixel the ID map awards to its own region --
+	# otherwise 100% coverage would be unreachable.
+	var stray := 0
+	for region_id in region_ids:
+		for point in tracker.get_sample_points(region_id):
+			if probe.get_region_id_at(point) != region_id:
+				stray += 1
+	_expect(stray == 0, "every sample point lies in its own region per the ID map (%d strays)" % stray)
+
+	# --- full cover of one region -------------------------------------------
+	var region_two_bounds := _region_bounds(probe, 2)
+	var completed: Array[int] = []
+	# Arrays, not ints: GDScript lambdas capture locals by VALUE, so `count += 1`
+	# inside one would increment a copy and the check would silently pass.
+	var page_done: Array[int] = []
+	tracker.region_completed.connect(func(id: int) -> void: completed.append(id))
+	tracker.page_completed.connect(func() -> void: page_done.append(1))
+
+	var full := _blank_paint(page_size)
+	full.fill_rect(region_two_bounds, Color(1.0, 0.0, 0.0, 1.0))
+	tracker.update_region(2, full)
+	_expect(is_equal_approx(tracker.region_coverage(2), 1.0),
+		"region 2 fully covered -> coverage %.3f" % tracker.region_coverage(2))
+	_expect(tracker.is_region_done(2), "region 2 reports done")
+	_expect(completed == [2], "region_completed fired once, for region 2 (%s)" % [completed])
+	_expect(page_done.is_empty(), "page_completed has NOT fired with 7 regions still empty")
+	tracker.update_region(2, full)
+	_expect(completed == [2], "re-sampling a done region does not re-fire region_completed")
+
+	# --- partial cover stays below the threshold -----------------------------
+	var partial_tracker := CoverageTracker.new(UNIT_THRESHOLD)
+	partial_tracker.build_from_page_view(probe)
+	var partial_completed: Array[int] = []
+	partial_tracker.region_completed.connect(func(id: int) -> void: partial_completed.append(id))
+	var half := _blank_paint(page_size)
+	var half_bounds := region_two_bounds
+	half_bounds.size.y = int(float(region_two_bounds.size.y) * 0.45)
+	half.fill_rect(half_bounds, Color(1.0, 0.0, 0.0, 1.0))
+	partial_tracker.update_region(2, half)
+	var partial_coverage := partial_tracker.region_coverage(2)
+	_expect(partial_coverage > 0.15 and partial_coverage < UNIT_THRESHOLD,
+		"45%% of region 2 painted -> coverage %.3f, below the %.2f threshold"
+		% [partial_coverage, UNIT_THRESHOLD])
+	_expect(not partial_tracker.is_region_done(2), "region 2 is NOT done below the threshold")
+	_expect(partial_completed.is_empty(), "region_completed did not fire (%s)" % [partial_completed])
+
+	# --- coverage never decreases -------------------------------------------
+	partial_tracker.update_region(2, _blank_paint(page_size))
+	_expect(is_equal_approx(partial_tracker.region_coverage(2), partial_coverage),
+		"re-sampling with an EMPTY paint image does not lower coverage (%.3f)"
+		% partial_tracker.region_coverage(2))
+
+	# --- every region covered -> page_completed, exactly once ----------------
+	var everything := _blank_paint(page_size)
+	everything.fill(Color(0.2, 0.4, 1.0, 1.0))
+	tracker.update_all(everything)
+	_expect(tracker.is_page_complete(), "every region done -> is_page_complete()")
+	_expect(tracker.done_region_count() == region_ids.size(),
+		"%d/%d regions done" % [tracker.done_region_count(), region_ids.size()])
+	_expect(is_equal_approx(tracker.page_coverage(), 1.0),
+		"page_coverage() is %.3f" % tracker.page_coverage())
+	_expect(page_done.size() == 1, "page_completed fired EXACTLY once (%d)" % page_done.size())
+	tracker.update_all(everything)
+	tracker.update_all(_blank_paint(page_size))
+	_expect(page_done.size() == 1, "further updates never re-fire page_completed (%d)" % page_done.size())
+	_expect(tracker.is_page_complete(), "the page stays complete after an empty re-sample")
+
+	# --- an empty tracker is not a complete page -----------------------------
+	var empty_tracker := CoverageTracker.new(UNIT_THRESHOLD)
+	_expect(not empty_tracker.is_page_complete(), "a tracker with no regions is NOT complete")
+
+	await _measure_readback_cost(probe)
+
+	probe.queue_free()
+	await get_tree().process_frame
+
+
+## The one expensive operation in the coverage strategy, measured (see
+## coverage_tracker.gd for why strategy (b) was chosen at all).
+##
+## It reports TWO numbers because they are wildly different and only one of them
+## is about this code: the transfer itself is a few milliseconds, but Godot's
+## synchronous readback additionally waits out the presentation queue when the
+## window presents with FIFO v-sync. That wait is pacing, not bandwidth -- it is
+## the same for a small main-viewport grab as for the 1024x1024 paint layer.
+##
+## The harness then leaves the window on MAILBOX so the rest of the run is not
+## dominated by ~0.5 s of presentation stall per stroke.
+func _measure_readback_cost(probe: PageView) -> void:
+	print("\n-- readback cost (coverage strategy (b): one get_paint_image() per stroke end) --")
+	var fifo := await _time_readbacks(probe, DisplayServer.VSYNC_ENABLED, 3)
+	var mailbox := await _time_readbacks(probe, DisplayServer.VSYNC_MAILBOX, 3)
+	print("   VSYNC_ENABLED (FIFO): %.1f ms/readback   VSYNC_MAILBOX: %.1f ms/readback"
+		% [fifo, mailbox])
+	print("   -> the transfer is %.1f ms; the rest is presentation pacing (M6 fix: texture_get_data_async)"
+		% mailbox)
+	_expect(mailbox < 40.0,
+		"the paint readback itself costs %.1f ms for a %s page" % [mailbox, probe.get_page_size()])
+	print("   [dev] leaving the window on VSYNC_MAILBOX for the rest of the run")
+
+
+func _time_readbacks(probe: PageView, vsync_mode: int, samples: int) -> float:
+	DisplayServer.window_set_vsync_mode(vsync_mode as DisplayServer.VSyncMode)
+	for i in 4:
+		await get_tree().process_frame
+	var total := 0
+	for i in samples:
+		await get_tree().process_frame
+		var started := Time.get_ticks_usec()
+		var _image := probe.get_paint_image()
+		total += Time.get_ticks_usec() - started
+	return float(total) / float(samples) / 1000.0
+
+
+static func _blank_paint(page_size: Vector2i) -> Image:
+	var image := Image.create(page_size.x, page_size.y, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0.0, 0.0, 0.0, 0.0))
+	return image
+
+
+static func _region_bounds(page_view: PageView, region_id: int) -> Rect2i:
+	var outline: PackedVector2Array = page_view.get_region_data(region_id)["outline"]
+	var minimum := outline[0]
+	var maximum := outline[0]
+	for point in outline:
+		minimum = minimum.min(point)
+		maximum = maximum.max(point)
+	return Rect2i(Vector2i(minimum.floor()), Vector2i(maximum.ceil()) - Vector2i(minimum.floor()))
+
+
+# =========================================================== 3: book select ==
+
+func _check_book_select() -> void:
+	print("\n-- check 3: BookSelect shelf --")
+	var shelf := BOOK_SELECT_SCENE.instantiate() as BookSelect
+	_host.add_child(shelf)
+	await get_tree().process_frame
+
+	var count := shelf.load_books()
+	_expect(count == 1, "shelf loaded %d book by scanning res://resources/books/ (%d)" % [1, count])
+	await _settle_layout()
+
+	var cells := shelf.get_cells()
+	_expect(cells.size() == 1, "one BookCell rendered (%d)" % cells.size())
+	if cells.is_empty():
+		shelf.queue_free()
+		return
+	var cell := cells[0]
+	_expect(cell.get_book() == _book, "the cell carries the discovered BookDef")
+	_expect(cell.get_title_text() == _book.display_name,
+		"the cell shows the title ('%s')" % cell.get_title_text())
+	_expect(cell.get_subtitle_text() == "2 pages",
+		"the cell shows the page count ('%s')" % cell.get_subtitle_text())
+	_expect(cell.has_cover(), "the cell shows cover art")
+	_expect(
+		minf(cell.size.x, cell.size.y) >= BookCell.MIN_TOUCH_TARGET,
+		"the touch target is >= %.0f px (%.0f x %.0f)"
+		% [BookCell.MIN_TOUCH_TARGET, cell.size.x, cell.size.y]
+	)
+	_expect(
+		cell.global_position.x >= 0.0 and cell.get_global_rect().end.x <= shelf.size.x + 1.0,
+		"a single book still lays out inside the shelf (x %.0f..%.0f of %.0f)"
+		% [cell.global_position.x, cell.get_global_rect().end.x, shelf.size.x]
+	)
+
+	var chosen: Array[BookDef] = []
+	shelf.book_chosen.connect(func(book: BookDef) -> void: chosen.append(book))
+	# The real input path: BaseButton reports `pressed`.
+	cell.pressed.emit()
+	_expect(chosen.size() == 1 and chosen[0] == _book,
+		"pressing the cell emitted book_chosen with the right BookDef (%d event(s))" % chosen.size())
+
+	# Narrow layout. The WINDOW cannot be used for this: the project stretches
+	# canvas_items with aspect "expand", so the logical viewport stays 1152 wide
+	# whatever the window does. Resize the screen Control itself instead.
+	shelf.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	shelf.size = Vector2(420.0, 820.0)
+	await _settle_layout()
+	_expect(
+		cell.global_position.x >= 0.0 and cell.get_global_rect().end.x <= shelf.size.x + 1.0,
+		"a 420 px-wide shelf still fits the single book (cell x %.0f..%.0f)"
+		% [cell.global_position.x, cell.get_global_rect().end.x]
+	)
+	shelf.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	await _settle_layout()
+
+	await _screenshot("book_select.png")
+	shelf.queue_free()
+	await get_tree().process_frame
+
+
+# ========================================================= 4/5: colouring ==
+
+func _check_coloring_flow() -> void:
+	print("\n-- check 4: ColoringPage, real strokes, page flip --")
+	var screen := COLORING_PAGE_SCENE.instantiate() as ColoringPage
+	_host.add_child(screen)
+	await get_tree().process_frame
+
+	screen.get_page_flip().flip_started.connect(_on_flip_started)
+	screen.get_page_flip().flip_finished.connect(func() -> void: _flip_finished_count += 1)
+	screen.page_changed.connect(func(index: int) -> void: _page_changed_events.append(index))
+	screen.page_completed.connect(func(index: int) -> void: _page_completed_events.append(index))
+	screen.book_completed.connect(func(book: BookDef) -> void: _book_completed_events.append(book))
+	screen.coverage_updated.connect(_on_coverage_updated)
+
+	_expect(screen.load_book(_book), "load_book(test_book) succeeded")
+	await _settle_layout()
+
+	var page_view := screen.get_page_view()
+	_expect(page_view.is_page_loaded(), "PageView holds page 1")
+	_expect(screen.get_page_label_text() == "1/2",
+		"toolbar reads 1/2 ('%s')" % screen.get_page_label_text())
+	_expect(GameState.current_book == _book and GameState.current_page_index == 0,
+		"GameState cursor is (test_book, page 0)")
+
+	var palette := screen.get_palette()
+	_expect(palette != null, "the mode's palette component was instantiated (%s)" % (palette.get_class() if palette else "none"))
+	var palette_def := GameState.get_active_palette()
+	_expect(palette != null and palette.get_palette() == palette_def,
+		"the palette was handed the active PaletteDef")
+	_expect(is_equal_approx(page_view.brush_size, palette_def.default_brush_size),
+		"PageView.brush_size follows the palette (%.0f px)" % page_view.brush_size)
+	_expect(page_view.brush_color == palette_def.get_color(0),
+		"PageView.brush_color follows the palette (#%s)" % page_view.brush_color.to_html(false))
+	_expect(is_equal_approx(page_view.brush_hardness, palette_def.default_brush_hardness),
+		"PageView.brush_hardness came from the def (%.2f)" % page_view.brush_hardness)
+
+	var tracker := screen.get_coverage_tracker()
+	_expect(tracker != null and is_equal_approx(tracker.get_threshold(), palette_def.completion_threshold),
+		"the tracker's threshold is the palette's %.2f" % palette_def.completion_threshold)
+
+	# Remember page 1's ID map so we can prove the page really swapped later.
+	var page_01_ids := page_view.get_id_map_image().duplicate()
+	var page_02_ids := (load(_book.get_page(1).id_map_path) as Texture2D).get_image()
+	var only_page_02 := _find_pixel(page_01_ids, page_02_ids, true)
+	var only_page_01 := _find_pixel(page_01_ids, page_02_ids, false)
+	_expect(only_page_02.x >= 0.0 and only_page_01.x >= 0.0,
+		"found coordinates that tell the pages apart: %s is line art on page 1 / paintable on page 2, %s is the reverse"
+		% [only_page_02, only_page_01])
+
+	# --- paint page 1 --------------------------------------------------------
+	var strokes := await _fill_page(screen)
+	print("   page 1 filled with %d strokes" % strokes)
+	_expect(tracker.is_page_complete(),
+		"every region of page 1 reached the threshold (%d/%d done, page coverage %.3f)"
+		% [tracker.done_region_count(), tracker.region_count(), tracker.page_coverage()])
+	_expect(_page_completed_events == [0], "page_completed fired once for page 0 (%s)" % [_page_completed_events])
+	_expect(_coverage_regressions.is_empty(),
+		"coverage never decreased across %d samples (%s)" % [_coverage_history.size(), _coverage_regressions])
+
+	# --- the flip ------------------------------------------------------------
+	await _wait_until(func() -> bool: return not screen.is_transitioning(), 12.0)
+	_expect(_flip_started_count == 1, "the page flip played (started %d)" % _flip_started_count)
+	_expect(_flip_finished_count == 1, "flip_finished was received (%d)" % _flip_finished_count)
+	_expect(not screen.get_page_flip().visible, "the flip overlay hid itself again")
+	_expect(screen.get_page_flip().mouse_filter == Control.MOUSE_FILTER_IGNORE,
+		"the flip overlay stopped intercepting input")
+	_expect(_page_changed_events == [0, 1], "page_changed fired for pages 0 then 1 (%s)" % [_page_changed_events])
+	_expect(screen.get_page_label_text() == "2/2",
+		"toolbar now reads 2/2 ('%s')" % screen.get_page_label_text())
+	_expect(GameState.current_page_index == 1, "GameState cursor advanced to page 1")
+
+	_expect(page_view.get_region_id_at(only_page_02) > 0,
+		"PageView now shows page_02: %s is paintable region %d (it is line art on page 1)"
+		% [only_page_02, page_view.get_region_id_at(only_page_02)])
+	_expect(page_view.get_region_id_at(only_page_01) == 0,
+		"...and %s is line art now (it was paintable region %d on page 1)"
+		% [only_page_01, _id_at(page_01_ids, only_page_01)])
+
+	var fresh_tracker := screen.get_coverage_tracker()
+	_expect(fresh_tracker != tracker, "a fresh CoverageTracker was built for page 2")
+	_expect(fresh_tracker.page_coverage() == 0.0,
+		"page 2 starts at 0 coverage (%.3f)" % fresh_tracker.page_coverage())
+
+	# --- the palette still drives the brush on the new page ------------------
+	print("\n-- check 4b: palette still functional after the flip --")
+	var pick_index := 5
+	palette.select_color(pick_index)
+	var expected_color := palette_def.get_color(pick_index)
+	_expect(page_view.brush_color == expected_color,
+		"picking crayon %d set the brush to #%s" % [pick_index, expected_color.to_html(false)])
+	var sun_core := Vector2(270.5, 250.5)
+	_expect(page_view.get_region_id_at(sun_core) > 0, "precondition: %s is paintable on page 2" % sun_core)
+	page_view.begin_stroke(sun_core)
+	page_view.continue_stroke(sun_core + Vector2(0.0, 30.0))
+	page_view.end_stroke()
+	await _wait_for_coverage(screen)
+	var paint := page_view.get_paint_image()
+	if paint.get_format() != Image.FORMAT_RGBA8:
+		paint.convert(Image.FORMAT_RGBA8)
+	var core := paint.get_pixel(int(sun_core.x), int(sun_core.y))
+	var worst := maxi(
+		absi(core.r8 - expected_color.r8),
+		maxi(absi(core.g8 - expected_color.g8), absi(core.b8 - expected_color.b8))
+	)
+	_expect(core.a8 >= 250, "the new stroke's core pixel is opaque (a=%d)" % core.a8)
+	_expect(worst <= COLOR_TOLERANCE,
+		"the core pixel is the picked palette colour (worst channel delta %d/255)" % worst)
+
+	# --- finish page 2 -> book_completed ------------------------------------
+	print("\n-- check 5: finishing the last page --")
+	var strokes_2 := await _fill_page(screen)
+	print("   page 2 filled with %d strokes" % strokes_2)
+	await _wait_until(func() -> bool: return not _book_completed_events.is_empty(), 12.0)
+	_expect(fresh_tracker.is_page_complete(),
+		"every region of page 2 reached the threshold (%d/%d done)"
+		% [fresh_tracker.done_region_count(), fresh_tracker.region_count()])
+	_expect(_page_completed_events == [0, 1], "page_completed fired for both pages (%s)" % [_page_completed_events])
+	_expect(_book_completed_events.size() == 1 and _book_completed_events[0] == _book,
+		"book_completed fired once with the test book (%d event(s))" % _book_completed_events.size())
+	_expect(_flip_started_count == 1, "no flip played past the last page (%d)" % _flip_started_count)
+
+	# --- back button ---------------------------------------------------------
+	var back_events: Array[int] = []
+	screen.back_requested.connect(func() -> void: back_events.append(1))
+	(screen.get_node("Ui/Toolbar/Row/BackButton") as Button).pressed.emit()
+	_expect(back_events.size() == 1,
+		"the toolbar's back button emits back_requested (%d)" % back_events.size())
+
+	print("   readbacks: %d, last %.2f ms, average %.2f ms"
+		% [screen.get_readback_count(), screen.get_last_readback_usec() / 1000.0,
+			screen.get_average_readback_usec() / 1000.0])
+	_expect(screen.get_readback_count() > 0, "coverage used %d paint readbacks (one per stroke end)"
+		% screen.get_readback_count())
+
+	screen.queue_free()
+	await get_tree().process_frame
+
+
+func _on_flip_started() -> void:
+	_flip_started_count += 1
+	# Screenshot the transition roughly halfway through the turn.
+	await get_tree().create_timer(PageFlip.DEFAULT_DURATION * 0.45).timeout
+	await _screenshot("flip_moment.png")
+
+
+func _on_coverage_updated(region_id: int, coverage: float) -> void:
+	var previous: float = _coverage_history.get(region_id, 0.0)
+	if coverage < previous - 0.0001:
+		_coverage_regressions.append("region %d: %.3f -> %.3f" % [region_id, previous, coverage])
+	_coverage_history[region_id] = maxf(previous, coverage)
+
+
+# ------------------------------------------------------------ paint helpers --
+
+## Paints every region of the current page until the tracker calls it done.
+## Returns the number of strokes issued. Strokes go through the same
+## begin/continue/end entry points the touch path uses.
+func _fill_page(screen: ColoringPage) -> int:
+	var page_view := screen.get_page_view()
+	var strokes := 0
+	for region_id in page_view.get_region_ids():
+		if screen.is_transitioning():
+			break
+		strokes += await _flood_region(screen, region_id)
+	return strokes
+
+
+func _flood_region(screen: ColoringPage, region_id: int) -> int:
+	var page_view := screen.get_page_view()
+	var tracker := screen.get_coverage_tracker()
+	var data := page_view.get_region_data(region_id)
+	if data.is_empty():
+		return 0
+	var bounds := _region_bounds(page_view, region_id)
+	var radius := page_view.brush_size * 0.5
+	var step := maxi(int(radius * FLOOD_ROW_RATIO), 8)
+
+	var rows: Array[int] = []
+	var y := bounds.position.y + 2
+	while y < bounds.end.y - 2:
+		rows.append(y)
+		y += step
+	rows.append(bounds.end.y - 2)
+
+	var strokes := 0
+	for row in rows:
+		if tracker != null and tracker.is_region_done(region_id):
+			break
+		if screen.is_transitioning():
+			break
+		var start_x := _first_x_in_region(page_view, region_id, bounds, row)
+		if start_x < 0:
+			continue
+		# One sweep per row: the shader clips it to this region, so every run of
+		# the region on that row gets painted by a single stroke.
+		page_view.begin_stroke(Vector2(float(start_x) + 0.5, float(row) + 0.5))
+		page_view.continue_stroke(Vector2(float(bounds.end.x) - 0.5, float(row) + 0.5))
+		page_view.end_stroke()
+		strokes += 1
+		await _wait_for_coverage(screen)
+	return strokes
+
+
+static func _first_x_in_region(page_view: PageView, region_id: int, bounds: Rect2i, row: int) -> int:
+	var x := bounds.position.x
+	while x < bounds.end.x:
+		if page_view.get_region_id_at(Vector2(float(x) + 0.5, float(row) + 0.5)) == region_id:
+			return x
+		x += 2
+	return -1
+
+
+func _wait_for_coverage(screen: ColoringPage) -> void:
+	for i in 40:
+		if not screen.has_pending_coverage():
+			return
+		await get_tree().process_frame
+
+
+# ------------------------------------------------------------ page identity --
+
+## A page pixel that is line art in one ID map and paintable in the other.
+## [param paintable_in_second] picks which direction.
+static func _find_pixel(first: Image, second: Image, paintable_in_second: bool) -> Vector2:
+	var width := mini(first.get_width(), second.get_width())
+	var height := mini(first.get_height(), second.get_height())
+	var y := PAGE_DIFF_SCAN_STEP
+	while y < height - PAGE_DIFF_SCAN_STEP:
+		var x := PAGE_DIFF_SCAN_STEP
+		while x < width - PAGE_DIFF_SCAN_STEP:
+			var a := _id_of(first, x, y)
+			var b := _id_of(second, x, y)
+			if paintable_in_second and a == 0 and b > 0:
+				return Vector2(float(x) + 0.5, float(y) + 0.5)
+			if not paintable_in_second and a > 0 and b == 0:
+				return Vector2(float(x) + 0.5, float(y) + 0.5)
+			x += PAGE_DIFF_SCAN_STEP
+		y += PAGE_DIFF_SCAN_STEP
+	return Vector2(-1.0, -1.0)
+
+
+static func _id_of(image: Image, x: int, y: int) -> int:
+	var pixel := image.get_pixel(x, y)
+	return (pixel.r8 << 16) | (pixel.g8 << 8) | pixel.b8
+
+
+static func _id_at(image: Image, position: Vector2) -> int:
+	return _id_of(image, int(position.x), int(position.y))
+
+
+# ========================================================= 6: the M2/M3 smokes ==
+
+## Re-runs the earlier milestones' smoke tests as child processes, so one command
+## proves the whole stack. Uses this build's own executable, so it works wherever
+## the project is checked out.
+func _check_sub_smokes() -> void:
+	print("\n-- check 6: the M2 and M3 smoke tests still pass --")
+	if "--skip-subsmokes" in OS.get_cmdline_user_args():
+		print("SKIP - --skip-subsmokes given (run them yourself)")
+		return
+	for scene in ["res://scenes/dev/paint_smoke.tscn", "res://scenes/dev/palette_smoke.tscn"]:
+		var output: Array = []
+		var code := OS.execute(
+			OS.get_executable_path(),
+			["--path", ProjectSettings.globalize_path("res://"), scene],
+			output,
+			true
+		)
+		var text := "\n".join(output.map(func(line: Variant) -> String: return String(line)))
+		var summary := ""
+		for line in text.split("\n"):
+			if line.begins_with("==="):
+				summary = line.strip_edges()
+		_expect(code == 0, "%s exited %d %s" % [scene.get_file(), code, summary])
+
+
+# =================================================================== helpers ==
+
+func _expect(condition: bool, description: String) -> void:
+	_checks += 1
+	if not condition:
+		_failures += 1
+	print("%s - %s" % ["PASS" if condition else "FAIL", description])
+
+
+func _settle_layout() -> void:
+	for i in 3:
+		await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+
+
+## Polls [param condition] once per frame for at most [param timeout_seconds].
+func _wait_until(condition: Callable, timeout_seconds: float) -> bool:
+	var deadline := Time.get_ticks_msec() + int(timeout_seconds * 1000.0)
+	while Time.get_ticks_msec() < deadline:
+		if bool(condition.call()):
+			return true
+		await get_tree().process_frame
+	return false
+
+
+func _screenshot(file_name: String) -> void:
+	await RenderingServer.frame_post_draw
+	var path := _shot_dir.path_join(file_name)
+	var error := get_viewport().get_texture().get_image().save_png(path)
+	print("   screenshot: %s (%s)" % [
+		ProjectSettings.globalize_path(path), "ok" if error == OK else "error %d" % error
+	])
+
+
+static func _arg_value(flag: String, fallback: String) -> String:
+	var args := OS.get_cmdline_user_args()
+	var index := args.find(flag)
+	if index >= 0 and index + 1 < args.size():
+		return args[index + 1]
+	return fallback
