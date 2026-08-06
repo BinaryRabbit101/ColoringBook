@@ -1,5 +1,19 @@
 <?php
 
+/*
+ * The root of the private content tree, relative to `storage/app`, as declared
+ * by `coloringbook.storage.private_root`. The three private disks below are
+ * rooted at `<private_root>/{packs,assets,paint}` — read here rather than
+ * through `config()` because a disk's root has to be a literal by the time the
+ * filesystem manager resolves it.
+ *
+ * It exists so a browser-test run can be given its own tree
+ * (`.env.dusk.local` sets `private/dusk`) instead of writing pack, asset and
+ * paint blobs into the developer's own `storage/app/private/`, where nothing
+ * in the dev database would ever account for them again.
+ */
+$private = 'app/'.trim((string) env('COLORINGBOOK_PRIVATE_ROOT', 'private'), '/');
+
 return [
 
     /*
@@ -56,7 +70,7 @@ return [
 
         'packs' => [
             'driver' => 'local',
-            'root' => storage_path('app/private/packs'),
+            'root' => storage_path($private.'/packs'),
             'serve' => false,
             'throw' => true,
             'report' => false,
@@ -64,7 +78,7 @@ return [
 
         'assets' => [
             'driver' => 'local',
-            'root' => storage_path('app/private/assets'),
+            'root' => storage_path($private.'/assets'),
             'serve' => false,
             'throw' => true,
             'report' => false,
@@ -72,7 +86,7 @@ return [
 
         'paint' => [
             'driver' => 'local',
-            'root' => storage_path('app/private/paint'),
+            'root' => storage_path($private.'/paint'),
             'serve' => false,
             'throw' => true,
             'report' => false,

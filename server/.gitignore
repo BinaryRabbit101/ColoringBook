@@ -18,7 +18,10 @@
 .DS_Store
 .env
 .env.backup
+.env.dusk-backup
 .env.production
+/storage/app/private/dusk
+/storage/logs/dusk-serve.log
 .phpactor.json
 .phpunit.result.cache
 Homestead.json

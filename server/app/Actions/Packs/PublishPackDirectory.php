@@ -226,13 +226,6 @@ class PublishPackDirectory
                         continue;
                     }
 
-                    if ($role === 'mask') {
-                        $warnings[] = sprintf(
-                            'The pack ships a mask ("%s"). Masks are source-only and are stored but never delivered (BL-9, §7.2).',
-                            $path,
-                        );
-                    }
-
                     $roles[$path.':'.$role] = [$path, $role];
                 }
             }
@@ -329,8 +322,8 @@ class PublishPackDirectory
                     'page_index' => is_int($pageData['page_index'] ?? null) ? $pageData['page_index'] : $position,
                     'title' => is_string($title) ? $title : null,
                     'display_asset_id' => $assets[$pageData['display'].':display']->id,
-                    // Null is the ordinary case: the mask is optional and
-                    // source-only (BL-9 / BL-12).
+                    // The mask is optional per page; when present it ships in
+                    // the pack and renders under the display art (BL-12).
                     'mask_asset_id' => is_string($mask) && $mask !== ''
                         ? ($assets[$mask.':mask']->id ?? null)
                         : null,

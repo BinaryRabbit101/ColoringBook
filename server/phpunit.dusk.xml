@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    The browser suite — WP8. `php artisan dusk` looks for this file by name
+    and, finding it, leaves it alone; without it Dusk writes its own copy from
+    a stub on every run and deletes it afterwards.
+
+    Deliberately no <php><env> block. The `php artisan serve` process the
+    browser talks to reads .env and nothing else, so an override set here would
+    apply to the test process only — the two would disagree about which
+    database they are looking at, which is the one way a Dusk suite can go
+    green while proving nothing. Everything the run needs is in
+    .env.dusk.local, which both processes read.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         backupGlobals="false"
+         backupStaticProperties="false"
+         beStrictAboutTestsThatDoNotTestAnything="false"
+         cacheDirectory=".phpunit.cache"
+         colors="true"
+         processIsolation="false"
+         stopOnError="false"
+         stopOnFailure="false"
+>
+    <testsuites>
+        <testsuite name="Browser">
+            <directory suffix="Test.php">tests/Browser</directory>
+        </testsuite>
+    </testsuites>
+</phpunit>

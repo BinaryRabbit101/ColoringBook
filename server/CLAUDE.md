@@ -721,3 +721,177 @@ If `composer test` dies inside Pint with a phar path pointing at a *different*
 worktree, that is opcache's shared segment holding another checkout's
 compilation of the same Pint phar, not your code. `php -d opcache.enable_cli=0
 <composer> test` steps around it.
+
+## WP8 — Dusk browser tests
+
+`laravel/dusk` v8.6 (`php-webdriver/webdriver` 1.16) covers the human-facing
+half of the app: the pages a parent or the operator actually clicks. The API is
+covered by the Pest suite and is not re-tested here.
+
+**The `composer test` gate is untouched.** `phpunit.xml` names only the `Unit`
+and `Feature` suites, so `php artisan test` never sees `tests/Browser`; the
+browser suite has its own `phpunit.dusk.xml`. Nothing about WP8 makes the gate
+slower or browser-dependent.
+
+### Running it
+
+```
+composer test:dusk                        # the whole browser suite
+composer test:dusk -- --filter=AdminTest  # one class, or one method
+```
+
+That is a single command on purpose — a Dusk run needs a web server, a
+database and a browser that all agree with each other, and getting one of the
+three wrong produces a suite that goes green while proving nothing.
+`tests/dusk.php` is the runner:
+
+1. Copies `.env.dusk.local` over `.env` (original to `.env.dusk-backup`) and
+   clears the config cache, so the server process, the test process and every
+   artisan call below read one configuration.
+2. `migrate:fresh` on the Dusk database, and empties
+   `storage/app/private/dusk` — a run writes real pack, asset and paint files,
+   and leftovers from a previous run are a source of tests that pass for the
+   wrong reason.
+3. Starts `php artisan serve --no-reload` on the port `APP_URL` names, **unless
+   something is already listening there**, so you can keep a server in its own
+   window if you prefer.
+4. Runs `php artisan dusk`, forwarding your arguments.
+5. Stops the server and restores `.env` on *every* exit path, Ctrl-C included.
+   A run that leaves the development `.env` replaced by the testing one is a
+   much worse failure than a red test.
+
+To drive it by hand instead: copy `.env.dusk.local` over `.env`, run
+`php artisan serve --port=8991` in one window and `php artisan dusk` in
+another, then put `.env` back. `php artisan dusk` alone also works — it does
+the same swap by the same filename convention, and finds `.env` already
+identical so the two never fight.
+
+### The `.env.dusk.local` contract
+
+Committed, and containing nothing that is a secret anywhere else — the key in
+it is deliberately not the development key.
+
+| Setting | Why |
+|---|---|
+| `APP_URL=http://127.0.0.1:8991` | **Not** 8000. `composer dev` may be serving the real app on 8000 against the real database, and a browser test that quietly drove *that* is the worst outcome available. |
+| `DB_DATABASE=database/dusk.sqlite` | A real file, never `:memory:` (two processes) and never `database/database.sqlite` — `DatabaseMigrations` runs `migrate:fresh` before **every test**, so one run pointed at the development database would wipe it. |
+| `COLORINGBOOK_PRIVATE_ROOT=private/dusk` | Its own `packs`/`assets`/`paint` tree, emptied at the start of each run. |
+| `MAIL_MAILER=log` | Nothing leaves the box; `log` rather than `array` so a registration test is still debuggable from `storage/logs/laravel.log`. |
+| `BCRYPT_ROUNDS=4`, `CACHE_STORE=array`, `QUEUE_CONNECTION=sync` | Every test signs somebody in; a queued job must have finished by the time the redirect lands. |
+| `SESSION_DRIVER=database` | Matches production — the login/logout tests are only worth anything against the session store the deployment uses. |
+
+`config/filesystems.php` gained one thing to make that third row work: the
+three private disks now read `COLORINGBOOK_PRIVATE_ROOT` (default `private`,
+so nothing moved) rather than hard-coding `app/private/...`.
+`config/coloringbook.php` had documented that knob since WP1 without anything
+implementing it.
+
+### `DatabaseMigrations`, and no `Storage::fake()`
+
+`RefreshDatabase` **cannot work with Dusk**. It wraps each test in a
+transaction on *this* process's connection, and the code under test runs in a
+separate `php artisan serve` process that would never see inside it. Hence a
+real file and `migrate:fresh` between tests (`tests/DuskTestCase.php`).
+
+The same fact rules out `Storage::fake()` anywhere in this suite: a fake disk
+exists only in the test process's container, and the process being asked for
+those bytes is the server. `Tests\Concerns\SeedsBrowserFixtures` therefore
+writes rows **and real files** — `seedContestedPage()` for a page that has lost
+a last-write-wins race, `seedDraftPack()` importing the `meadow-mates` fixture
+through the real `PublishPackDirectory` as an unpublished draft.
+
+### What is covered
+
+| File | Ground |
+|---|---|
+| `RegistrationTest` | The guardian checkbox is required; confirming it lands on the dashboard; a taken email is refused. |
+| `AuthenticationTest` | Sign in, wrong password, sign out from the sidebar menu, dashboard unreachable signed out. |
+| `ChildProfilesTest` | Add, rename, the **two-step** remove and its cancel, and the per-account guard rail. |
+| `DevicesTest` | A seeded device renders; signing it out deletes the token row and leaves the device row and the other devices alone. |
+| `AccountDeletionTest` | Wrong password deletes nothing; the right one hard-deletes the household, its paint blobs included, and nobody else's. |
+| `PicturesTest` | A contested page is listed under the right shelf; restore swaps the two versions on disk and in the database; twice puts it back. |
+| `AdminTest` | Non-admin: no sidebar entry and a 404. Admin: pack list, create a draft, publish a version, grant a promo entitlement, unknown email is a field error. |
+
+Two assertions that look obvious and are wrong, both learned the hard way:
+
+- On the pack page, `assertDontSee('draft')` and `assertDontSee('Publish')` can
+  never come true — the page's own prose says "filed as a draft" and
+  "Published versions are immutable". Assert that `form[action$="/publish"]`
+  is gone instead.
+- After a restore, `settings/pictures` does **not** go empty. A restore is a
+  swap: the version it displaced takes the retained slot and is restorable in
+  turn. Assert that *that* retained ulid's button is gone.
+
+### Windows quirks
+
+- **Chrome's "Save password?" bubble breaks the entire browser session.**
+  This one cost the most to find, so: submit the login form successfully once
+  and Chrome's password manager raises its save-password bubble — browser UI,
+  outside the page, invisible in headless — which takes browser-level input
+  focus, and **every subsequent keystroke in the session goes to it instead of
+  the page**. The symptom gives nothing away: `document.hasFocus()` is true,
+  the field is `document.activeElement`, WebDriver's send-keys returns success,
+  and the input stays empty. Neither `type()`, `keys()`, focusing via
+  JavaScript, nor a full `refresh()` recovers it. Because the fields are
+  `required` and uncontrolled, the form then silently refuses to submit — no
+  request, no validation message, no console output, a byte-identical DOM — and
+  the test times out somewhere else entirely. `DuskTestCase::driver()` disables
+  it with `--disable-save-password-bubble` plus the `credentials_enable_service`
+  and `password_manager_enabled` prefs. Only the login form triggers it,
+  because it is the one carrying `autocomplete="current-password"`;
+  registration's `new-password` fields do not — which is exactly why the
+  registration tests always passed and the ones after a login did not.
+- `goog:loggingPrefs` is **not** set by Dusk's scaffolding, so
+  `storeConsoleLog()` writes an empty file — indistinguishable from "no
+  JavaScript errors" precisely when a test is failing because of one.
+  `DuskTestCase::driver()` turns it on; `tests/Browser/console` is worth
+  reading now.
+- `php artisan dusk` prints `Warning: TTY mode is not supported on Windows
+  platform.` on every run. It is noise.
+- PAO (this box's output condenser) reads Dusk's PHPUnit-style output well
+  enough for pass/fail, but `PAO_DISABLE=1 php tests/dusk.php` gives the full
+  failure text with the stack frame you actually need.
+- The runner kills the server with `taskkill /F /T`: `php artisan serve` runs
+  the built-in server as a **child**, and terminating the artisan process alone
+  orphans the thing holding the port — the next run then silently reuses a
+  server pointed at the old configuration.
+- The Pint/opcache note above applies to `tests/dusk.php` too: run it as
+  `php -d opcache.enable_cli=0 tests/dusk.php` if Pint misbehaves.
+
+### Helpers worth knowing before writing a browser test
+
+`tests/DuskTestCase.php`:
+
+- `fill($browser, $cssSelector, $value)` — types, then **reads the value back**
+  before moving on. Given uncontrolled `required` inputs, an empty field fails
+  silently and miles away from the cause; this makes it fail loudly and name
+  the field. Takes a CSS selector, not a field name, because `value()` does not
+  do `type()`'s name-attribute lookup.
+- `clickUntil($browser, $selector, $until)` — a click that lands before reka-ui
+  has wired a trigger is accepted by WebDriver and does nothing, and `click()`
+  reports success either way. Retries up to three times, each with its own
+  settle window; **never poll-and-reclick in a tight loop on a toggle**, or the
+  retry closes what the first click opened.
+- `visitLogin()` — waits for the passkey block, which renders late off an async
+  capability probe and moves the form underneath it.
+- `blank()` — clears cookies for tests that must start signed out.
+- `openAccountMenu()` — the sidebar dropdown that holds "Log out".
+
+### Chromedriver
+
+```
+php artisan dusk:chrome-driver --detect   # match the installed Chrome
+```
+
+`dusk:install` fetches the **latest** driver, which is not necessarily the one
+this box needs — it pulled 151 for a Chrome 150 install. `--detect` reads the
+installed browser and fetched 150.0.7871.124. Re-run it after Chrome
+auto-updates; the symptom is every test failing at session creation with a
+version-mismatch message.
+
+### phpstan
+
+Nothing to exclude. `phpstan.neon` analyses `app/`, `bootstrap/app.php`,
+`config/`, `database/` and `routes/` — tests have never been in scope, so
+`tests/Browser` and `tests/dusk.php` are outside it by construction. This
+matches the sibling apps on this box; don't "fix" it by adding `tests/`.

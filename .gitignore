@@ -1,0 +1,3 @@
+# Pack build output (godot/tools/build_pack.gd) — regenerable art copies.
+# Lives outside godot/ so the engine never imports the PNGs.
+/build/

@@ -198,8 +198,8 @@ class PackManifestValidator
                 $seenIndexes[] = $index;
             }
 
-            // `mask` is optional and normally absent: the outline mask is
-            // source-only and never ships (BL-9 / BL-12, §7.2).
+            // `mask` is optional per page: when the page has one, the shipped
+            // display-resolution mask rides in the pack (BL-12, §7.2).
             foreach (['display', 'idmap', 'regions'] as $role) {
                 $path = $page[$role] ?? null;
 

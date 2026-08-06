@@ -11,9 +11,9 @@ namespace App\Services;
  * they need to be unit-testable against a bare directory of PNGs, with no
  * manifest and no database in sight.
  *
- * `mask` is deliberately absent. The outline mask is optional and source-only
- * — it is stored so a page can be re-mapped later, never shipped, never
- * rendered, and never part of the display/ID-map contract (BL-9 / BL-12).
+ * `mask` is deliberately absent. The mask is optional per page and, since
+ * BL-12, ships in the pack and renders under the display art — but it is
+ * still no part of the display/ID-map mapping contract these checks guard.
  */
 final readonly class PageArtifacts
 {
