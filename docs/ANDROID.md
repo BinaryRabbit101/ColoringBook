@@ -11,17 +11,15 @@ templates. Everything below is machine setup, not project work.
 | Android SDK | **installed** — `C:\Users\binar\AppData\Local\Android\Sdk` (already in editor settings) |
 | Java (JDK 17+) | **installed** — `C:\Program Files\Eclipse Adoptium\jdk-25.0.0.36-hotspot` |
 | Debug keystore | **present** — `%APPDATA%\Godot\keystores\debug.keystore` (pass `android`) |
-| Export templates **4.5.1.stable** | **MISSING** — only `4.4.1.stable` is installed |
+| Export templates **4.5.1.stable** | **installed** (2026-08-05, same day, after the M6 audit — Android + Web templates extracted from the official `.tpz` into `%APPDATA%\Godot\export_templates\4.5.1.stable\`) |
 
-So the only blocker is the export templates, and therefore **no APK was built for M6**. The exact
-failure:
+All prerequisites are now met on this machine: a signed debug APK (57.6 MB) built clean with the
+command in "Building" below. On a fresh machine, the missing-template failure looks like:
 
 ```
 ERROR: Cannot export project with preset "Android" due to configuration errors:
 No export template found at the expected path:
 C:/Users/binar/AppData/Roaming/Godot/export_templates/4.5.1.stable/android_debug.apk
-No export template found at the expected path:
-C:/Users/binar/AppData/Roaming/Godot/export_templates/4.5.1.stable/android_release.apk
 ```
 
 ## The one-time setup
