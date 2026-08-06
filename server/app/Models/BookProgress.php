@@ -10,9 +10,11 @@ use Illuminate\Database\Eloquent\Attributes\Guarded;
 use Illuminate\Database\Eloquent\Attributes\Scope;
 use Illuminate\Database\Eloquent\Attributes\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Carbon;
 
 /**
@@ -40,6 +42,7 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $updated_at
  * @property-read User $user
  * @property-read ChildProfile|null $childProfile
+ * @property-read Collection<int, PaintLayer> $paintLayers
  */
 #[Table('book_progress')]
 #[Guarded(['*'])]
@@ -79,6 +82,19 @@ class BookProgress extends Model
     public function childProfile(): BelongsTo
     {
         return $this->belongsTo(ChildProfile::class);
+    }
+
+    /**
+     * The pictures painted in this book on this shelf (WP4, design §5).
+     *
+     * One row per painted page, cascading on delete — a shelf's progress and
+     * its pixels live and die together.
+     *
+     * @return HasMany<PaintLayer, $this>
+     */
+    public function paintLayers(): HasMany
+    {
+        return $this->hasMany(PaintLayer::class);
     }
 
     /**

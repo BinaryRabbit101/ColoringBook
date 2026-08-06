@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Settings\ChildProfileController;
 use App\Http\Controllers\Settings\DeviceController;
+use App\Http\Controllers\Settings\PaintController;
 use App\Http\Controllers\Settings\ProfileController;
 use App\Http\Controllers\Settings\SecurityController;
 use Illuminate\Auth\Middleware\RequirePassword;
@@ -29,6 +30,15 @@ Route::middleware(['auth'])->group(function () {
 
     Route::get('settings/devices', [DeviceController::class, 'index'])->name('devices.edit');
     Route::delete('settings/devices/{device}', [DeviceController::class, 'destroy'])->name('devices.destroy');
+
+    /*
+     * WP4 — "restore the older picture" (DLC_SERVER.md §6.3). When two devices
+     * paint the same page, one version loses and is kept for 30 days; this is
+     * where a parent gets it back. Never a game route: a child is never shown
+     * the choice.
+     */
+    Route::get('settings/pictures', [PaintController::class, 'index'])->name('pictures.edit');
+    Route::post('settings/pictures/{retained}/restore', [PaintController::class, 'restore'])->name('pictures.restore');
 });
 
 Route::middleware(['auth', 'verified'])->group(function () {

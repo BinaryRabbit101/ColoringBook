@@ -372,3 +372,155 @@ content-addressed writes are the first thing publishing does.
 Pack covers are only reachable through the entitled delta route, so the shop
 cannot render a cover for a pack nobody owns yet. §11 defines no public cover
 route; add one (or serve covers from the `public` disk) when the shop UI lands.
+
+## WP4 — paint-layer sync
+
+Design §6.2–6.3 (policy, LWW, retention), §5 (`paint_layers`, storage layout),
+§11 "Sync". Routes live in the paint block of `routes/api/sync.php`, beside
+WP2's progress routes and behind the same `auth:sanctum` + `abilities:save:sync`
+gate.
+
+Paint is the *lazy* half of sync: 0.5–2 MB a page against progress's 200 bytes.
+Everything below exists to move as few of those bytes as possible.
+
+### The surface
+
+| Method | Path | Answers |
+|---|---|---|
+| `POST` | `/sync/paint/{book_uid}/{page}` | `204` have-it / `202` + upload instructions |
+| `PUT` | `/sync/paint/{book_uid}/{page}?sha256=&client_painted_at=` | `201 {revision}` / `204` / `409` |
+| `GET` | `/sync/paint/{book_uid}/{page}` | `302` signed URL, or `404` |
+| `GET` | `/sync/paint/{book_uid}` | per-page metadata for one book (**added**) |
+| `GET` | `/sync/paint-blob/{layer}` | the bytes — **signed, no token** |
+
+`?profile=<ulid>` scopes every one of them exactly as it does in WP2: omitted
+means the account-level shelf, and a ULID that isn't one of this user's
+children is a `404`.
+
+The last row is the only route in `sync.php` outside the token group, for the
+reason WP3 documents: the signature *is* the authorisation, so
+`HTTPRequest.download_file` can stream straight to `user://paint/` without
+carrying headers. It reuses `VerifySignedDownload` and
+`PrivateDownloads::serve()` unchanged, `X-Accel-Redirect` switch included.
+
+`GET /sync/progress` is untouched — WP2's response shape is exactly what it
+was. The per-book paint metadata is a separate endpoint precisely so it stayed
+that way.
+
+### `{page}` is the page *index*; `page_NN.png` is 1-based
+
+The API speaks 0-based indices everywhere (`page_statuses`,
+`current_page_index`, and `{page}` here). The **file** is
+`page_01.png` for index 0, because that is what the client already writes to
+`user://paint/<slug>/` (`game_state.gd`). `App\Services\PaintStorage` is the
+only code that names files, and the only place that conversion happens.
+
+### Storage layout, and the one deviation from §5
+
+```
+paint/<user_ulid>/<book_uid>/page_NN.png                 account shelf (§5, verbatim)
+paint/<user_ulid>/<profile_ulid>/<book_uid>/page_NN.png  a child's shelf
+paint/<user_ulid>/…/page_NN.<revision>.png               a retained loser
+```
+
+§5's layout predates child profiles: two children painting the same book on one
+account would write to the same file. The extra segment is unambiguous because
+a `book_uid` is an authored lower-case slug (§6.1) and a ULID is upper-case
+Crockford base32, so neither can be read as the other.
+
+### Last-write-wins, and what each verdict means
+
+`App\Actions\Sync\StorePaintLayer` decides, on `client_painted_at`:
+
+- **Same sha256** → `204`, and *nothing is written* — no revision, no retained
+  version, and `client_painted_at` is **not** advanced. The row describes a
+  picture and that picture has not changed. Re-syncing an unchanged page is
+  free, which is the entire point of the sha-first negotiation.
+- **Newer, or an exact tie** → the incoming write wins (`201 {revision}`).
+  §6.3 makes the server clock the tie-break, and by the server's clock the
+  write arriving now is the later one.
+- **Older** → `409 PAINT_STALE`, carrying `details.server` (the current
+  `{page_index, sha256, bytes, revision, client_painted_at}`). Nothing is
+  written. Rejecting rather than silently dropping is what tells the device
+  *its* copy is the stale one, so it pulls instead of retrying forever.
+- **No row yet** → revision 1, creating the `book_progress` row if the shelf
+  has never synced this book — empty `page_statuses`, revision 1. Paint
+  legitimately arrives before progress does; the two requests race.
+
+A winning write does **not** touch `book_progress.updated_at`. That column is
+WP2's `since` cursor, and a picture upload is no news to the other devices.
+
+**The negotiation writes nothing at all** — not a row, not a timestamp, not
+even on `204`. The `PUT` is the only thing that creates state.
+
+### Clock skew: paint rejects where progress clamps
+
+`config('coloringbook.paint.max_clock_skew_hours')` (24). More than that in the
+future and both the `POST` and the `PUT` answer `PAINT_CLOCK_SKEW` (422) with
+the server's time. Deliberately unlike progress, which clamps: a save must
+never fail over a wrong clock, but a picture stamped three years out would win
+LWW forever and bury every later drawing behind it. Rejection is recoverable.
+
+### Codes this package adds
+
+`PAINT_STALE` (409), `PAINT_CLOCK_SKEW` (422), `PAINT_NOT_FOUND` (404),
+`PAINT_TOO_LARGE` (413, `coloringbook.paint.max_bytes`, 8 MB),
+`PAINT_NOT_PNG` (422), `PAINT_EMPTY` (422), `DIGEST_MISSING` (400),
+`DIGEST_MISMATCH` (422), `PAGE_OUT_OF_RANGE` (422).
+
+The digest is checked **twice** (`App\Services\PaintUploads`): `Content-Digest`
+against the body proves the bytes survived the wire, and the body against the
+negotiated `?sha256=` proves they are the bytes both ends agreed to move. RFC
+9530 (`sha-256=:<base64>:`) and the older `Digest: SHA-256=<base64>` are both
+read. The client never has to build that header itself — the `202` hands back
+the exact URL and headers to use.
+
+### Retention, restore, prune
+
+The losing version is not deleted: it moves to `page_NN.<revision>.png` and
+gets a row in **`retained_paint_layers`**, a sidecar table rather than more
+rows in `paint_layers` — `UNIQUE(book_progress_id, page_index)` is what makes
+"the current picture" unambiguous, and relaxing it would put every reader in
+the business of asking which row is live.
+
+- **Restore** (`App\Actions\Sync\RestorePaintLayer`) is a *swap*, not a
+  rollback: the demoted version takes the retained one's place with a fresh
+  30-day lease, so the button can never be the thing that loses a picture, and
+  pressing it twice returns the page to where it started. The restored layer is
+  stamped with the **server's clock**, not the older picture's — otherwise the
+  device that won the first race would win it again on its next upload and the
+  button would be a lie. The original painting time travels with the version
+  into retention, which is what the dashboard displays.
+- **Dashboard**: `settings/pictures` (`pictures.edit` / `pictures.restore`,
+  `resources/js/pages/settings/Pictures.vue`), listing only pages that actually
+  have an older version. Session auth, never a token: a five year old must
+  never be shown the choice (§6.3), and a game token must never be able to
+  make it.
+- **Prune**: `php artisan paint:prune [--days=] [--pretend]`, scheduled daily
+  at 03:20 in `routes/console.php`. Blob first, row second — a row without its
+  file is a broken button; a file without its row is invisible and gets swept
+  by the next account deletion.
+
+### Deletion sweeps
+
+`DeleteAccount` and `DeleteChildProfile` now delete the paint rows explicitly
+(so it is correct with foreign keys off) and then, **after the transaction
+commits**, the blobs: `paint/<user_ulid>/` for an account,
+`paint/<user_ulid>/<profile_ulid>/` for one child. A disk cannot be rolled
+back, so the order matters.
+
+### Testing paint
+
+`Tests\Concerns\PaintsPages` drives the endpoints the way the game does:
+`upload()` negotiates and then PUTs to whatever URL the `202` handed back, so
+every test that stores a picture also proves those instructions are usable.
+`png()` is a real 1×1 PNG with a suffix, so two calls differ in sha256 while
+both still carry the signature the upload path checks. `fakePaintStorage()`
+first.
+
+One trap worth knowing: `auth:sanctum` calls `shouldUse('sanctum')`, which
+rewrites `auth.defaults.guard` **for the rest of the process**. In a test the
+container survives between calls, so after any API request a bare `auth`
+(session) route will happily accept a bearer token and a "a game token cannot
+do this" test silently passes for the wrong reason. `useSessionGuard()` in that
+trait puts it back; call it between an API call and a dashboard call.

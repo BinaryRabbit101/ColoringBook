@@ -152,13 +152,21 @@ return [
     |
     | Last-write-wins on client_painted_at, with the losing version retained
     | for 30 days at page_NN.<rev>.png so a parent can restore it (§6.3).
-    | Client clocks more than `max_clock_skew_hours` in the future are clamped.
+    | Client clocks more than `max_clock_skew_hours` in the future are
+    | *rejected* — unlike progress, which clamps. A paint upload that loses to
+    | a bogus future timestamp would bury a real picture behind a fake one, and
+    | the client can retry a rejected upload once its clock is sane.
+    |
+    | `max_bytes` is the ceiling on one page's PNG. A 2048² paint layer is
+    | 0.5–2 MB (§6.2); 8 MB is generous headroom and still small enough that
+    | one upload can be buffered without thought.
     |
     */
 
     'paint' => [
         'retention_days' => (int) env('COLORINGBOOK_PAINT_RETENTION_DAYS', 30),
         'max_clock_skew_hours' => (int) env('COLORINGBOOK_PAINT_MAX_CLOCK_SKEW_HOURS', 24),
+        'max_bytes' => (int) env('COLORINGBOOK_PAINT_MAX_BYTES', 8 * 1024 * 1024),
     ],
 
     /*

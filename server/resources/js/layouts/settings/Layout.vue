@@ -8,6 +8,7 @@ import { toUrl } from '@/lib/utils';
 import { edit as editAppearance } from '@/routes/appearance';
 import { edit as editChildProfiles } from '@/routes/child-profiles';
 import { edit as editDevices } from '@/routes/devices';
+import { edit as editPictures } from '@/routes/pictures';
 import { edit as editProfile } from '@/routes/profile';
 import { edit as editSecurity } from '@/routes/security';
 import type { NavItem } from '@/types';
@@ -24,6 +25,10 @@ const sidebarNavItems: NavItem[] = [
     {
         title: 'Devices',
         href: editDevices(),
+    },
+    {
+        title: 'Pictures',
+        href: editPictures(),
     },
     {
         title: 'Security',
