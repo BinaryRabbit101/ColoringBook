@@ -39,6 +39,18 @@ Full design: [docs/DESIGN.md](../../../docs/DESIGN.md) §1–3. These are the ru
 - Two-finger gesture (pinch/pan) **cancels** an accidental single-finger stroke start.
 - Pan/zoom lives on the page view; painting coordinates must be transformed page-local before ID-map lookup.
 
+## PageView component (implemented — M2)
+
+`scenes/components/page_view.tscn` / `scripts/components/page_view.gd` (`class_name PageView`) is the built, verified painting component. Read its doc comments for the full API; load-bearing facts:
+
+- Inject pages via `load_page(base, idmap, regions)` or the three exported path properties — never hardcode page paths inside it.
+- Signals: `page_loaded(page_size)`, `region_locked(region_id)`, `stroke_ended(region_id)` (the coverage hook — fires exactly once per stroke, **including after a cancel**, since committed paint remains), `stroke_cancelled(region_id)` (fires just before `stroke_ended` on aborts).
+- `brush_size` is **diameter** in page pixels (default 56); parent sets `brush_color`/`brush_size`/`brush_hardness`.
+- `get_region_id_at(page_pos)` → 0 = line art, -1 = out of bounds. `get_region_data(id)` returns the JSON region dict for coverage-grid precomputation.
+- `get_paint_image()` is a full GPU readback — **debug only**, never in the paint loop. Coverage must sparse-sample at stroke end.
+- Region clipping lives in `scenes/components/brush.gdshader` (`id_epsilon` = half an 8-bit step; ID map sampled with `filter_nearest` hint). The SubViewport is never cleared (`CLEAR_MODE_ONCE`→NEVER); `PaintCanvas` draws only the pending stamp batch each frame.
+- Smoke test: `<godot_exe> --path godot res://scenes/dev/paint_smoke.tscn` (windowed — headless can't render the SubViewport; append `-- --stay` for manual play, F1 toggles the region overlay). Keep it green after any change to the painting stack.
+
 ## Palettes by mode
 
 - One coloring flow; mode only swaps the palette component and thresholds. Never fork gameplay per mode.

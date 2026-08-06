@@ -1,0 +1,312 @@
+extends Control
+## Automated GPU verification for Milestone 2 -- no user input required.
+##
+## Run WINDOWED (a SubViewport renders nothing under --headless, which uses the
+## dummy rasteriser):
+##
+##   <godot_exe> --path <project> res://scenes/dev/paint_smoke.tscn
+##
+## Add `-- --stay` to skip the auto-quit and poke at the page by hand (F1 toggles
+## the region debug overlay).
+##
+## Every check drives the SAME methods the touch path drives
+## (begin_stroke/continue_stroke/end_stroke), then reads the paint SubViewport
+## back and asserts against the ID map. Exit code is 0 only if every check passes.
+
+const BASE_IMAGE := "res://assets/books/test_book/page_01.png"
+const ID_MAP := "res://assets/books/test_book/page_01_idmap.png"
+const REGIONS_JSON := "res://assets/books/test_book/page_01_regions.json"
+
+## Alpha byte at/above which a pixel counts as "solidly painted".
+const SOLID_ALPHA := 200
+## Test brush diameter in page pixels.
+const BRUSH_DIAMETER := 56.0
+
+@onready var _page_view: PageView = $PageView
+
+var _id_rgba: Image
+var _page_width := 0
+var _page_height := 0
+var _failures := 0
+var _checks := 0
+var _locked_events: Array[int] = []
+var _ended_events: Array[int] = []
+
+
+func _ready() -> void:
+	_page_view.region_locked.connect(func(id: int) -> void: _locked_events.append(id))
+	_page_view.stroke_ended.connect(func(id: int) -> void: _ended_events.append(id))
+	await get_tree().process_frame
+	_run()
+
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F1:
+		var shown := _page_view.toggle_debug_overlay()
+		print("[dev] debug overlay: %s" % ("on" if shown else "off"))
+		get_viewport().set_input_as_handled()
+
+
+func _run() -> void:
+	print("=== M2 paint smoke test ===")
+	if not _page_view.load_page(BASE_IMAGE, ID_MAP, REGIONS_JSON):
+		print("FAIL - load_page(%s) returned false" % BASE_IMAGE)
+		_finish(1)
+		return
+
+	_page_view.brush_size = BRUSH_DIAMETER
+	_page_view.brush_color = Color(0.9, 0.2, 0.15, 1.0)
+
+	var page_size := _page_view.get_page_size()
+	_page_width = page_size.x
+	_page_height = page_size.y
+	_id_rgba = _page_view.get_id_map_image().duplicate()
+	_id_rgba.convert(Image.FORMAT_RGBA8)
+	print("page loaded: %dx%d, regions: %s" % [_page_width, _page_height, _page_view.get_region_ids()])
+
+	await _check_cross_region_clip()
+	await _check_line_press_paints_nothing()
+	await _check_fast_drag_is_gap_free()
+	await _check_nested_region()
+	_check_signals()
+	_check_debug_overlay()
+	await _check_composited_layer_stack()
+
+	print("=== %d/%d checks passed ===" % [_checks - _failures, _checks])
+	if "--stay" in OS.get_cmdline_user_args():
+		print("[dev] --stay given; not quitting. F1 toggles the debug overlay.")
+		return
+	_finish(0 if _failures == 0 else 1)
+
+
+func _finish(code: int) -> void:
+	print("exit code: %d" % code)
+	get_tree().quit(code)
+
+
+# ==================================================================== checks ==
+
+## (a) paint lands inside the locked region along the stroke, and
+## (b) nothing lands anywhere else, for a stroke that deliberately leaves the
+##     region (big circle 4 -> background 1).
+func _check_cross_region_clip() -> void:
+	print("\n-- check 1: stroke crossing region 4 -> region 1 --")
+	_expect(_page_view.get_region_id_at(Vector2(700.5, 250.5)) == 4,
+		"precondition: (700,250) is in region 4")
+	_expect(_page_view.get_region_id_at(Vector2(1010.5, 250.5)) == 1,
+		"precondition: (1010,250) is in region 1 (stroke really leaves the region)")
+
+	await _clear()
+	_page_view.begin_stroke(Vector2(700.5, 250.5))
+	for x in range(720, 1020, 20):
+		_page_view.continue_stroke(Vector2(x + 0.5, 250.5))
+	_page_view.end_stroke()
+	var paint := await _read_paint()
+
+	var counts := _count_painted_by_region(paint)
+	var inside := int(counts.get(4, 0))
+	_expect(inside > 2000, "(a) region 4 has paint (%d px)" % inside)
+
+	var missing := 0
+	for x in range(700, 910, 10):
+		if paint.get_pixel(x, 250).a8 < SOLID_ALPHA:
+			missing += 1
+	_expect(missing == 0, "(a) stroke is solid along its path inside region 4 (%d/21 samples empty)" % missing)
+
+	var leaks := _describe_leaks(counts, 4)
+	_expect(leaks == "", "(b) zero painted pixels outside region 4%s" % ("" if leaks == "" else " -- " + leaks))
+
+
+## (c) a press that starts on a line pixel starts no stroke and paints nothing.
+func _check_line_press_paints_nothing() -> void:
+	print("\n-- check 2: press on a line pixel --")
+	var line_position := _find_line_pixel()
+	_expect(line_position.x >= 0.0, "found a line (#000000) pixel to press on: %s" % line_position)
+	if line_position.x < 0.0:
+		return
+
+	await _clear()
+	var started := _page_view.begin_stroke(line_position)
+	_page_view.continue_stroke(line_position + Vector2(-60.0, 0.0))
+	_page_view.continue_stroke(line_position + Vector2(-120.0, 0.0))
+	_page_view.end_stroke()
+	var paint := await _read_paint()
+
+	_expect(not started, "(c) begin_stroke() on a line pixel returned false")
+	var counts := _count_painted_by_region(paint)
+	_expect(counts.is_empty(), "(c) nothing was painted at all (%s)" % counts)
+
+
+## (d) a single huge drag event still stamps a gap-free stroke.
+func _check_fast_drag_is_gap_free() -> void:
+	print("\n-- check 3: fast (single-event) drag --")
+	await _clear()
+	_page_view.begin_stroke(Vector2(660.5, 250.5))
+	# One event, 230 px of travel -- ~33x the 7 px stamp spacing.
+	_page_view.continue_stroke(Vector2(890.5, 250.5))
+	_page_view.end_stroke()
+	var paint := await _read_paint()
+
+	var gaps: Array[int] = []
+	for x in range(661, 891):
+		if paint.get_pixel(x, 250).a8 < SOLID_ALPHA:
+			gaps.append(x)
+	_expect(gaps.is_empty(), "(d) all 230 path samples painted (gaps at x=%s)" % [gaps.slice(0, 12)])
+
+	var counts := _count_painted_by_region(paint)
+	var leaks := _describe_leaks(counts, 4)
+	_expect(leaks == "", "(d) fast drag leaked nothing outside region 4%s" % ("" if leaks == "" else " -- " + leaks))
+
+
+## The nested circle (5) inside the square (3): the square must stay clean.
+func _check_nested_region() -> void:
+	print("\n-- check 4: nested circle 5 inside square 3 --")
+	_expect(_page_view.get_region_id_at(Vector2(264.5, 264.5)) == 5,
+		"precondition: (264,264) is in region 5")
+	_expect(_page_view.get_region_id_at(Vector2(264.5, 100.5)) == 3,
+		"precondition: (264,100) is in region 3 (stroke really crosses into it)")
+
+	await _clear()
+	_page_view.begin_stroke(Vector2(264.5, 264.5))
+	for y in range(250, 90, -20):
+		_page_view.continue_stroke(Vector2(264.5, y + 0.5))
+	_page_view.end_stroke()
+	var paint := await _read_paint()
+
+	var counts := _count_painted_by_region(paint)
+	_expect(int(counts.get(5, 0)) > 2000, "region 5 has paint (%d px)" % int(counts.get(5, 0)))
+	_expect(int(counts.get(3, 0)) == 0, "surrounding square (region 3) stayed clean (%d px)" % int(counts.get(3, 0)))
+	var leaks := _describe_leaks(counts, 5)
+	_expect(leaks == "", "zero painted pixels outside region 5%s" % ("" if leaks == "" else " -- " + leaks))
+
+
+func _check_signals() -> void:
+	print("\n-- check 5: signals --")
+	var expected: Array[int] = [4, 4, 5]
+	_expect(_locked_events == expected,
+		"region_locked fired once per successful press with the locked id (got %s)" % [_locked_events])
+	_expect(_ended_events == expected,
+		"stroke_ended fired once per stroke with the locked id (got %s)" % [_ended_events])
+
+
+## The JSON-driven region overlay: off by default, one Polygon2D per region,
+## drawn largest-first so nested regions land on top of their parent's hole.
+func _check_debug_overlay() -> void:
+	print("\n-- check 6: debug overlay --")
+	var overlay := _page_view.get_node("PageRoot/DebugOverlay") as Node2D
+	_expect(not _page_view.is_debug_overlay_visible(), "overlay is hidden by default")
+	var region_count := _page_view.get_region_ids().size()
+	_expect(overlay.get_child_count() == region_count,
+		"one Polygon2D per region (%d children / %d regions)" % [overlay.get_child_count(), region_count])
+	var descending := true
+	var previous := 1 << 62
+	for child in overlay.get_children():
+		var area := int(_page_view.get_region_data(int(String(child.name).trim_prefix("Region")))["area_px"])
+		descending = descending and area <= previous
+		previous = area
+	_expect(descending, "overlay polygons are ordered largest area first (hole handling)")
+	_expect(_page_view.toggle_debug_overlay(), "toggle_debug_overlay() turns it on")
+	_expect(not _page_view.toggle_debug_overlay(), "toggle_debug_overlay() turns it off again")
+
+
+## The whole layer stack as the player sees it: paper behind, paint in the
+## middle, line art on top (and therefore still visible over fresh paint).
+func _check_composited_layer_stack() -> void:
+	print("\n-- check 7: composited layer stack --")
+	await _clear()
+	_page_view.begin_stroke(Vector2(770.5, 250.5))
+	_page_view.continue_stroke(Vector2(770.5, 340.5))
+	_page_view.end_stroke()
+	await _settle()
+	var screen := get_viewport().get_texture().get_image()
+
+	var painted := _screen_sample(screen, Vector2(770.5, 300.5))
+	_expect(painted.r > painted.g + 0.2 and painted.r > painted.b + 0.2,
+		"painted pixel shows the brush colour on screen (%s)" % painted)
+	var paper := _screen_sample(screen, Vector2(500.5, 500.5))
+	_expect(paper.r > 0.85 and paper.g > 0.85 and paper.b > 0.85,
+		"unpainted background shows the paper colour (%s)" % paper)
+	var darkest := _screen_darkest(screen, Vector2(936.5, 250.5), 3)
+	_expect(darkest < 0.45,
+		"line art still renders on top (darkest luminance near a line pixel: %.3f)" % darkest)
+
+
+func _screen_sample(screen: Image, page_position: Vector2) -> Color:
+	var p := _page_view.to_viewport_position(page_position)
+	return screen.get_pixel(clampi(int(p.x), 0, screen.get_width() - 1), clampi(int(p.y), 0, screen.get_height() - 1))
+
+
+func _screen_darkest(screen: Image, page_position: Vector2, radius: int) -> float:
+	var p := _page_view.to_viewport_position(page_position)
+	var darkest := 1.0
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			var x := clampi(int(p.x) + dx, 0, screen.get_width() - 1)
+			var y := clampi(int(p.y) + dy, 0, screen.get_height() - 1)
+			darkest = minf(darkest, screen.get_pixel(x, y).get_luminance())
+	return darkest
+
+
+# =================================================================== helpers ==
+
+func _expect(condition: bool, description: String) -> void:
+	_checks += 1
+	if not condition:
+		_failures += 1
+	print("%s - %s" % ["PASS" if condition else "FAIL", description])
+
+
+func _clear() -> void:
+	_page_view.clear_paint()
+	await _settle()
+
+
+func _read_paint() -> Image:
+	await _settle()
+	var image := _page_view.get_paint_image()
+	if image.get_format() != Image.FORMAT_RGBA8:
+		image.convert(Image.FORMAT_RGBA8)
+	return image
+
+
+## Waits until every queued stamp has been rendered into the SubViewport.
+func _settle() -> void:
+	for i in 8:
+		await get_tree().process_frame
+		if not _page_view.has_pending_paint():
+			break
+	await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+
+
+## region id -> number of painted pixels, over the whole page. Key 0 is line art.
+func _count_painted_by_region(paint: Image) -> Dictionary:
+	var paint_bytes := paint.get_data()
+	var id_bytes := _id_rgba.get_data()
+	var counts := {}
+	var pixel_count := _page_width * _page_height
+	for i in pixel_count:
+		if paint_bytes[i * 4 + 3] == 0:
+			continue
+		var offset := i * 4
+		var region_id := (id_bytes[offset] << 16) | (id_bytes[offset + 1] << 8) | id_bytes[offset + 2]
+		counts[region_id] = int(counts.get(region_id, 0)) + 1
+	return counts
+
+
+func _describe_leaks(counts: Dictionary, locked_id: int) -> String:
+	var parts: PackedStringArray = []
+	var keys := counts.keys()
+	keys.sort()
+	for key in keys:
+		if int(key) != locked_id:
+			parts.append("region %d: %d px" % [int(key), int(counts[key])])
+	return ", ".join(parts)
+
+
+## Walks right from the big circle's centre until the ID map says "line art".
+func _find_line_pixel() -> Vector2:
+	for x in range(770, _page_width):
+		if _page_view.get_region_id_at(Vector2(x + 0.5, 250.5)) == 0:
+			return Vector2(x + 0.5, 250.5)
+	return Vector2(-1.0, -1.0)

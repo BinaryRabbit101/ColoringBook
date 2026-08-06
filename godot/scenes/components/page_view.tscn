@@ -1,0 +1,40 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/components/page_view.gd" id="1_page_view"]
+[ext_resource type="Script" path="res://scripts/components/paint_canvas.gd" id="2_paint_canvas"]
+
+[node name="PageView" type="Control"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+clip_contents = true
+script = ExtResource("1_page_view")
+
+[node name="PaintViewport" type="SubViewport" parent="."]
+disable_3d = true
+transparent_bg = true
+handle_input_locally = false
+gui_disable_input = true
+size = Vector2i(512, 512)
+render_target_clear_mode = 2
+render_target_update_mode = 4
+
+[node name="PaintCanvas" type="Node2D" parent="PaintViewport"]
+script = ExtResource("2_paint_canvas")
+
+[node name="PageRoot" type="Node2D" parent="."]
+
+[node name="Paper" type="Sprite2D" parent="PageRoot"]
+centered = false
+
+[node name="PaintSprite" type="Sprite2D" parent="PageRoot"]
+centered = false
+
+[node name="LineArtSprite" type="Sprite2D" parent="PageRoot"]
+centered = false
+
+[node name="DebugOverlay" type="Node2D" parent="PageRoot"]
+visible = false
