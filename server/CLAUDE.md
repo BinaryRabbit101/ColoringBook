@@ -182,3 +182,77 @@ skew. Read config through `config()`, never `env()` outside a config file.
 - Nothing the server returns should ever become a modal in a child's face:
   sync conflicts merge silently and surface, if at all, in the parent
   dashboard.
+
+## Progress sync (WP2)
+
+`routes/api/sync.php`, both gated on `auth:sanctum` + `abilities:save:sync`.
+
+```
+GET /api/v1/sync/progress?profile=<ulid>&since=<cursor>
+    → {books: [{book_uid, revision, current_page_index, page_statuses,
+                furthest_page_index, client_updated_at}], server_time}
+
+PUT /api/v1/sync/progress
+    {profile?, books: [{book_uid, base_revision, current_page_index,
+                        page_statuses, furthest_page_index, client_updated_at}]}
+    → {results: [...], server_time}
+```
+
+`profile` names a child's shelf; omitting it means the **account-level** shelf
+(`child_profile_id IS NULL`), which is a separate row from any child's. A ULID
+that isn't one of this user's children is a `404`, never a `403`.
+
+### Conflicts are per book, inside a 200
+
+The design asks for "a per-book 409", but the call is batched, and a shelf
+where one book conflicted and four synced cleanly has no single HTTP status.
+So the status is always `200` and every result carries its own verdict:
+
+```json
+{"book_uid": "coyote-2026", "revision": 4, "conflict": false}
+{"book_uid": "fox-2026", "revision": 9, "conflict": true, "server": { … }}
+```
+
+A conflicted book was **not written**. Its `server` block is the full server
+state, which is everything the device needs to merge locally and retry that one
+book at `base_revision: 9`. There is deliberately no whole-request 409, not
+even when every book conflicts.
+
+Other behaviours worth knowing:
+
+- A `book_uid` with no row yet is created at **revision 1**, and its
+  `base_revision` is ignored — recreating progress beats losing it.
+- A push that merges to exactly what is stored is a **no-op**: the revision
+  stands and `updated_at` is untouched, so re-syncing doesn't wake every other
+  device through the `since` cursor.
+- `client_updated_at` is **clamped** to the server's now when it is more than
+  `config('coloringbook.sync.max_clock_skew_hours')` ahead. Paint rejects a bad
+  clock; progress clamps, because a save must never fail over a wrong clock.
+
+### The merge rule
+
+`App\Services\ProgressMerge` is pure — no clock, no database — and implements
+§6.3 over `ProgressState` values: per-page `max(status)` under
+`untouched < in_progress < complete`, `max(furthest_page_index)`, and
+`current_page_index` from whichever side has the newer `client_updated_at`.
+Unequal page counts pad with `untouched`; equal timestamps tie-break on
+`max(current_page_index)` so the rule stays commutative. It is **commutative
+and idempotent**, and `tests/Unit/ProgressMergeTest.php` proves both across a
+grid of states rather than by example. Don't "improve" it without re-running
+those properties.
+
+### `book_progress`
+
+One row per `(user, child_profile|null, book)`. Two things to know before
+touching the table:
+
+- The unique key is `(user_id, profile_key, book_uid)`, where `profile_key` is
+  a **stored generated column** `coalesce(child_profile_id, 0)`. A plain
+  `UNIQUE(user_id, child_profile_id, book_uid)` would not constrain the
+  account-level shelf at all, because SQL treats two NULLs as distinct.
+- Timestamps are **microsecond precision** (`timestamps(6)` plus
+  `BookProgress::DATE_FORMAT` on the model). `updated_at` is the `since`
+  cursor, and at whole-second resolution a row written later in the same second
+  as the cursor would never be pulled. A `where('updated_at', …)` binding has
+  to be formatted with `BookProgress::DATE_FORMAT` by hand — the query
+  grammar's default would truncate it.

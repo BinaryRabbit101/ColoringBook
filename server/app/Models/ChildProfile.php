@@ -4,9 +4,11 @@ namespace App\Models;
 
 use Database\Factories\ChildProfileFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 
@@ -28,6 +30,7 @@ use Illuminate\Support\Str;
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  * @property-read User $user
+ * @property-read Collection<int, BookProgress> $bookProgress
  */
 #[Fillable(['nickname', 'avatar_index', 'default_mode'])]
 class ChildProfile extends Model
@@ -57,6 +60,17 @@ class ChildProfile extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    /**
+     * This child's shelf. Cascades on delete: removing a child really removes
+     * their colouring (WP2, design §4.1).
+     *
+     * @return HasMany<BookProgress, $this>
+     */
+    public function bookProgress(): HasMany
+    {
+        return $this->hasMany(BookProgress::class);
     }
 
     protected static function booted(): void

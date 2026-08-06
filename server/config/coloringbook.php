@@ -161,4 +161,27 @@ return [
         'max_clock_skew_hours' => (int) env('COLORINGBOOK_PAINT_MAX_CLOCK_SKEW_HOURS', 24),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Progress sync
+    |--------------------------------------------------------------------------
+    |
+    | `PUT /sync/progress` is batched — one call for the whole shelf (§11) —
+    | so the two limits below are guard rails on a single request, not product
+    | limits: a book has a handful of pages and an account a handful of books.
+    |
+    | `max_clock_skew_hours` mirrors the paint knob (§6.3), but progress
+    | *clamps* rather than rejects. A tablet with a wrong clock must never
+    | fail to save a child's colouring; clamping to the server's now is also
+    | strictly safer than rejecting, since it stops a far-future timestamp
+    | winning `current_page_index` forever.
+    |
+    */
+
+    'sync' => [
+        'max_books_per_request' => (int) env('COLORINGBOOK_SYNC_MAX_BOOKS', 200),
+        'max_pages_per_book' => (int) env('COLORINGBOOK_SYNC_MAX_PAGES', 500),
+        'max_clock_skew_hours' => (int) env('COLORINGBOOK_SYNC_MAX_CLOCK_SKEW_HOURS', 24),
+    ],
+
 ];

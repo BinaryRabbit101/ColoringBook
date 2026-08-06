@@ -2,6 +2,7 @@
 
 namespace App\Actions\Accounts;
 
+use App\Models\BookProgress;
 use App\Models\ChildProfile;
 use App\Models\Device;
 use App\Models\User;
@@ -14,11 +15,11 @@ use Illuminate\Support\Facades\DB;
  * rows, paint blobs, profiles), not soft-delete" — DLC_SERVER.md §4.1. There
  * is no `deleted_at` anywhere in this schema and there never will be.
  *
- * Child profiles and devices cascade through their foreign keys; Sanctum's
- * tokens are polymorphic with no FK of their own, so they are deleted here
- * explicitly. Later work packages hang progress (WP2) and paint (WP4) off the
- * same cascade — their FKs must be declared `cascadeOnDelete`, and any
- * on-disk paint blobs have to be swept here too.
+ * Child profiles, devices and book progress cascade through their foreign
+ * keys; Sanctum's tokens are polymorphic with no FK of their own, so they are
+ * deleted here explicitly. WP4 hangs paint off the same cascade — its FK must
+ * be declared `cascadeOnDelete`, and any on-disk paint blobs have to be swept
+ * here too.
  */
 class DeleteAccount
 {
@@ -30,6 +31,7 @@ class DeleteAccount
 
             // Explicit rather than FK-only, so deletion is correct even on a
             // connection with foreign keys switched off.
+            BookProgress::query()->where('user_id', $user->id)->delete();
             ChildProfile::query()->where('user_id', $user->id)->delete();
             Device::query()->where('user_id', $user->id)->delete();
 

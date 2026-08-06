@@ -1,0 +1,155 @@
+<?php
+
+namespace App\Models;
+
+use App\Services\ProgressMerge;
+use App\Services\ProgressState;
+use Carbon\CarbonImmutable;
+use Database\Factories\BookProgressFactory;
+use Illuminate\Database\Eloquent\Attributes\Guarded;
+use Illuminate\Database\Eloquent\Attributes\Scope;
+use Illuminate\Database\Eloquent\Attributes\Table;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Carbon;
+
+/**
+ * One book's worth of a child's progress — DLC_SERVER.md §5 "Saves", §6.
+ *
+ * A near-CRDT by construction: page statuses only ever climb
+ * (untouched → in_progress → complete) and `furthest_page_index` is monotonic,
+ * which is what lets `ProgressMerge` resolve two devices without ever asking a
+ * five year old to pick a side (§6.3).
+ *
+ * `child_profile_id` is nullable: an account that never created a profile
+ * still has a shelf. Both foreign keys cascade — deleting the account or the
+ * child really deletes the colouring (§4.1).
+ *
+ * @property int $id
+ * @property int $user_id
+ * @property int|null $child_profile_id
+ * @property string $book_uid
+ * @property int $revision
+ * @property int $current_page_index
+ * @property array<int, mixed> $page_statuses
+ * @property int $furthest_page_index
+ * @property CarbonImmutable $client_updated_at
+ * @property Carbon|null $created_at
+ * @property Carbon|null $updated_at
+ * @property-read User $user
+ * @property-read ChildProfile|null $childProfile
+ */
+#[Table('book_progress')]
+#[Guarded(['*'])]
+class BookProgress extends Model
+{
+    /** @use HasFactory<BookProgressFactory> */
+    use HasFactory;
+
+    /**
+     * Microsecond precision, matching `timestamps(6)` in the migration: the
+     * `since` cursor of `GET /sync/progress` is an `updated_at` comparison,
+     * and whole seconds would hide a row written later in the same second as
+     * the cursor the client was handed.
+     *
+     * @var string
+     */
+    protected $dateFormat = self::DATE_FORMAT;
+
+    /**
+     * The storage format for every timestamp on this table. Public because a
+     * `where('updated_at', '>', …)` binding has to be formatted the same way —
+     * the query grammar's own default would truncate the microseconds off.
+     */
+    public const DATE_FORMAT = 'Y-m-d H:i:s.u';
+
+    /**
+     * @return BelongsTo<User, $this>
+     */
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    /**
+     * @return BelongsTo<ChildProfile, $this>
+     */
+    public function childProfile(): BelongsTo
+    {
+        return $this->belongsTo(ChildProfile::class);
+    }
+
+    /**
+     * Scope to one child's shelf, or to the account-level shelf when there is
+     * no profile. Spelled out rather than left to `where(…, null)` because the
+     * null case has to become `is null`, not `= null`.
+     *
+     * @param  Builder<$this>  $query
+     */
+    #[Scope]
+    protected function forProfile(Builder $query, ?ChildProfile $profile): void
+    {
+        $profile === null
+            ? $query->whereNull('child_profile_id')
+            : $query->where('child_profile_id', $profile->id);
+    }
+
+    /**
+     * The stored progress, as the pure value the merge rule works on.
+     */
+    public function toState(): ProgressState
+    {
+        return new ProgressState(
+            $this->current_page_index,
+            $this->pageStatuses(),
+            $this->furthest_page_index,
+            CarbonImmutable::instance($this->client_updated_at),
+        );
+    }
+
+    /**
+     * Write a merged state back onto the row. Does not save.
+     */
+    public function applyState(ProgressState $state): static
+    {
+        $this->current_page_index = $state->currentPageIndex;
+        $this->page_statuses = $state->pageStatuses;
+        $this->furthest_page_index = $state->furthestPageIndex;
+        $this->client_updated_at = $state->clientUpdatedAt;
+
+        return $this;
+    }
+
+    /**
+     * The page statuses as a clean list of strings.
+     *
+     * The column is JSON, so it can in principle come back holding anything;
+     * anything unrecognised reads as `untouched`, which is the identity of the
+     * merge and therefore the only safe fallback.
+     *
+     * @return list<string>
+     */
+    public function pageStatuses(): array
+    {
+        return array_values(array_map(
+            static fn (mixed $status): string => is_string($status) ? $status : ProgressMerge::UNTOUCHED,
+            $this->page_statuses,
+        ));
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'page_statuses' => 'array',
+            'revision' => 'integer',
+            'current_page_index' => 'integer',
+            'furthest_page_index' => 'integer',
+            'client_updated_at' => 'immutable_datetime',
+        ];
+    }
+}

@@ -36,6 +36,7 @@ use Laravel\Sanctum\TransientToken;
  * @property Carbon|null $updated_at
  * @property-read Collection<int, ChildProfile> $childProfiles
  * @property-read Collection<int, Device> $devices
+ * @property-read Collection<int, BookProgress> $bookProgress
  */
 #[Fillable(['name', 'email', 'password'])]
 #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
@@ -88,6 +89,17 @@ class User extends Authenticatable implements PasskeyUser
     public function devices(): HasMany
     {
         return $this->hasMany(Device::class)->orderByDesc('last_seen_at');
+    }
+
+    /**
+     * Every book this account has ever synced, across all of its children
+     * (WP2 — one row per book per shelf, design §5).
+     *
+     * @return HasMany<BookProgress, $this>
+     */
+    public function bookProgress(): HasMany
+    {
+        return $this->hasMany(BookProgress::class);
     }
 
     /**
