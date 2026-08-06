@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="PaletteDef" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/resources/palette_def.gd" id="1_palette_def"]
+
+[resource]
+script = ExtResource("1_palette_def")
+display_name = "Crayon Box"
+mode = "child"
+colors = PackedColorArray(0.909804, 0.211765, 0.176471, 1, 0.960784, 0.486275, 0.121569, 1, 1, 0.823529, 0.247059, 1, 0.247059, 0.74902, 0.309804, 1, 0, 0.737255, 0.831373, 1, 0.184314, 0.435294, 0.878431, 1, 0.545098, 0.294118, 0.847059, 1, 1, 0.435294, 0.709804, 1, 0.545098, 0.352941, 0.168627, 1, 0.168627, 0.168627, 0.168627, 1)
+shades_per_family = 1
+brush_sizes = PackedFloat32Array(96)
+default_brush_size = 96.0
+default_brush_hardness = 0.6
+completion_threshold = 0.7

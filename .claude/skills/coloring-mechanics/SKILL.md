@@ -57,3 +57,10 @@ Full design: [docs/DESIGN.md](../../../docs/DESIGN.md) §1–3. These are the ru
 - **Child**: `palette_child.tscn` — a row of 8–12 chunky crayons, large touch targets, big forgiving brush.
 - **Adult**: `palette_adult.tscn` — swatch grid and/or fine picker, more shades, brush size control.
 - Both emit the same signal (`color_picked(color)`); colors and brush sizes come from `PaletteDef` `.tres` resources, not code.
+
+### Implemented (M3) — build against these, don't reinvent
+
+- `PaletteDef` (`scripts/resources/palette_def.gd`): colors, `shades_per_family` (adult grid grouping — render via `family_count()`/`get_family(i)`, never assume a flat list), `brush_sizes` (**diameters**, feed `PageView.brush_size` directly), `default_brush_hardness`, and `completion_threshold` (0.70 child / 0.92 adult) — M4+ reads thresholds from here, never hardcodes.
+- `GameState` autoload (`autoload/game_state.gd`): `mode`, `set_mode()`, `mode_changed` signal, `get_active_palette()`, `get_palette_scene_path()`. Extend it for book/page state and persistence (M5) — no second autoload.
+- Palette components (`palette_child.tscn` crayon row / `palette_adult.tscn` swatch grid): identical contract — `set_palette(def)` (auto-emits `brush_size_picked` then `color_picked` once each, so the brush is always primed), `color_picked(color)`, `brush_size_picked(size)`. Wiring a coloring screen = instantiate `GameState.get_palette_scene_path()`, connect those two signals to `PageView.brush_color`/`brush_size`, set `brush_hardness` from the def, call `set_palette`.
+- Smoke test: `<godot_exe> --path godot res://scenes/dev/palette_smoke.tscn` (windowed; `-- --stay` to inspect, `-- --shot <path>` saves a screenshot). Keep green alongside paint_smoke.
