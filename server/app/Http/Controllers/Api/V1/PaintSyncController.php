@@ -2,9 +2,11 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Actions\Sync\ErasePageProgress;
 use App\Actions\Sync\StorePaintLayer;
 use App\Exceptions\ApiException;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Sync\ErasePaintRequest;
 use App\Http\Requests\Sync\NegotiatePaintRequest;
 use App\Http\Requests\Sync\UploadPaintRequest;
 use App\Http\Resources\PaintLayerResource;
@@ -15,6 +17,7 @@ use App\Models\User;
 use App\Services\PaintStorage;
 use App\Services\PaintUploads;
 use App\Services\PrivateDownloads;
+use App\Services\ShelfClock;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -64,6 +67,7 @@ class PaintSyncController extends Controller
         private readonly PaintUploads $uploads,
         private readonly PaintStorage $storage,
         private readonly PrivateDownloads $downloads,
+        private readonly ShelfClock $clock,
     ) {}
 
     /**
@@ -101,6 +105,19 @@ class PaintSyncController extends Controller
         $this->assertPageInRange($page);
         $this->uploads->assertSize($request->bytes());
         $this->uploads->sane($request->clientPaintedAt());
+
+        // BL-18: a shelf wiped, or a page reset, more recently than this
+        // picture was painted refuses it here — before a megabyte moves, and
+        // with the code that tells the device to drop its copy rather than
+        // pull the server's.
+        $this->uploads->assertShelfNotErased(
+            $this->clock->erasedAt($user, $profile),
+            $request->clientPaintedAt(),
+        );
+        $this->uploads->assertNotErased(
+            $this->shelf($user, $profile, $bookUid)?->erasedPageAt($page),
+            $request->clientPaintedAt(),
+        );
 
         $layer = $this->layer($user, $profile, $bookUid, $page);
 
@@ -144,6 +161,40 @@ class PaintSyncController extends Controller
             ['revision' => $outcome->layer->revision],
             Response::HTTP_CREATED,
         );
+    }
+
+    /**
+     * "Start over" on one page — BL-7 locally, BL-18 on the wire.
+     *
+     * A deletion that is *sent*, so it can win: the instant it carries beats
+     * the stored picture under the same last-write-wins rule an upload obeys,
+     * and it lands on the page's erase clock so the page's `complete` status
+     * cannot climb back either. See `App\Actions\Sync\ErasePageProgress`.
+     */
+    public function destroy(
+        ErasePaintRequest $request,
+        string $bookUid,
+        int $page,
+        ErasePageProgress $erase,
+    ): JsonResponse {
+        $user = $this->user($request);
+        $profile = $this->profile($user, $request->profileUlid());
+
+        $this->assertPageInRange($page);
+
+        $erasedAt = $this->uploads->sane($request->clientErasedAt());
+        $outcome = $erase->handle($user, $profile, $bookUid, $page, $erasedAt);
+
+        return response()->json([
+            'book_uid' => $bookUid,
+            'page_index' => $page,
+            'erased_at' => $outcome->erasedAt->utc()->format('Y-m-d\TH:i:s.up'),
+            // The book's progress revision, which this erase moved: the device
+            // stores it as its new `base_revision` so its next push does not
+            // conflict against a row it just changed itself.
+            'revision' => $outcome->progress->revision,
+            'picture_erased' => $outcome->pictureDeleted,
+        ]);
     }
 
     /**

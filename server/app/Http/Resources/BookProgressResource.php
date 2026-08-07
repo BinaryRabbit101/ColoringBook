@@ -29,6 +29,10 @@ class BookProgressResource extends JsonResource
             'page_statuses' => $this->pageStatuses(),
             'furthest_page_index' => $this->furthest_page_index,
             'client_updated_at' => $this->client_updated_at->toIso8601String(),
+            // BL-18. Index-parallel to `page_statuses`, null where the page
+            // has never been reset, trailing nulls trimmed — so a book nobody
+            // has pressed "Start over" in sends `[]` and costs nothing.
+            'page_erased_at' => BookProgress::encodeErasures($this->pageErasures()) ?? [],
         ];
     }
 }

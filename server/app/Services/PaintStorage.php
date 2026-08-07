@@ -122,4 +122,22 @@ class PaintStorage
     {
         $this->disk()->deleteDirectory($profile->user->ulid.'/'.$profile->ulid);
     }
+
+    /**
+     * Sweep one book directory, named by `directoryFor()` before its row was
+     * deleted (BL-18's shelf wipe).
+     *
+     * Deliberately not "sweep the shelf": the account-level shelf's books sit
+     * directly under `paint/<user_ulid>/`, *beside* the child directories, so
+     * there is no one directory that means "the account's pictures and not the
+     * children's". Naming each book is the only precise answer.
+     */
+    public function forgetDirectory(string $directory): void
+    {
+        if ($directory === '') {
+            return;
+        }
+
+        $this->disk()->deleteDirectory($directory);
+    }
 }

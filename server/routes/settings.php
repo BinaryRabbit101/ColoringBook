@@ -4,6 +4,7 @@ use App\Http\Controllers\Settings\ChildProfileController;
 use App\Http\Controllers\Settings\DeviceController;
 use App\Http\Controllers\Settings\PaintController;
 use App\Http\Controllers\Settings\ProfileController;
+use App\Http\Controllers\Settings\ProgressController;
 use App\Http\Controllers\Settings\SecurityController;
 use Illuminate\Auth\Middleware\RequirePassword;
 use Illuminate\Support\Facades\Route;
@@ -39,6 +40,17 @@ Route::middleware(['auth'])->group(function () {
      */
     Route::get('settings/pictures', [PaintController::class, 'index'])->name('pictures.edit');
     Route::post('settings/pictures/{retained}/restore', [PaintController::class, 'restore'])->name('pictures.restore');
+
+    /*
+     * BL-18 — "erase everything", where the grown-up already is. The game's
+     * own button erases one tablet and then has to argue with the server about
+     * it; this erases the thing every tablet pulls from. `{shelf}` is a child's
+     * ULID or the literal `account`. Session auth, never a token, for the same
+     * reason the pictures page is: a five year old must not be able to reach
+     * it, and a game token must not be able to make it.
+     */
+    Route::get('settings/progress', [ProgressController::class, 'index'])->name('progress.edit');
+    Route::delete('settings/progress/{shelf}', [ProgressController::class, 'destroy'])->name('progress.destroy');
 });
 
 Route::middleware(['auth', 'verified'])->group(function () {

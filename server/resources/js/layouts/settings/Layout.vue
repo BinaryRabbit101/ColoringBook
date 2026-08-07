@@ -10,6 +10,7 @@ import { edit as editChildProfiles } from '@/routes/child-profiles';
 import { edit as editDevices } from '@/routes/devices';
 import { edit as editPictures } from '@/routes/pictures';
 import { edit as editProfile } from '@/routes/profile';
+import { edit as editProgress } from '@/routes/progress';
 import { edit as editSecurity } from '@/routes/security';
 import type { NavItem } from '@/types';
 
@@ -29,6 +30,10 @@ const sidebarNavItems: NavItem[] = [
     {
         title: 'Pictures',
         href: editPictures(),
+    },
+    {
+        title: 'Progress',
+        href: editProgress(),
     },
     {
         title: 'Security',

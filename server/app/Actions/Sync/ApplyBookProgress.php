@@ -7,6 +7,7 @@ use App\Models\ChildProfile;
 use App\Models\User;
 use App\Services\ProgressMerge;
 use App\Services\ProgressPush;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -32,14 +33,28 @@ use Illuminate\Support\Facades\DB;
  *
  * Each book gets its own transaction so one conflicted book in a batch never
  * rolls back its neighbours.
+ *
+ * ### The shelf's erase clock (BL-18)
+ *
+ * `$shelfErasedAt` is passed through to the merge, and it changes the "no row
+ * yet" case in the one way that matters: a wipe **deletes** the rows, so a
+ * device that slept through one arrives with a full shelf, a stale
+ * `base_revision` and no row to conflict with. Left alone, "recreating
+ * progress beats losing it" would resurrect everything the parent just erased.
+ * Censoring the push first turns that into recreating an *empty* book, which
+ * is what it should have been all along.
  */
 class ApplyBookProgress
 {
     public function __construct(private readonly ProgressMerge $merge) {}
 
-    public function handle(User $user, ?ChildProfile $profile, ProgressPush $push): BookProgressOutcome
-    {
-        return DB::transaction(function () use ($user, $profile, $push): BookProgressOutcome {
+    public function handle(
+        User $user,
+        ?ChildProfile $profile,
+        ProgressPush $push,
+        ?CarbonImmutable $shelfErasedAt = null,
+    ): BookProgressOutcome {
+        return DB::transaction(function () use ($user, $profile, $push, $shelfErasedAt): BookProgressOutcome {
             $progress = BookProgress::query()
                 ->where('user_id', $user->id)
                 ->forProfile($profile)
@@ -48,7 +63,10 @@ class ApplyBookProgress
                 ->first();
 
             if ($progress === null) {
-                return new BookProgressOutcome($this->create($user, $profile, $push), conflict: false);
+                return new BookProgressOutcome(
+                    $this->create($user, $profile, $push, $shelfErasedAt),
+                    conflict: false,
+                );
             }
 
             if ($progress->revision !== $push->baseRevision) {
@@ -56,7 +74,7 @@ class ApplyBookProgress
             }
 
             $stored = $progress->toState();
-            $merged = $this->merge->merge($stored, $push->state);
+            $merged = $this->merge->merge($stored, $push->state, $shelfErasedAt);
 
             if (! $stored->equals($merged)) {
                 $progress->applyState($merged);
@@ -68,8 +86,12 @@ class ApplyBookProgress
         });
     }
 
-    private function create(User $user, ?ChildProfile $profile, ProgressPush $push): BookProgress
-    {
+    private function create(
+        User $user,
+        ?ChildProfile $profile,
+        ProgressPush $push,
+        ?CarbonImmutable $shelfErasedAt,
+    ): BookProgress {
         $progress = new BookProgress;
 
         $progress->user_id = $user->id;
@@ -77,7 +99,7 @@ class ApplyBookProgress
         $progress->book_uid = $push->bookUid;
         $progress->revision = 1;
 
-        $progress->applyState($push->state)->save();
+        $progress->applyState($push->state->censoredBy($shelfErasedAt))->save();
 
         return $progress;
     }
