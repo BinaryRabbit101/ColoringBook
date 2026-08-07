@@ -2,7 +2,8 @@ extends Node
 ## The project's ONE autoload (DESIGN.md 3.4): global state that genuinely has no
 ## owning scene. Registered as [code]GameState[/code] in project.godot.
 ##
-## M3 scope: the difficulty [member mode] and the [PaletteDef] it selects.
+## M3 scope: the [PaletteDef] the game paints with (one palette since BL-20 --
+## there is no mode to select any more).
 ## M4 adds the current [member current_book] / [member current_page_index] and the
 ## cursor helpers that walk a book ([method start_book], [method advance_page]).
 ## M5 adds PERSISTENCE -- see the "persistence" section at the bottom. Everything
@@ -48,8 +49,6 @@ extends Node
 ## screen because it outlives any one screen: the coloring screen is freed and
 ## rebuilt between books, and the save system needs the same two values.
 
-## Emitted after [member mode] actually changes. Payload is the new mode id.
-signal mode_changed(mode: String)
 ## Emitted by [method start_book] once a book becomes the current one.
 signal book_started(book: BookDef)
 ## Emitted whenever [member current_page_index] changes (including the reset to 0
@@ -86,14 +85,16 @@ signal page_paint_written(book: BookDef, page_index: int, path: String)
 ## already knows -- but the shelf will want it the day a locked page is badged.
 signal page_lock_changed(book: BookDef, page_index: int, locked: bool)
 
-const MODE_CHILD := PaletteDef.MODE_CHILD
-const MODE_ADULT := PaletteDef.MODE_ADULT
-
-## mode id -> palette resource. The single place a palette path is written down.
-const PALETTE_PATHS := {
-	MODE_CHILD: "res://resources/palettes/child_palette.tres",
-	MODE_ADULT: "res://resources/palettes/adult_palette.tres",
-}
+## The one palette the game paints with (BL-20 removed the Child/Adult split).
+## The single place its path is written down.
+const PALETTE_PATH := "res://resources/palettes/child_palette.tres"
+## The one palette component: the crayon row.
+const PALETTE_SCENE_PATH := "res://scenes/components/palette_child.tscn"
+## Save keys this build reads but never writes. [code]"mode"[/code] is the
+## Child/Adult id every save written before BL-20 carries; the reader tolerates it
+## (and anything else it does not know) so those files still load, which is why
+## [constant SAVE_VERSION] did not have to move.
+const VESTIGIAL_SAVE_KEYS := ["mode"]
 
 # ------------------------------------------------------------- persistence --
 
@@ -144,10 +145,6 @@ const PAINT_DIR_NAME := "paint"
 const MAX_SLUG_READABLE_LENGTH := 40
 ## Default root: the real one. Only dev harnesses change it.
 const DEFAULT_SAVE_ROOT := "user://"
-## Mode a fresh install starts in. [method load_save] returns to it whenever
-## there is nothing to load, so "no save file" and "first ever run" are the same
-## state -- which is what makes the dev smokes deterministic.
-const DEFAULT_MODE := MODE_CHILD
 
 ## Seconds between interval autosaves (BL-6).
 ##
@@ -160,7 +157,7 @@ const DEFAULT_MODE := MODE_CHILD
 const AUTOSAVE_INTERVAL_SECONDS := 45.0
 
 ## Per-page statuses. "untouched" = never painted, "in_progress" = some paint,
-## "complete" = every region passed the mode's coverage threshold.
+## "complete" = every region passed the palette's coverage threshold.
 const STATUS_UNTOUCHED := "untouched"
 const STATUS_IN_PROGRESS := "in_progress"
 const STATUS_COMPLETE := "complete"
@@ -175,21 +172,7 @@ const STATUS_COMPLETE := "complete"
 const PAGE_STATUS_KEY := "status"
 const PAGE_LOCKED_KEY := "locked"
 
-## Current difficulty mode, "child" or "adult" (DESIGN.md 1). Assigning an
-## unknown id is refused with an error and leaves the mode untouched; assigning
-## the current id is a no-op and emits nothing.
-var mode: String = MODE_CHILD:
-	set(value):
-		var normalized := value.strip_edges().to_lower()
-		if not PALETTE_PATHS.has(normalized):
-			push_error("GameState: unknown mode '%s'; keeping '%s'." % [value, mode])
-			return
-		if normalized == mode:
-			return
-		mode = normalized
-		mode_changed.emit(mode)
-
-## The book being colored, or null outside a book (title/mode/book select).
+## The book being colored, or null outside a book (title / book select).
 ## Assign through [method start_book]; read freely.
 var current_book: BookDef = null
 
@@ -198,9 +181,9 @@ var current_book: BookDef = null
 ## [method advance_page] / [method set_page_index].
 var current_page_index: int = 0
 
-## mode id -> loaded PaletteDef. Palettes are immutable authored data, so one
-## instance per mode is shared by everything that asks.
-var _palette_cache: Dictionary = {}
+## The loaded [PaletteDef], or null before the first lookup. Authored data is
+## immutable, so the one instance is shared by everything that asks.
+var _palette: PaletteDef = null
 
 ## Where the save file and the paint layers live. Overridable so dev harnesses
 ## can run against a scratch directory (see [method set_save_root]).
@@ -239,66 +222,35 @@ func _notification(what: int) -> void:
 		save_now()
 
 
-# ======================================================================= mode ==
-
-## Method form of assigning [member mode], for signal connections and UI callbacks.
-func set_mode(new_mode: String) -> void:
-	mode = new_mode
-
-
-func is_child_mode() -> bool:
-	return mode == MODE_CHILD
-
-
-## Every mode id the game knows, in presentation order.
-func get_available_modes() -> PackedStringArray:
-	return PackedStringArray([MODE_CHILD, MODE_ADULT])
-
-
 # =================================================================== palettes ==
 
-## The [PaletteDef] for the current [member mode]. Null only if the .tres is
+## The game's [PaletteDef]. Loaded once, then cached. Null only if the .tres is
 ## missing or does not parse as a PaletteDef (an error is pushed either way).
+##
+## There is exactly one (BL-20): the crayon box. Its colours can be replaced at
+## runtime by a [CrayonSetDef] (BL-23), but the brush and the completion threshold
+## always come from here.
 func get_active_palette() -> PaletteDef:
-	return get_palette_for_mode(mode)
-
-
-## The [PaletteDef] for any mode id. Loaded once, then cached.
-func get_palette_for_mode(mode_id: String) -> PaletteDef:
-	if _palette_cache.has(mode_id):
-		return _palette_cache[mode_id]
-	if not PALETTE_PATHS.has(mode_id):
-		push_error("GameState: no palette registered for mode '%s'." % mode_id)
-		return null
-	var path: String = PALETTE_PATHS[mode_id]
-	var palette := load(path) as PaletteDef
+	if _palette != null:
+		return _palette
+	var palette := load(PALETTE_PATH) as PaletteDef
 	if palette == null:
-		push_error("GameState: '%s' did not load as a PaletteDef." % path)
+		push_error("GameState: '%s' did not load as a PaletteDef." % PALETTE_PATH)
 		return null
-	if palette.mode != mode_id:
-		push_warning(
-			"GameState: '%s' declares mode '%s' but is registered under '%s'."
-			% [path, palette.mode, mode_id]
-		)
-	_palette_cache[mode_id] = palette
-	return palette
+	_palette = palette
+	return _palette
 
 
-## The scene path of the palette component for a mode. The coloring screen
-## instantiates this blindly -- both components share one contract
-## (color_picked / brush_size_picked / set_palette).
-func get_palette_scene_path(mode_id: String = "") -> String:
-	var resolved := mode_id if mode_id != "" else mode
-	return (
-		"res://scenes/components/palette_child.tscn"
-		if resolved == MODE_CHILD
-		else "res://scenes/components/palette_adult.tscn"
-	)
+## The scene path of the palette component. The coloring screen instantiates this
+## blindly -- it only knows the contract (color_picked / brush_size_picked /
+## set_palette).
+func get_palette_scene_path() -> String:
+	return PALETTE_SCENE_PATH
 
 
-## Drops cached palettes so an edited .tres is picked up. Dev/tests only.
+## Drops the cached palette so an edited .tres is picked up. Dev/tests only.
 func reload_palettes() -> void:
-	_palette_cache.clear()
+	_palette = null
 
 
 # ============================================================== book cursor ==
@@ -739,8 +691,7 @@ func erase_book_progress(book: BookDef) -> void:
 	save_now()
 
 
-## Wipes the save file and every paint layer, for every book. The mode is kept --
-## it is a setting, not progress.
+## Wipes the save file and every paint layer, for every book.
 func erase_all_progress() -> void:
 	_books.clear()
 	_delete_recursive(get_paint_root())
@@ -852,9 +803,13 @@ func to_save_dict() -> Dictionary:
 			"current_page_index": int(entry["current_page_index"]),
 			"pages": pages,
 		}
+	# BL-20: the "mode" key an older build wrote is NOT re-emitted. It is read
+	# tolerantly (see [method load_save]) so those saves still load, but nothing in
+	# the game branches on it any more, and a key nobody reads has no business being
+	# written. SAVE_VERSION does not move: dropping a key is additive-tolerant in
+	# both directions, the same argument BL-10 made for adding one.
 	return {
 		"version": SAVE_VERSION,
-		"mode": mode,
 		"books": books,
 	}
 
@@ -929,9 +884,9 @@ func load_save() -> bool:
 		migrated = true
 
 	_autosave_enabled = false
-	var saved_mode := String(data.get("mode", mode))
-	if PALETTE_PATHS.has(saved_mode):
-		mode = saved_mode
+	# Keys in [constant VESTIGIAL_SAVE_KEYS] -- "mode", from before BL-20 -- are
+	# read past, not honoured and not carried forward. Tolerating them is what lets
+	# a pre-BL-20 file load at the same SAVE_VERSION.
 	var books: Variant = data.get("books", {})
 	if typeof(books) == TYPE_DICTIONARY:
 		for key_variant in (books as Dictionary):
@@ -1067,7 +1022,6 @@ static func _status_rank(status: String) -> int:
 ## wiped run are indistinguishable.
 func _fresh_state() -> bool:
 	_books.clear()
-	mode = DEFAULT_MODE
 	save_loaded.emit(true)
 	return false
 

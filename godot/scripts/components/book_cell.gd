@@ -2,8 +2,8 @@ class_name BookCell
 extends Button
 ## One book on the shelf: cover art, title and page count, in a tappable card.
 ##
-## Built from primitives in [method _init] like the palette's [CrayonButton] and
-## [SwatchButton], so the shelf needs no extra scene file and no art assets.
+## Built from primitives in [method _init] like the palette's [CrayonButton], so
+## the shelf needs no extra scene file and no art assets.
 ## Extends [Button] so touch and mouse arrive through the engine's single button
 ## path (DESIGN.md 3.3); the owning screen listens for [signal Button.pressed] and
 ## maps it back to the [BookDef].

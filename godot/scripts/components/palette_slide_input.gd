@@ -1,7 +1,7 @@
 class_name PaletteSlideInput
 extends RefCounted
 ## Slide-to-select for the palette components (BACKLOG BL-2): while a finger is
-## down, the selection follows it across the crayons/swatches instead of waiting
+## down, the selection follows it across the crayons instead of waiting
 ## for a release on one of them -- the behaviour every kids' colouring app has.
 ##
 ## Pure logic, no nodes: the palette owns one of these, hands it its own
@@ -21,7 +21,7 @@ extends RefCounted
 ## Mouse" on. Nothing here reads mouse events.
 ##
 ## Drags that belong to a slide are CONSUMED by the palette, so the
-## [ScrollContainer] the swatches sit in cannot drag-scroll under the finger at the
+## [ScrollContainer] the crayons sit in cannot drag-scroll under the finger at the
 ## same time. Wheel scrolling is untouched.
 ##
 ## [b]Candidate reporting[/b] (BACKLOG BL-15): the gesture is already tracked here,
@@ -49,7 +49,7 @@ var _last_index := -1
 
 
 ## [param owner] is the palette component; [param hit_area] is the control a
-## gesture must start inside (the swatch scroller). Null falls back to the owner.
+## gesture must start inside (the crayon scroller). Null falls back to the owner.
 func configure(owner: Control, hit_area: Control = null) -> void:
 	_owner = owner
 	_hit_area = hit_area
@@ -103,7 +103,7 @@ func is_sliding() -> bool:
 
 ## True for the end of a pointer gesture, in either form the engine can deliver it
 ## (touch, or a mouse button where touch emulation is off). Lives here so both
-## palettes ask the same question -- BL-16's dismiss audit turns "any release at
+## palette asks the same question -- BL-16's dismiss audit turns "any release at
 ## all" into "fade the preview", which is only safe if "release" means the same
 ## thing in both of them.
 ##

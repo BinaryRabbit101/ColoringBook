@@ -1,5 +1,6 @@
 extends Control
-## Automated verification for Milestone 3 -- palettes, difficulty modes, GameState.
+## Automated verification for the palette: the crayon row, its [PaletteDef], and
+## the [code]GameState[/code] surface around them.
 ##
 ## Run WINDOWED (the integration check paints into a SubViewport, which renders
 ## nothing under --headless / the dummy rasteriser):
@@ -7,39 +8,57 @@ extends Control
 ##   <godot_exe> --path <project> res://scenes/dev/palette_smoke.tscn
 ##
 ## Extra user args (after a bare `--`):
-##   --stay          leave the window open with both palettes over the page
+##   --stay          leave the window open with the palette over the page
 ##   --shot <path>   save a PNG of the viewport to <path> before quitting
 ##
 ## Every pick goes through the same entry points the touch path uses: a real
-## BaseButton `pressed` emission, a `BrushSizeSlider.pick_at_local_x()` at a real
-## stop position, or the `select_color` / `select_brush_size` handlers those call.
-## The BL-15 selection-feedback checks go further and synthesise real
-## InputEventScreenTouch / InputEventScreenDrag events at real on-screen
-## coordinates, because the pick-preview bubble is driven by the gesture, not by
-## the pick.
+## BaseButton `pressed` emission, or the `select_color` / `select_brush_size`
+## handlers those call. The BL-15/16 selection-feedback checks go further and
+## synthesise real InputEventScreenTouch / InputEventScreenDrag events at real
+## on-screen coordinates, because the pick-preview bubble is driven by the
+## gesture, not by the pick.
+##
+## [b]BL-20[/b] removed the Child/Adult split. The checks that used to assert the
+## split were REWRITTEN rather than dropped: check 1 now asserts the adult palette
+## and everything only it used are gone from the project, and check 8 asserts
+## GameState has no mode surface left and that a save carrying the old "mode" key
+## still loads (and is written back without it).
 ## Exit code is 0 only if every check passes.
 
-const CHILD_PALETTE := "res://resources/palettes/child_palette.tres"
-const ADULT_PALETTE := "res://resources/palettes/adult_palette.tres"
+const PALETTE := "res://resources/palettes/child_palette.tres"
 
 const BASE_IMAGE := "res://assets/books/test_book/page_01.png"
 const ID_MAP := "res://assets/books/test_book/page_01_idmap.png"
 const REGIONS_JSON := "res://assets/books/test_book/page_01_regions.json"
 
-## Expected authored shape of the shipped palettes.
-const CHILD_COLOR_COUNT := 10
-const MIN_ADULT_COLOR_COUNT := 24
-## BL-14 widened the adult range from three stops to five.
-const ADULT_BRUSH_SIZE_COUNT := 5
-## The ends of that range: a true fine-detail tip, and a top size matching child
-## mode's single forgiving brush.
-const ADULT_FINEST_BRUSH := 8.0
-const ADULT_BOLDEST_BRUSH := 96.0
-const ADULT_FAMILY_COUNT := 6
+## Expected authored shape of the shipped palette.
+const CRAYON_COUNT := 10
+## BL-20: the crayon row keeps its one forgiving brush, and that brush is 96 px.
+const FORGIVING_BRUSH := 96.0
+## BL-5's child threshold, which BL-20 made THE threshold.
+const COMPLETION_THRESHOLD := 0.9
 
-## Minimum perceptual separation between two child crayons, as an RGB distance
+## Everything BL-20 deleted with the adult half. A file still on disk here means
+## the split grew a second life.
+const REMOVED_FILES: PackedStringArray = [
+	"res://resources/palettes/adult_palette.tres",
+	"res://scenes/components/palette_adult.tscn",
+	"res://scripts/components/palette_adult.gd",
+	"res://scripts/components/swatch_button.gd",
+	"res://scripts/components/brush_size_slider.gd",
+	"res://scenes/screens/mode_select.tscn",
+	"res://scripts/screens/mode_select.gd",
+]
+
+## Minimum perceptual separation between two crayons, as an RGB distance
 ## (0..sqrt(3)). Kids must never confuse two crayons.
-const MIN_CHILD_COLOR_DISTANCE := 0.25
+const MIN_COLOR_DISTANCE := 0.25
+## The same floor for a BL-23 crayon set, relaxed on purpose: a Pastel box whose
+## crayons were a quarter of the colour cube apart would not be a pastel box. Far
+## enough apart to be different crayons, close enough to have a character.
+const MIN_SET_COLOR_DISTANCE := 0.10
+## Authored crayon sets that ship (BL-23): Pastel, Neon, Earth, Candy, Spooky.
+const EXPECTED_EXTRA_SETS := 5
 
 ## Per-channel tolerance (0..255) when checking painted pixels against the picked
 ## palette colour.
@@ -52,30 +71,26 @@ const STROKE_FROM := Vector2(700.5, 250.5)
 const STROKE_TO := Vector2(840.5, 250.5)
 const CORE_SAMPLES: Array[Vector2i] = [Vector2i(700, 250), Vector2i(770, 250), Vector2i(840, 250)]
 
+## Scratch save root for check 8, so the player's own save is never read or written.
+const TEST_SAVE_ROOT := "user://palette_smoke/state"
+
 ## Selection left on screen for the human-eyeball / screenshot pass.
-const SHOWCASE_CHILD_INDEX := 4
-const SHOWCASE_ADULT_INDEX := 14
-const SHOWCASE_ADULT_SIZE_INDEX := 2
+const SHOWCASE_INDEX := 4
 
 @onready var _page_view: PageView = $PageView
-@onready var _child_palette: PaletteChild = $Stack/PaletteChild
-@onready var _adult_palette: PaletteAdult = $Stack/PaletteAdult
+@onready var _palette: PaletteChild = $Stack/PaletteChild
 
-var _child_def: PaletteDef
-var _adult_def: PaletteDef
+var _def: PaletteDef
 
-var _child_colors: Array[Color] = []
-var _child_sizes: Array[float] = []
-var _adult_colors: Array[Color] = []
-var _adult_sizes: Array[float] = []
-var _mode_events: Array[String] = []
+var _colors: Array[Color] = []
+var _sizes: Array[float] = []
 
 var _checks := 0
 var _failures := 0
 
 
 func _ready() -> void:
-	# Both palettes plus a usable page need vertical room; the dev scene sizes its
+	# The palette plus a usable page need vertical room; the dev scene sizes its
 	# own window so the layout is not judged against Godot's default 1152x648.
 	get_window().size = Vector2i(1280, 940)
 	await get_tree().process_frame
@@ -83,13 +98,16 @@ func _ready() -> void:
 
 
 func _run() -> void:
-	print("=== M3 palette smoke test ===")
+	print("=== palette smoke test ===")
 
 	_check_palette_resources()
-	_check_components_built()
+	_check_component_built()
 	await _check_touch_targets()
 	_check_auto_selection()
 	_check_simulated_picks()
+	await _check_landscape_dock()
+	await _check_intensity()
+	await _check_crayon_sets()
 	await _check_page_view_integration()
 	await _check_selection_feedback()
 	_check_game_state()
@@ -115,137 +133,74 @@ func _finish(code: int) -> void:
 
 # ==================================================================== checks ==
 
-## (a) The authored .tres files load and hold sane data.
+## (a) The authored .tres loads and holds sane data -- and the adult half really
+## is gone (BL-20).
 func _check_palette_resources() -> void:
-	print("\n-- check 1: PaletteDef resources --")
-	_child_def = load(CHILD_PALETTE) as PaletteDef
-	_adult_def = load(ADULT_PALETTE) as PaletteDef
-	_expect(_child_def != null, "%s loads as a PaletteDef" % CHILD_PALETTE)
-	_expect(_adult_def != null, "%s loads as a PaletteDef" % ADULT_PALETTE)
-	if _child_def == null or _adult_def == null:
+	print("\n-- check 1: the one PaletteDef, and the adult half's absence --")
+	_def = load(PALETTE) as PaletteDef
+	_expect(_def != null, "%s loads as a PaletteDef" % PALETTE)
+	if _def == null:
 		return
 
-	_expect(_child_def.validate().is_empty(), "child palette validates (%s)" % [_child_def.validate()])
-	_expect(_adult_def.validate().is_empty(), "adult palette validates (%s)" % [_adult_def.validate()])
+	_expect(_def.validate().is_empty(), "the palette validates (%s)" % [_def.validate()])
 
-	_expect(_child_def.mode == PaletteDef.MODE_CHILD, "child palette declares mode 'child' (%s)" % _child_def.mode)
-	_expect(_adult_def.mode == PaletteDef.MODE_ADULT, "adult palette declares mode 'adult' (%s)" % _adult_def.mode)
+	# BL-20: one palette, and no way to ask for a second.
+	var still_there := PackedStringArray()
+	for path in REMOVED_FILES:
+		if ResourceLoader.exists(path) or FileAccess.file_exists(path):
+			still_there.append(path)
+	_expect(still_there.is_empty(),
+		"every file the Child/Adult split needed is deleted (%s)"
+		% ("none left" if still_there.is_empty() else str(still_there)))
+	_expect(not _has_property(_def, "mode"),
+		"PaletteDef carries no mode id any more")
+	_expect(not _has_property(_def, "shades_per_family"),
+		"...and no shades_per_family, which only the deleted swatch grid read")
 
-	_expect(_child_def.color_count() == CHILD_COLOR_COUNT,
-		"child palette has %d colours (%d)" % [CHILD_COLOR_COUNT, _child_def.color_count()])
-	_expect(_adult_def.color_count() >= MIN_ADULT_COLOR_COUNT,
-		"adult palette has >= %d colours (%d)" % [MIN_ADULT_COLOR_COUNT, _adult_def.color_count()])
-	_expect(_adult_def.family_count() == ADULT_FAMILY_COUNT,
-		"adult palette groups into %d shade families of %d (%d x %d)"
-		% [ADULT_FAMILY_COUNT, _adult_def.effective_shades_per_family(),
-			_adult_def.family_count(), _adult_def.effective_shades_per_family()])
+	_expect(_def.color_count() == CRAYON_COUNT,
+		"the palette has %d colours (%d)" % [CRAYON_COUNT, _def.color_count()])
 
-	var closest := _closest_child_color_pair()
-	_expect(float(closest["distance"]) >= MIN_CHILD_COLOR_DISTANCE,
-		"child colours are well differentiated (closest pair %d/%d, distance %.3f >= %.2f)"
-		% [int(closest["a"]), int(closest["b"]), float(closest["distance"]), MIN_CHILD_COLOR_DISTANCE])
+	var closest := _closest_color_pair()
+	_expect(float(closest["distance"]) >= MIN_COLOR_DISTANCE,
+		"the colours are well differentiated (closest pair %d/%d, distance %.3f >= %.2f)"
+		% [int(closest["a"]), int(closest["b"]), float(closest["distance"]), MIN_COLOR_DISTANCE])
 
-	_expect(_child_def.brush_size_count() == 1,
-		"child palette offers one forgiving brush size (%s)" % [_child_def.brush_sizes])
-	_expect(_adult_def.brush_size_count() == ADULT_BRUSH_SIZE_COUNT,
-		"adult palette offers %d brush sizes (%s)" % [ADULT_BRUSH_SIZE_COUNT, _adult_def.brush_sizes])
-	_expect(_all_positive(_child_def.brush_sizes) and _all_positive(_adult_def.brush_sizes),
-		"every brush size (diameter, page px) is positive")
-	_expect(_child_def.get_brush_size(0) > _adult_def.get_brush_size(0),
-		"child's brush (%.0f px) is larger than the adult's finest (%.0f px)"
-		% [_child_def.get_brush_size(0), _adult_def.get_brush_size(0)])
+	_expect(_def.brush_size_count() == 1,
+		"it offers ONE forgiving brush size (%s)" % [_def.brush_sizes])
+	_expect(is_equal_approx(_def.get_brush_size(0), FORGIVING_BRUSH),
+		"...which is the %.0f px crayon brush (%.0f)" % [FORGIVING_BRUSH, _def.get_brush_size(0)])
+	_expect(is_equal_approx(_def.default_brush_size, FORGIVING_BRUSH),
+		"...and it is also the default, so there is nothing to pick")
+	_expect(_all_positive(_def.brush_sizes), "every brush size (diameter, page px) is positive")
 
-	# BL-14: the range grew at BOTH ends, and the ends are the point.
-	_expect(is_equal_approx(_adult_def.get_brush_size(0), ADULT_FINEST_BRUSH),
-		"the adult range starts at the %.0f px detail tip (%.0f px)"
-		% [ADULT_FINEST_BRUSH, _adult_def.get_brush_size(0)])
-	_expect(
-		is_equal_approx(_adult_def.get_brush_size(ADULT_BRUSH_SIZE_COUNT - 1), ADULT_BOLDEST_BRUSH),
-		"...and ends at the %.0f px fill brush (%.0f px)"
-		% [ADULT_BOLDEST_BRUSH, _adult_def.get_brush_size(ADULT_BRUSH_SIZE_COUNT - 1)]
-	)
-	_expect(
-		is_equal_approx(
-			_adult_def.get_brush_size(ADULT_BRUSH_SIZE_COUNT - 1), _child_def.get_brush_size(0)
-		),
-		"the adult's boldest brush matches child mode's single forgiving one"
-	)
-	_expect(
-		_adult_def.get_default_brush_size_index() > 0
-		and _adult_def.get_default_brush_size_index() < ADULT_BRUSH_SIZE_COUNT - 1,
-		"the default stop (index %d of %d) still sits inside the widened range, not on an end"
-		% [_adult_def.get_default_brush_size_index(), ADULT_BRUSH_SIZE_COUNT]
-	)
-
-	for def in [_child_def, _adult_def]:
-		var threshold: float = def.completion_threshold
-		_expect(threshold > 0.0 and threshold <= 1.0,
-			"%s completion_threshold %.2f is in (0, 1]" % [def.mode, threshold])
-	_expect(_child_def.completion_threshold < _adult_def.completion_threshold,
-		"child threshold %.2f is more generous than adult %.2f"
-		% [_child_def.completion_threshold, _adult_def.completion_threshold])
+	_expect(is_equal_approx(_def.completion_threshold, COMPLETION_THRESHOLD),
+		"the completion threshold is the single %.2f (%.2f)"
+		% [COMPLETION_THRESHOLD, _def.completion_threshold])
+	_expect(_def.completion_threshold >= CoverageTracker.MIN_REGION_THRESHOLD,
+		"...which clears the tracker's %.2f floor" % CoverageTracker.MIN_REGION_THRESHOLD)
 
 
-## (b) Both components build the expected controls from their def.
-func _check_components_built() -> void:
-	print("\n-- check 2: components build from the def --")
+## (b) The component builds the expected controls from its def.
+func _check_component_built() -> void:
+	print("\n-- check 2: the crayon row builds from the def --")
 	# Recorders go on BEFORE set_palette so the auto-selection emission is caught.
-	_child_palette.color_picked.connect(func(c: Color) -> void: _child_colors.append(c))
-	_child_palette.brush_size_picked.connect(func(s: float) -> void: _child_sizes.append(s))
-	_adult_palette.color_picked.connect(func(c: Color) -> void: _adult_colors.append(c))
-	_adult_palette.brush_size_picked.connect(func(s: float) -> void: _adult_sizes.append(s))
+	_palette.color_picked.connect(func(c: Color) -> void: _colors.append(c))
+	_palette.brush_size_picked.connect(func(s: float) -> void: _sizes.append(s))
 
-	_child_palette.set_palette(_child_def)
-	_adult_palette.set_palette(_adult_def)
+	_palette.set_palette(_def)
 
-	var crayons := _child_palette.get_color_buttons()
-	_expect(crayons.size() == CHILD_COLOR_COUNT,
-		"child renders %d crayon controls (%d)" % [CHILD_COLOR_COUNT, crayons.size()])
+	var crayons := _palette.get_color_buttons()
+	_expect(crayons.size() == CRAYON_COUNT,
+		"the row renders %d crayon controls (%d)" % [CRAYON_COUNT, crayons.size()])
 	var all_crayons := true
-	for control in crayons:
-		all_crayons = all_crayons and control is CrayonButton
-	_expect(all_crayons, "every child control is a CrayonButton")
-	_expect(_child_palette.get_brush_size_controls().is_empty(),
-		"child exposes no size control (one forgiving brush)")
-
-	var swatches := _adult_palette.get_color_buttons()
-	_expect(swatches.size() == _adult_def.color_count(),
-		"adult renders all %d swatches (%d)" % [_adult_def.color_count(), swatches.size()])
-	_expect(_adult_palette.get_family_column_count() == ADULT_FAMILY_COUNT,
-		"adult grid has %d shade-family columns (%d)"
-		% [ADULT_FAMILY_COUNT, _adult_palette.get_family_column_count()])
-	var slider := _adult_palette.get_brush_size_slider()
-	_expect(slider != null and slider.stop_count() == ADULT_BRUSH_SIZE_COUNT,
-		"adult renders one brush-size slider with %d stops (%d)"
-		% [ADULT_BRUSH_SIZE_COUNT, slider.stop_count() if slider else -1])
-	var stops_grow := slider != null
-	for i in range(1, slider.stop_count() if slider else 0):
-		stops_grow = (
-			stops_grow
-			and is_equal_approx(slider.get_size_at(i), _adult_def.get_brush_size(i))
-			and slider.knob_radius_for_index(i) > slider.knob_radius_for_index(i - 1)
-			and slider.local_x_for_index(i) > slider.local_x_for_index(i - 1)
-		)
-	_expect(stops_grow, "slider stops are the def's diameters, drawn larger left to right")
-
-	# BL-14: five stops including a 96 px one still has to LAY OUT. The knob is a
-	# capped proxy, so the drawn extent is bounded no matter how bold the brush is,
-	# and the end stops keep their whole ring inside the control.
-	var last_stop := ADULT_BRUSH_SIZE_COUNT - 1
-	_expect(
-		slider != null and slider.knob_radius_for_index(last_stop) <= BrushSizeSlider.MAX_KNOB_RADIUS,
-		"the %.0f px knob is capped at %.0f px radius, not drawn at its diameter (%.1f)"
-		% [ADULT_BOLDEST_BRUSH, BrushSizeSlider.MAX_KNOB_RADIUS,
-			slider.knob_radius_for_index(last_stop) if slider else -1.0]
-	)
-	_expect(BrushSizeSlider.SIDE_PADDING >= BrushSizeSlider.max_knob_extent(),
-		"the end stops' rings fit inside the track's %.0f px side padding (need %.1f)"
-		% [BrushSizeSlider.SIDE_PADDING, BrushSizeSlider.max_knob_extent()])
-
-	var swatch_colors_match := true
-	for i in swatches.size():
-		swatch_colors_match = swatch_colors_match and (swatches[i] as SwatchButton).swatch_color == _adult_def.get_color(i)
-	_expect(swatch_colors_match, "every swatch carries its def colour, in palette order")
+	var colors_match := true
+	for i in crayons.size():
+		all_crayons = all_crayons and crayons[i] is CrayonButton
+		colors_match = colors_match and (crayons[i] as CrayonButton).crayon_color == _def.get_color(i)
+	_expect(all_crayons, "every control is a CrayonButton")
+	_expect(colors_match, "every crayon carries its def colour, in palette order")
+	_expect(_palette.get_brush_size_controls().is_empty(),
+		"the palette exposes NO size control -- one forgiving brush (BL-20)")
 
 
 ## (b cont.) Touch targets, measured after layout, in both orientations.
@@ -254,118 +209,402 @@ func _check_touch_targets() -> void:
 	await _settle()
 	_measure_targets("landscape 1280x940")
 
-	# Portrait: the row/grid must survive a narrow window (they scroll).
+	# Portrait: the row must survive a narrow window (it scrolls).
 	get_window().size = Vector2i(720, 1180)
 	await _settle()
 	_measure_targets("portrait 720x1180")
 	var row_fits := true
-	for control in _child_palette.get_color_buttons():
+	for control in _palette.get_color_buttons():
 		row_fits = row_fits and control.global_position.y >= 0.0
-	_expect(row_fits, "child row still lays out inside the panel when narrow")
+	_expect(row_fits, "the row still lays out inside the panel when narrow")
 
 	get_window().size = Vector2i(1280, 940)
 	await _settle()
 
 
 func _measure_targets(label: String) -> void:
-	var child_min := _smallest_target(_child_palette.get_color_buttons())
-	_expect(child_min >= PaletteChild.MIN_TOUCH_TARGET,
+	var smallest := _smallest_target(_palette.get_color_buttons())
+	_expect(smallest >= PaletteChild.MIN_TOUCH_TARGET,
 		"[%s] every crayon target >= %.0f px (smallest %.1f px)"
-		% [label, PaletteChild.MIN_TOUCH_TARGET, child_min])
+		% [label, PaletteChild.MIN_TOUCH_TARGET, smallest])
+	# The BL-22/BL-23 tool tiles share the strip's short axis with its margins, so
+	# growing one of them is exactly how they would start hanging out of it.
+	var tools := _palette.get_tool_buttons()
+	var tool_smallest := _smallest_target(tools)
+	_expect(tools.size() >= 2 and tool_smallest >= PaletteChild.MIN_TOUCH_TARGET,
+		"[%s] the %d tool tiles are >= %.0f px too (smallest %.1f px)"
+		% [label, tools.size(), PaletteChild.MIN_TOUCH_TARGET, tool_smallest])
+	var strip := _palette.get_global_rect()
+	var overflowing := 0
+	for tool in tools:
+		if not strip.encloses(tool.get_global_rect()):
+			overflowing += 1
+	_expect(overflowing == 0,
+		"[%s] ...and all of them fit inside the strip (%d hanging out)" % [label, overflowing])
 
-	var adult_controls := _adult_palette.get_color_buttons()
-	adult_controls.append_array(_adult_palette.get_brush_size_controls())
-	var adult_min := _smallest_target(adult_controls)
-	_expect(adult_min >= PaletteAdult.MIN_TOUCH_TARGET,
-		"[%s] every swatch/size-dot target >= %.0f px (smallest %.1f px)"
-		% [label, PaletteAdult.MIN_TOUCH_TARGET, adult_min])
 
-	# BL-14: the five stops have to lay out sanely at whatever width the toolbar
-	# gives the bar -- ticks far enough apart to aim at, and the end knobs' rings
-	# still inside the control.
-	var slider := _adult_palette.get_brush_size_slider()
-	if slider == null:
-		return
-	var gap := slider.local_x_for_index(1) - slider.local_x_for_index(0)
-	_expect(gap >= BrushSizeSlider.MAX_KNOB_RADIUS,
-		"[%s] the %d slider ticks are %.1f px apart, clear of the %.0f px knob"
-		% [label, slider.stop_count(), gap, BrushSizeSlider.MAX_KNOB_RADIUS])
-	var far_edge := slider.local_x_for_index(slider.stop_count() - 1) + BrushSizeSlider.max_knob_extent()
-	_expect(far_edge <= slider.size.x + 0.5,
-		"[%s] the boldest knob's ring ends at %.1f px, inside the %.0f px bar"
-		% [label, far_edge, slider.size.x])
+## (d cont.) BL-21: the same scene, docked as a COLUMN beside the canvas.
+##
+## What has to survive the flip is everything the row carries -- the touch targets,
+## slide-to-select's hit area, the pick bubble and the crayon's lift -- so this
+## check flips the layout, measures all four, and flips back. The lift is the
+## subtle one: it has to point INTO the canvas, which is LEFT once the crayons are
+## docked on the right, and its bounce overshoot still has to fit in the headroom
+## the box reserves (BL-16's gotcha, now in canonical space).
+func _check_landscape_dock() -> void:
+	print("\n-- check 5b: the landscape dock (BL-21) --")
+	var row_minimum := _palette.custom_minimum_size
+	_expect(_palette.get_layout() == PaletteChild.LAYOUT_ROW,
+		"the palette starts as a row along the bottom")
+	_expect(is_equal_approx(row_minimum.y, PaletteChild.STRIP_THICKNESS)
+			and is_equal_approx(row_minimum.x, 0.0),
+		"...a %.0f px strip across its short axis (%s)"
+		% [PaletteChild.STRIP_THICKNESS, row_minimum])
+
+	_palette.set_layout(PaletteChild.LAYOUT_COLUMN)
+	await _settle()
+	_expect(_palette.is_column(), "set_layout(COLUMN) docks it on the side")
+	_expect(is_equal_approx(_palette.custom_minimum_size.x, PaletteChild.STRIP_THICKNESS)
+			and is_equal_approx(_palette.custom_minimum_size.y, 0.0),
+		"...the strip's thickness moved to its WIDTH (%s)" % _palette.custom_minimum_size)
+	_expect(_palette.size_flags_vertical == Control.SIZE_EXPAND_FILL
+			and _palette.size_flags_horizontal == Control.SIZE_FILL,
+		"...and it expands ALONG the canvas, not into it")
+
+	var scroll := _palette.get_scroll()
+	_expect(scroll != null
+			and scroll.vertical_scroll_mode != ScrollContainer.SCROLL_MODE_DISABLED
+			and scroll.horizontal_scroll_mode == ScrollContainer.SCROLL_MODE_DISABLED,
+		"the strip now scrolls VERTICALLY and clips across its width")
+
+	var crayons := _palette.get_color_buttons()
+	var sideways := true
+	var stacked := true
+	var smallest := INF
+	for i in crayons.size():
+		var crayon := crayons[i] as CrayonButton
+		sideways = sideways and crayon.orientation == CrayonButton.ORIENT_LEFT \
+			and crayon.size.x > crayon.size.y
+		smallest = minf(smallest, minf(crayon.size.x, crayon.size.y))
+		if i > 0:
+			stacked = stacked \
+				and crayon.global_position.y >= crayons[i - 1].get_global_rect().end.y - 1.0
+	_expect(sideways, "every crayon is drawn lying on its side, long axis horizontal")
+	_expect(stacked, "...stacked top to bottom, not squeezed side by side")
+	_expect(smallest >= PaletteChild.MIN_TOUCH_TARGET,
+		"...and each one still holds its %.0f px touch target (%.1f)"
+		% [PaletteChild.MIN_TOUCH_TARGET, smallest])
+	_measure_targets("docked column")
+
+	_palette.select_color(3)
+	var selected := crayons[3] as CrayonButton
+	_expect(selected.lift_direction() == Vector2.LEFT,
+		"the selected crayon lifts LEFT -- into the canvas, not out of the screen (%s)"
+		% selected.lift_direction())
+	_expect(selected.current_lift() > CrayonButton.LIFT_PX,
+		"...springing past its resting lift, as in the row (%.0f px)" % selected.current_lift())
+	_expect(CrayonButton.box_for(CrayonButton.ORIENT_LEFT).x
+			>= CrayonButton.LIFT_HEADROOM + CrayonButton.LIFT_PX,
+		"...into headroom the sideways box reserves too, so the bounce peak is not clipped")
+	await _wait(CrayonButton.SELECT_BOUNCE_SECONDS + 0.2)
+
+	# The bubble: the hand now comes in from the RIGHT, so it parks to the LEFT.
+	var preview := _palette.get_pick_preview()
+	_expect(preview.get_placement() == PickPreview.PLACE_LEFT,
+		"the pick bubble moved to the side of the finger")
+	_expect(preview.get_tail_direction() == Vector2.RIGHT,
+		"...with its tail pointing back at the hand (%s)" % preview.get_tail_direction())
+	var point := _center_of(crayons[3])
+	_send_touch(_palette, point, true)
+	_expect(preview.is_showing(), "a press on a docked crayon still raises it")
+	var bubble := preview.get_viewport_rect_of_bubble()
+	_expect(bubble.end.x <= point.x,
+		"...entirely to the LEFT of the touch point (right edge %.0f <= finger %.0f)"
+		% [bubble.end.x, point.x])
+	_expect(not bubble.has_point(point), "...so the hand cannot be covering it")
+	_expect(point.x - bubble.end.x >= PickPreview.FINGER_GAP - 1.0,
+		"...and %.0f px clear of it, the same gap the row leaves"
+		% (point.x - bubble.end.x))
+	_send_touch(_palette, point, false)
+	preview.hide_now()
+
+	# Back to portrait: nothing the flip changed is one-way.
+	_palette.set_layout(PaletteChild.LAYOUT_ROW)
+	await _settle()
+	_expect(not _palette.is_column() and _palette.custom_minimum_size == row_minimum,
+		"flipping back restores the bottom row exactly (%s)" % _palette.custom_minimum_size)
+	_expect((crayons[0] as CrayonButton).orientation == CrayonButton.ORIENT_UP
+			and _palette.get_pick_preview().get_placement() == PickPreview.PLACE_ABOVE,
+		"...crayons upright again, bubble back above the finger")
+	_palette.select_color(0)
 
 
 ## (c) set_palette auto-selects the first colour and the default brush size,
 ## emitting each signal exactly once, so the brush is never colourless.
 func _check_auto_selection() -> void:
 	print("\n-- check 4: auto-selection on set_palette --")
-	_expect(_child_colors.size() == 1,
-		"child emitted color_picked exactly once on set_palette (%d)" % _child_colors.size())
-	_expect(_child_colors.size() == 1 and _child_colors[0] == _child_def.get_color(0),
-		"child auto-picked the FIRST colour (%s vs %s)"
-		% [_child_colors[0] if _child_colors.size() > 0 else "none", _child_def.get_color(0)])
-	_expect(_child_sizes.size() == 1 and is_equal_approx(_child_sizes[0], _child_def.default_brush_size),
-		"child auto-picked its default brush size %.0f px (%s)"
-		% [_child_def.default_brush_size, _child_sizes])
-	_expect(_child_palette.get_selected_color_index() == 0, "child reports selected index 0")
-
-	_expect(_adult_colors.size() == 1,
-		"adult emitted color_picked exactly once on set_palette (%d)" % _adult_colors.size())
-	_expect(_adult_colors.size() == 1 and _adult_colors[0] == _adult_def.get_color(0),
-		"adult auto-picked the FIRST colour")
-	_expect(_adult_sizes.size() == 1 and is_equal_approx(_adult_sizes[0], _adult_def.default_brush_size),
-		"adult auto-picked its default brush size %.0f px (%s)"
-		% [_adult_def.default_brush_size, _adult_sizes])
-	var default_size_index := _adult_def.get_default_brush_size_index()
-	var slider := _adult_palette.get_brush_size_slider()
-	_expect(
-		slider != null and slider.get_selected_index() == default_size_index,
-		"the slider knob sits on the default size stop (index %d, knob at %d)"
-		% [default_size_index, slider.get_selected_index() if slider else -1]
-	)
+	_expect(_colors.size() == 1,
+		"color_picked fired exactly once on set_palette (%d)" % _colors.size())
+	_expect(_colors.size() == 1 and _colors[0] == _def.get_color(0),
+		"...with the FIRST colour (%s vs %s)"
+		% [_colors[0] if _colors.size() > 0 else "none", _def.get_color(0)])
+	_expect(_sizes.size() == 1 and is_equal_approx(_sizes[0], _def.default_brush_size),
+		"brush_size_picked fired once with the default %.0f px (%s)"
+		% [_def.default_brush_size, _sizes])
+	_expect(_palette.get_selected_color_index() == 0, "the palette reports selected index 0")
 
 
 ## (d) Picks made through the real button path carry the def's own values.
 func _check_simulated_picks() -> void:
 	print("\n-- check 5: simulated picks --")
-	var crayons := _child_palette.get_color_buttons()
-	var expected_child: Array[Color] = []
+	var crayons := _palette.get_color_buttons()
+	var expected: Array[Color] = []
 	for index in [3, 7, 0, 9]:
-		expected_child.append(_child_def.get_color(index))
+		expected.append(_def.get_color(index))
 		# The real input path: BaseButton reports `pressed`, which is wired to
 		# PaletteChild.select_color(index).
 		(crayons[index] as CrayonButton).pressed.emit()
-	var got_child := _child_colors.slice(1)
-	_expect(got_child == expected_child,
-		"child crayon presses emitted the def's colours in order (%s)" % [_hex_list(got_child)])
+	var got := _colors.slice(1)
+	_expect(got == expected,
+		"crayon presses emitted the def's colours in order (%s)" % [_hex_list(got)])
 	_expect((crayons[9] as CrayonButton).selected and not (crayons[0] as CrayonButton).selected,
 		"only the last-pressed crayon is marked selected")
-	_expect(_child_palette.get_selected_color() == _child_def.get_color(9),
-		"child reports the last picked colour (%s)" % _child_palette.get_selected_color().to_html(false))
+	_expect(_palette.get_selected_color() == _def.get_color(9),
+		"the palette reports the last picked colour (%s)" % _palette.get_selected_color().to_html(false))
+	_expect(_sizes.size() == 1,
+		"...and picking colours never re-emits a brush size (%d emission)" % _sizes.size())
 
-	var swatches := _adult_palette.get_color_buttons()
-	var expected_adult: Array[Color] = []
-	for index in [1, 12, 23]:
-		expected_adult.append(_adult_def.get_color(index))
-		(swatches[index] as SwatchButton).pressed.emit()
-	var got_adult := _adult_colors.slice(1)
-	_expect(got_adult == expected_adult,
-		"adult swatch presses emitted the def's colours in order (%s)" % [_hex_list(got_adult)])
 
-	# The slider's own pick entry point, driven at each stop's real x position --
-	# exactly what a finger sliding along the bar produces.
-	var slider := _adult_palette.get_brush_size_slider()
-	var expected_sizes: Array[float] = []
-	for index in slider.stop_count():
-		expected_sizes.append(_adult_def.get_brush_size(index))
-		slider.pick_at_local_x(slider.local_x_for_index(index))
-	var got_sizes := _adult_sizes.slice(1)
-	_expect(got_sizes == expected_sizes,
-		"sliding across the brush-size bar emitted the def's diameters (%s, expected %s)"
-		% [got_sizes, expected_sizes])
-	_expect(is_equal_approx(_adult_palette.get_selected_brush_size(), _adult_def.get_brush_size(slider.stop_count() - 1)),
-		"adult reports the last picked brush size (%.0f px)" % _adult_palette.get_selected_brush_size())
+## (d cont.) BL-22: the intensity ladder, and the swap control that reveals it.
+##
+## The load-bearing claim is that NOTHING downstream of the palette changed: a
+## shade pick is still one [signal PaletteChild.color_picked] carrying one
+## resolved colour. So this drives the swap the way a finger would, then checks
+## the emissions -- not the internals.
+func _check_intensity() -> void:
+	print("\n-- check 5c: the intensity ladder (BL-22) --")
+	var swap := _palette.get_intensity_button()
+	_expect(swap != null, "the strip carries a swap control")
+	if swap == null:
+		return
+	_expect(minf(swap.size.x, swap.size.y) >= PaletteChild.MIN_TOUCH_TARGET,
+		"...at least %.0f px to aim at (%.0fx%.0f)"
+		% [PaletteChild.MIN_TOUCH_TARGET, swap.size.x, swap.size.y])
+	_expect(not _palette.get_scroll().is_ancestor_of(swap),
+		"...outside the crayon scroller, so a slide can never land on it")
+
+	# --- the ladder is DERIVED, not authored ---------------------------------
+	_expect(PaletteDef.INTENSITY_STEPS == 7,
+		"the ladder has %d rungs (%d)" % [7, PaletteDef.INTENSITY_STEPS])
+	_expect(not _has_property(_def, "intensity_colors")
+			and not _has_property(_def, "shades"),
+		"PaletteDef authors no shade table -- the ladder is computed")
+	var derived_everywhere := true
+	var base_is_base := true
+	for i in _def.color_count():
+		var base := _def.get_color(i)
+		var ladder := _def.shades_of(base)
+		base_is_base = base_is_base and ladder[PaletteDef.INTENSITY_BASE_STEP] == base
+		for step in range(1, ladder.size()):
+			# Pale to deep: every rung is darker than the one before it.
+			derived_everywhere = derived_everywhere \
+				and ladder[step].get_luminance() < ladder[step - 1].get_luminance()
+	_expect(base_is_base,
+		"rung %d of every crayon's ladder IS that crayon's colour"
+		% PaletteDef.INTENSITY_BASE_STEP)
+	_expect(derived_everywhere,
+		"...and all %d ladders run pale to deep without a break" % _def.color_count())
+
+	# --- swapping the strip ---------------------------------------------------
+	_palette.select_color(5)
+	var base_color := _def.get_color(5)
+	var emitted_before := _colors.size()
+	swap.pressed.emit()
+	await _settle()
+	_expect(_palette.is_showing_shades(), "pressing the swap shows the shades")
+	_expect(_colors.size() == emitted_before,
+		"...without changing the paint colour -- swapping a VIEW is not a pick (%d new emission(s))"
+		% (_colors.size() - emitted_before))
+	var shades := _palette.get_color_buttons()
+	_expect(shades.size() == PaletteDef.INTENSITY_STEPS,
+		"the strip now holds %d shade crayons (%d)"
+		% [PaletteDef.INTENSITY_STEPS, shades.size()])
+	var ladder := _def.shades_of(base_color)
+	var rendered := true
+	for i in shades.size():
+		rendered = rendered and (shades[i] as CrayonButton).crayon_color == ladder[i]
+	_expect(rendered, "...which are exactly the computed ladder of the crayon in hand")
+	_expect((shades[PaletteDef.INTENSITY_BASE_STEP] as CrayonButton).selected,
+		"...with the crayon's own rung marked as the one in hand")
+	_expect(swap.showing_shades and swap.active_step == PaletteDef.INTENSITY_BASE_STEP
+			and swap.base_color == base_color,
+		"the swap control shows which ladder, and which rung of it, is live")
+
+	# --- picking a shade goes through the unchanged colour chain --------------
+	var deep_step := PaletteDef.INTENSITY_STEPS - 1
+	(shades[deep_step] as CrayonButton).pressed.emit()
+	_expect(_colors.size() == emitted_before + 1,
+		"picking a shade emits color_picked ONCE (%d)" % (_colors.size() - emitted_before))
+	var resolved := _def.shade_of(base_color, deep_step)
+	_expect(_colors.size() > 0 and _colors[-1] == resolved,
+		"...carrying the RESOLVED colour #%s, not the crayon's own #%s"
+		% [resolved.to_html(false), base_color.to_html(false)])
+	_expect(_palette.get_selected_color() == resolved
+			and _palette.get_selected_intensity() == deep_step,
+		"...and the palette reports that shade as what is painting")
+	_expect(_palette.get_selected_color_index() == 5,
+		"...while the CRAYON in hand is still the one that was picked (index %d)"
+		% _palette.get_selected_color_index())
+	_expect(swap.active_step == deep_step,
+		"the swap control followed the rung (%d)" % swap.active_step)
+
+	# The bubble previews what will be PAINTED, which on this face is the shade.
+	var preview := _palette.get_pick_preview()
+	var pale_point := _center_of(shades[0])
+	_send_touch(_palette, pale_point, true)
+	_expect(preview.get_preview_color() == _def.shade_of(base_color, 0),
+		"the pick bubble previews the resolved shade (#%s)"
+		% preview.get_preview_color().to_html(false))
+	_send_touch(_palette, pale_point, false)
+	preview.hide_now()
+
+	# --- swapping back, and a new crayon resetting the rung -------------------
+	var before_swap_back := _palette.get_selected_color()
+	swap.pressed.emit()
+	await _settle()
+	_expect(not _palette.is_showing_shades(), "pressing it again shows the colours")
+	_expect(_palette.get_color_buttons().size() == CRAYON_COUNT,
+		"...all %d of them (%d)" % [CRAYON_COUNT, _palette.get_color_buttons().size()])
+	_expect(_palette.get_selected_color() == before_swap_back,
+		"...with the deep shade still on the brush -- swapping back is not a pick either")
+	_expect((_palette.get_color_buttons()[5] as CrayonButton).selected,
+		"...and the crayon it came from still marked")
+
+	_palette.select_color(2)
+	_expect(_palette.get_selected_intensity() == PaletteDef.INTENSITY_BASE_STEP,
+		"picking a NEW crayon resets the ladder to its own colour (rung %d)"
+		% _palette.get_selected_intensity())
+	_expect(_colors[-1] == _def.get_color(2),
+		"...so the emitted colour is that crayon, plain (#%s)" % _colors[-1].to_html(false))
+	_palette.select_color(0)
+
+
+## (d cont.) BL-23: the fun crayon boxes, and the control that cycles them.
+##
+## Two claims to hold down. First, a set is COLOURS AND NOTHING ELSE -- if a box
+## could carry a brush size or a threshold it would be a difficulty mode again,
+## which is the thing BL-20 just deleted. Second, the intensity ladder works on
+## every box without any box saying anything about it.
+func _check_crayon_sets() -> void:
+	print("\n-- check 5d: fun crayon boxes (BL-23) --")
+	var sets := CrayonSetDef.discover()
+	_expect(sets.size() >= EXPECTED_EXTRA_SETS,
+		"%d authored crayon set(s) were discovered on disk (%d)"
+		% [EXPECTED_EXTRA_SETS, sets.size()])
+	var names := PackedStringArray()
+	for set_def in sets:
+		names.append(set_def.display_name)
+	_expect(names.has("Pastel") and names.has("Neon") and names.has("Earth")
+			and names.has("Candy") and names.has("Spooky"),
+		"...including the shipped five (%s)" % [names])
+
+	var orders_ascend := true
+	var all_valid := true
+	var all_separated := true
+	var carry_only_colors := true
+	for i in sets.size():
+		var set_def := sets[i]
+		all_valid = all_valid and set_def.validate().is_empty()
+		if i > 0:
+			orders_ascend = orders_ascend and sets[i - 1].sort_order <= set_def.sort_order
+		# A set that could set a brush size or a threshold would be a difficulty
+		# mode wearing a hat. The property list is the check, not a promise.
+		for banned in ["brush_sizes", "default_brush_size", "completion_threshold",
+				"default_brush_hardness", "mode"]:
+			carry_only_colors = carry_only_colors and not _has_property(set_def, banned)
+		all_separated = all_separated and _closest_pair(set_def.colors) >= MIN_SET_COLOR_DISTANCE
+	_expect(all_valid, "every set validates")
+	_expect(orders_ascend, "...and they come back in authored sort_order, not filesystem order")
+	_expect(carry_only_colors,
+		"a CrayonSetDef carries COLOURS ONLY -- no brush, no threshold, no mode")
+	_expect(all_separated,
+		"...and no two crayons in a box are closer than %.2f apart" % MIN_SET_COLOR_DISTANCE)
+
+	# --- the palette presents the default box and the sets through one index ---
+	_expect(_def.crayon_set_count() == sets.size() + 1,
+		"the palette offers %d boxes: its own plus every set (%d)"
+		% [sets.size() + 1, _def.crayon_set_count()])
+	_expect(_def.get_crayon_set_colors(0) == _def.colors
+			and _def.get_crayon_set_name(0) == _def.display_name,
+		"box 0 IS the palette's own crayons ('%s')" % _def.get_crayon_set_name(0))
+	_expect(_def.wrap_crayon_set(_def.crayon_set_count()) == 0,
+		"the cycle wraps back to the default box")
+
+	# --- cycling it, the way the button does ---------------------------------
+	var box := _palette.get_crayon_box_button()
+	_expect(box != null, "the strip carries a crayon-box control")
+	if box == null:
+		return
+	_expect(minf(box.size.x, box.size.y) >= PaletteChild.MIN_TOUCH_TARGET,
+		"...at least %.0f px to aim at (%.0fx%.0f)"
+		% [PaletteChild.MIN_TOUCH_TARGET, box.size.x, box.size.y])
+	_expect(box.visible and box.set_count == _def.crayon_set_count(),
+		"...showing all %d boxes as pips (%d)" % [_def.crayon_set_count(), box.set_count])
+	_expect(_palette.get_crayon_set_index() == 0,
+		"the strip starts on the default box ('%s')" % _palette.get_crayon_set_name())
+
+	var brush_before := _palette.get_selected_brush_size()
+	var emitted_before := _colors.size()
+	box.pressed.emit()
+	await _settle()
+	_expect(_palette.get_crayon_set_index() == 1,
+		"pressing it fetches the next box ('%s')" % _palette.get_crayon_set_name())
+	var next_colors := _def.get_crayon_set_colors(1)
+	var strip := _palette.get_color_buttons()
+	var swapped := strip.size() == next_colors.size()
+	for i in mini(strip.size(), next_colors.size()):
+		swapped = swapped and (strip[i] as CrayonButton).crayon_color == next_colors[i]
+	_expect(swapped, "...and the strip is now that box's crayons, in order")
+	_expect(_colors.size() == emitted_before + 1 and _colors[-1] == next_colors[0],
+		"...with its first crayon in hand (#%s)" % _colors[-1].to_html(false))
+	_expect(is_equal_approx(_palette.get_selected_brush_size(), brush_before)
+			and _sizes.size() == 1,
+		"the brush never moved -- a box of crayons is colours, not a difficulty (%.0f px)"
+		% _palette.get_selected_brush_size())
+	_expect(_palette.get_selected_intensity() == PaletteDef.INTENSITY_BASE_STEP
+			and not _palette.is_showing_shades(),
+		"...and the new box opens on its own colours, not halfway up a ladder")
+
+	# --- intensity on a set, for free ----------------------------------------
+	var swap := _palette.get_intensity_button()
+	swap.pressed.emit()
+	await _settle()
+	var set_base := next_colors[0]
+	var set_ladder := _def.shades_of(set_base)
+	var shades := _palette.get_color_buttons()
+	var laddered := shades.size() == PaletteDef.INTENSITY_STEPS
+	for i in mini(shades.size(), set_ladder.size()):
+		laddered = laddered and (shades[i] as CrayonButton).crayon_color == set_ladder[i]
+	_expect(laddered,
+		"the ladder works on a SET crayon too, with nothing authored for it (BL-22 x BL-23)")
+	(shades[0] as CrayonButton).pressed.emit()
+	_expect(_colors[-1] == _def.shade_of(set_base, 0),
+		"...and picking its palest rung emits that resolved colour (#%s)"
+		% _colors[-1].to_html(false))
+	swap.pressed.emit()
+	await _settle()
+
+	# --- all the way round ----------------------------------------------------
+	for i in range(_palette.get_crayon_set_index(), _def.crayon_set_count()):
+		box.pressed.emit()
+	await _settle()
+	_expect(_palette.get_crayon_set_index() == 0,
+		"cycling past the last box comes back to the default one ('%s')"
+		% _palette.get_crayon_set_name())
+	_expect(_palette.get_color_buttons().size() == CRAYON_COUNT,
+		"...with its %d crayons back on the strip (%d)"
+		% [CRAYON_COUNT, _palette.get_color_buttons().size()])
+	_palette.select_color(0)
 
 
 ## (e) Palette -> PageView: wiring the two signals is all the coloring screen has
@@ -376,19 +615,19 @@ func _check_page_view_integration() -> void:
 	if not _page_view.is_page_loaded():
 		return
 
-	# Exactly the wiring the coloring screen will do -- calls DOWN into PageView.
-	_child_palette.color_picked.connect(func(c: Color) -> void: _page_view.brush_color = c)
-	_child_palette.brush_size_picked.connect(func(s: float) -> void: _page_view.brush_size = s)
-	_page_view.brush_hardness = _child_def.default_brush_hardness
+	# Exactly the wiring the coloring screen does -- calls DOWN into PageView.
+	_palette.color_picked.connect(func(c: Color) -> void: _page_view.brush_color = c)
+	_palette.brush_size_picked.connect(func(s: float) -> void: _page_view.brush_size = s)
+	_page_view.brush_hardness = _def.default_brush_hardness
 
 	var picked_index := 3
-	_child_palette.select_brush_size(0)
-	_child_palette.select_color(picked_index)
-	var expected := _child_def.get_color(picked_index)
+	_palette.select_brush_size(0)
+	_palette.select_color(picked_index)
+	var expected := _def.get_color(picked_index)
 
 	_expect(_page_view.brush_color == expected,
 		"PageView.brush_color follows color_picked (%s)" % _page_view.brush_color.to_html(false))
-	_expect(is_equal_approx(_page_view.brush_size, _child_def.get_brush_size(0)),
+	_expect(is_equal_approx(_page_view.brush_size, _def.get_brush_size(0)),
 		"PageView.brush_size (DIAMETER) follows brush_size_picked (%.0f px)" % _page_view.brush_size)
 
 	_page_view.clear_paint()
@@ -418,8 +657,8 @@ func _check_page_view_integration() -> void:
 		% [expected.to_html(false), worst])
 
 
-## (f) BL-15: selection feedback the finger does not hide -- the floating pick
-## preview, the "now painting with" chip, and the strengthened per-item states.
+## (f) BL-15/16: selection feedback the finger does not hide -- the floating pick
+## preview and the strengthened per-item states.
 ##
 ## The bubble is driven by the GESTURE, not by the pick, so this is the one check
 ## that synthesises real touch events at real on-screen coordinates and feeds them
@@ -429,43 +668,37 @@ func _check_selection_feedback() -> void:
 	# PaletteSlideInput refuses a gesture when something else is hovered (that is
 	# how the settings scrim wins over the palette). In a windowed harness the real
 	# cursor may be sitting anywhere, so take the two full-screen controls that are
-	# not the palettes out of the hover picture and let the test be deterministic.
+	# not the palette out of the hover picture and let the test be deterministic.
 	_page_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	($Stack as Control).mouse_filter = Control.MOUSE_FILTER_IGNORE
 	await _settle()
 
-	# --- one shared component, and it can never be touched --------------------
-	var child_preview := _child_palette.get_pick_preview()
-	var adult_preview := _adult_palette.get_pick_preview()
-	_expect(child_preview != null and adult_preview != null,
-		"both palettes own a PickPreview bubble")
-	if child_preview == null or adult_preview == null:
+	var preview := _palette.get_pick_preview()
+	_expect(preview != null, "the palette owns a PickPreview bubble")
+	if preview == null:
 		return
-	_expect(child_preview != adult_preview and child_preview.get_script() == adult_preview.get_script(),
-		"...one each, from the SAME shared component (not a per-palette copy)")
 	_expect(
-		child_preview.mouse_filter == Control.MOUSE_FILTER_IGNORE
-		and adult_preview.mouse_filter == Control.MOUSE_FILTER_IGNORE,
+		preview.mouse_filter == Control.MOUSE_FILTER_IGNORE,
 		"the bubble is MOUSE_FILTER_IGNORE -- it can never be hit-tested"
 	)
-	_expect(not child_preview.z_as_relative and child_preview.z_index > 0,
+	_expect(not preview.z_as_relative and preview.z_index > 0,
 		"...and draws at an absolute z (%d), so it clears the palette AND the toolbar"
-		% child_preview.z_index)
-	_expect(not child_preview.is_showing(), "nothing is previewed before a finger lands")
+		% preview.z_index)
+	_expect(not preview.is_showing(), "nothing is previewed before a finger lands")
 
-	# --- it appears above the finger, follows it, and fades on release --------
-	var crayons := _child_palette.get_color_buttons()
+	# --- it appears clear of the finger, follows it, and fades on release -----
+	var crayons := _palette.get_color_buttons()
 	var from_index := 2
 	var to_index := 6
 	var from_point := _center_of(crayons[from_index])
 	var to_point := _center_of(crayons[to_index])
 
-	_send_touch(_child_palette, from_point, true)
-	_expect(child_preview.is_showing(), "a press on a crayon raises the bubble")
-	_expect(child_preview.get_mode() == PickPreview.MODE_COLOR
-		and child_preview.get_preview_color() == _child_def.get_color(from_index),
-		"...showing the candidate colour #%s" % child_preview.get_preview_color().to_html(false))
-	var bubble := child_preview.get_viewport_rect_of_bubble()
+	_send_touch(_palette, from_point, true)
+	_expect(preview.is_showing(), "a press on a crayon raises the bubble")
+	_expect(preview.get_mode() == PickPreview.MODE_COLOR
+		and preview.get_preview_color() == _def.get_color(from_index),
+		"...showing the candidate colour #%s" % preview.get_preview_color().to_html(false))
+	var bubble := preview.get_viewport_rect_of_bubble()
 	_expect(bubble.end.y <= from_point.y,
 		"the bubble sits entirely ABOVE the touch point (bottom %.0f <= finger %.0f)"
 		% [bubble.end.y, from_point.y])
@@ -480,119 +713,60 @@ func _check_selection_feedback() -> void:
 		"...and floats %.0f px clear of the press point, above the hand and not just the fingertip"
 		% (from_point.y - bubble.end.y))
 
-	_send_drag(_child_palette, from_point, to_point)
-	_expect(child_preview.get_preview_color() == _child_def.get_color(to_index),
+	_send_drag(_palette, from_point, to_point)
+	_expect(preview.get_preview_color() == _def.get_color(to_index),
 		"sliding to another crayon updates the candidate (#%s)"
-		% child_preview.get_preview_color().to_html(false))
-	_expect(_child_palette.get_selected_color_index() == to_index,
+		% preview.get_preview_color().to_html(false))
+	_expect(_palette.get_selected_color_index() == to_index,
 		"...and slide-to-select still commits the pick underneath it (index %d)"
-		% _child_palette.get_selected_color_index())
-	var moved := child_preview.get_viewport_rect_of_bubble()
+		% _palette.get_selected_color_index())
+	var moved := preview.get_viewport_rect_of_bubble()
 	_expect(moved.position.x > bubble.position.x,
 		"the bubble travelled with the finger (%.0f -> %.0f px)"
 		% [bubble.position.x, moved.position.x])
 	_expect(moved.end.y <= to_point.y, "...staying above it the whole way")
 
-	_send_touch(_child_palette, to_point, false)
-	_expect(not child_preview.is_active(), "lifting the finger ends the preview")
+	_send_touch(_palette, to_point, false)
+	_expect(not preview.is_active(), "lifting the finger ends the preview")
 	await _wait(PickPreview.FADE_OUT_SECONDS + 0.15)
-	_expect(not child_preview.is_showing(), "...and it has faded away")
-
-	# --- the size slider drives the same bubble, as a dot ---------------------
-	var slider := _adult_palette.get_brush_size_slider()
-	_adult_palette.select_color(9)
-	slider.pick_at_local_x(slider.local_x_for_index(ADULT_BRUSH_SIZE_COUNT - 1))
-	_expect(adult_preview.is_showing() and adult_preview.get_mode() == PickPreview.MODE_SIZE,
-		"the size slider raises the same bubble in DOT mode")
-	_expect(is_equal_approx(adult_preview.get_preview_diameter(), ADULT_BOLDEST_BRUSH),
-		"...previewing the candidate diameter (%.0f px)" % adult_preview.get_preview_diameter())
-	_expect(adult_preview.get_preview_color() == _adult_palette.get_selected_color(),
-		"...drawn in the colour actually loaded, not an abstract circle")
-	slider.pick_at_local_x(slider.local_x_for_index(0))
-	_expect(is_equal_approx(adult_preview.get_preview_diameter(), ADULT_FINEST_BRUSH),
-		"sliding to the finest stop shrinks the dot to %.0f px"
-		% adult_preview.get_preview_diameter())
-	slider.end_preview()
-	_expect(not adult_preview.is_active(), "lifting off the bar ends the size preview")
-	adult_preview.hide_now()
+	_expect(not preview.is_showing(), "...and it has faded away")
 
 	# --- BL-16 part 2: every way a gesture can end fades the bubble -----------
 	# The bug this is guarding: a bubble left painted over the palette because the
 	# release took a path nobody had walked. The claimed-slide path is covered
 	# above; these are the ones that BYPASS PaletteSlideInput's own bookkeeping.
-	child_preview.show_color(_child_def.get_color(1), from_point)
-	_expect(child_preview.is_showing(), "precondition: a bubble is up")
+	preview.show_color(_def.get_color(1), from_point)
+	_expect(preview.is_showing(), "precondition: a bubble is up")
 	# A release the slide helper never saw the press for -- a press it refused
 	# (outside its hit area, another control hovered) still raised this through the
 	# crayon button itself.
-	_send_touch(_child_palette, Vector2(4.0, 4.0), false)
-	_expect(not child_preview.is_active(),
+	_send_touch(_palette, Vector2(4.0, 4.0), false)
+	_expect(not preview.is_active(),
 		"a release the slide helper never claimed still ends the preview")
 
-	child_preview.show_color(_child_def.get_color(1), from_point)
-	_send_mouse_release(_child_palette, from_point)
-	_expect(not child_preview.is_active(),
+	preview.show_color(_def.get_color(1), from_point)
+	_send_mouse_release(_palette, from_point)
+	_expect(not preview.is_active(),
 		"...and so does a plain mouse release, for a build without touch emulation")
-
-	# The slider hears its own release through _gui_input, which only arrives while
-	# the pointer is still over the bar. A finger that slid off the end and lifted
-	# there was never told to stop -- and kept the bar in its dragging state.
-	var bar_point := slider.get_global_transform_with_canvas() * Vector2(
-		slider.local_x_for_index(ADULT_BRUSH_SIZE_COUNT - 1), slider.size.y * 0.5
-	)
-	_send_touch(_adult_palette, bar_point, true)
-	slider.pick_at_local_x(slider.local_x_for_index(ADULT_BRUSH_SIZE_COUNT - 1))
-	_expect(adult_preview.is_showing(), "precondition: the size bubble is up")
-	_send_touch(_adult_palette, Vector2(4.0, 4.0), false)
-	_expect(not adult_preview.is_active(),
-		"a release that lands off the size bar still ends its preview")
 
 	# Focus loss: the web build's finger that leaves the canvas, the tab that goes
 	# away. No release event is ever delivered, so the bubble has to save itself.
-	child_preview.show_color(_child_def.get_color(1), from_point)
-	child_preview.notification(Node.NOTIFICATION_APPLICATION_FOCUS_OUT)
-	_expect(not child_preview.is_showing(),
+	preview.show_color(_def.get_color(1), from_point)
+	preview.notification(Node.NOTIFICATION_APPLICATION_FOCUS_OUT)
+	_expect(not preview.is_showing(),
 		"losing application focus mid-slide hides the bubble at once")
 
-	# A palette rebuilt under a finger (the mid-book mode switch) takes its bubble
-	# down with it rather than leaving one floating over the new one.
-	child_preview.show_color(_child_def.get_color(1), from_point)
-	_child_palette.set_palette(_child_def)
-	_expect(not _child_palette.get_pick_preview().is_showing(),
+	# A palette rebuilt under a finger takes its bubble down with it rather than
+	# leaving one floating over the new row.
+	preview.show_color(_def.get_color(1), from_point)
+	_palette.set_palette(_def)
+	_expect(not _palette.get_pick_preview().is_showing(),
 		"rebuilding the palette clears the bubble")
-	_child_palette.select_color(0)
+	_palette.select_color(0)
 
 	# --- BL-16 part 4: per-item selected states, louder again ----------------
-	var swatches := _adult_palette.get_color_buttons()
-	_adult_palette.select_color(5)
-	var selected_swatch := swatches[5] as SwatchButton
-	var neighbour := swatches[6] as SwatchButton
-	_expect(selected_swatch.patch_inset() < neighbour.patch_inset(),
-		"the selected swatch is drawn LARGER than its neighbours (%.0f px inset vs %.0f)"
-		% [selected_swatch.patch_inset(), neighbour.patch_inset()])
-	var selected_side := SwatchButton.DEFAULT_SIZE.x - SwatchButton.SELECTED_INSET * 2.0
-	var idle_side := SwatchButton.DEFAULT_SIZE.x - SwatchButton.IDLE_INSET * 2.0
-	_expect(selected_side >= idle_side * 1.3,
-		"...by a full %.2fx, not a nudge (%.0f px vs %.0f)"
-		% [selected_side / idle_side, selected_side, idle_side])
-	_expect(SwatchButton.SELECTION_RING_WIDTH >= 6.0,
-		"...inside a ring at least 6 px thick (%.0f px)" % SwatchButton.SELECTION_RING_WIDTH)
-	_expect(
-		SwatchButton.SELECTED_INSET
-		>= SwatchButton.SELECTION_RING_WIDTH + SwatchButton.SELECTION_KEYLINE_WIDTH * 0.5,
-		"...which still fits in the swatch's own box, so the grid's scroller cannot clip it"
-	)
-	_expect(selected_swatch.is_bouncing() and selected_swatch.scale.x > 1.0,
-		"picking a swatch plays a settle bounce (scale %.2f)" % selected_swatch.scale.x)
-	_expect(not neighbour.is_bouncing() and is_equal_approx(neighbour.scale.x, 1.0),
-		"...only the one that was picked")
-	await _wait(SwatchButton.SELECT_BOUNCE_SECONDS + 0.2)
-	_expect(is_equal_approx(selected_swatch.scale.x, 1.0),
-		"...and it settles back to its own box, which is what the scroller clips against (%.3f)"
-		% selected_swatch.scale.x)
-
-	var crayons_now := _child_palette.get_color_buttons()
-	_child_palette.select_color(3)
+	var crayons_now := _palette.get_color_buttons()
+	_palette.select_color(3)
 	var selected_crayon := crayons_now[3] as CrayonButton
 	_expect(CrayonButton.LIFT_PX >= CrayonButton.DEFAULT_SIZE.x * 0.45,
 		"a selected crayon lifts %.0f px, half its own width" % CrayonButton.LIFT_PX)
@@ -619,59 +793,66 @@ func _check_selection_feedback() -> void:
 		"an unselected crayon does not lift at all")
 
 
-## (g) GameState: default mode, palette lookup, mode_changed.
+## (g) GameState: one palette, no mode surface, and a save that still tolerates
+## the vestigial "mode" key without ever writing one (BL-20).
 func _check_game_state() -> void:
-	print("\n-- check 8: GameState --")
+	print("\n-- check 8: GameState after BL-20 --")
 	GameState.reload_palettes()
-	# M5: the mode is persisted, so a real save could have put the game in adult
-	# mode before this test ran. Point saves at an empty scratch root -- loading
-	# nothing restores the shipped defaults, which is exactly what is asserted
-	# below.
-	GameState.set_save_root("user://palette_smoke/state")
-	GameState.mode_changed.connect(_on_mode_changed)
+	# Point saves at an empty scratch root: this check writes files, and the
+	# player's own save must never be touched by a smoke run.
+	GameState.set_save_root(TEST_SAVE_ROOT)
+	_delete_recursive(TEST_SAVE_ROOT)
+	DirAccess.make_dir_recursive_absolute(TEST_SAVE_ROOT)
 
-	_expect(GameState.mode == PaletteDef.MODE_CHILD,
-		"default mode is 'child' (%s)" % GameState.mode)
 	var active := GameState.get_active_palette()
-	_expect(active != null and active.mode == PaletteDef.MODE_CHILD,
-		"get_active_palette() returns the child palette (%s)" % [active.resource_path if active else "null"])
-	_expect(active == _child_def, "it is the same resource instance the test loaded (cached, not re-read)")
+	_expect(active != null and active.resource_path == PALETTE,
+		"get_active_palette() returns the one crayon palette (%s)"
+		% [active.resource_path if active else "null"])
+	_expect(active == GameState.get_active_palette(),
+		"...cached, so everything shares one instance")
 	_expect(GameState.get_palette_scene_path() == "res://scenes/components/palette_child.tscn",
-		"child mode maps to palette_child.tscn")
+		"get_palette_scene_path() is the crayon row (%s)" % GameState.get_palette_scene_path())
 
-	GameState.mode = PaletteDef.MODE_ADULT
-	_expect(_mode_events == ["adult"], "mode_changed emitted once with 'adult' (%s)" % [_mode_events])
-	var adult_active := GameState.get_active_palette()
-	_expect(adult_active == _adult_def, "get_active_palette() now returns the adult palette")
-	_expect(adult_active.completion_threshold > _child_def.completion_threshold,
-		"the swapped palette carries the stricter adult threshold (%.2f)" % adult_active.completion_threshold)
-	_expect(GameState.get_palette_scene_path() == "res://scenes/components/palette_adult.tscn",
-		"adult mode maps to palette_adult.tscn")
+	# The mode API is gone, not merely unused: nothing can put the game back into
+	# two halves by accident.
+	_expect(not _has_property(GameState, "mode"), "GameState has no 'mode' property")
+	_expect(not GameState.has_method("set_mode"), "...no set_mode()")
+	_expect(not GameState.has_method("get_palette_for_mode"), "...no get_palette_for_mode()")
+	_expect(not GameState.has_signal("mode_changed"), "...and no mode_changed signal")
 
-	GameState.mode = PaletteDef.MODE_ADULT
-	_expect(_mode_events == ["adult"], "re-assigning the same mode emits nothing (%s)" % [_mode_events])
-
-	GameState.mode = PaletteDef.MODE_CHILD
-	_expect(_mode_events == ["adult", "child"], "switching back emits 'child' (%s)" % [_mode_events])
-	GameState.mode_changed.disconnect(_on_mode_changed)
-
-
-func _on_mode_changed(mode: String) -> void:
-	_mode_events.append(mode)
+	# A save written by a pre-BL-20 build still loads at the SAME schema version --
+	# which is the whole reason SAVE_VERSION did not have to move.
+	_expect(GameState.VESTIGIAL_SAVE_KEYS.has("mode"),
+		"'mode' is declared as a key this build reads past (%s)"
+		% [GameState.VESTIGIAL_SAVE_KEYS])
+	var legacy := '{"version": %d, "mode": "adult", "books": {}}' % GameState.SAVE_VERSION
+	var file := FileAccess.open(GameState.get_save_path(), FileAccess.WRITE)
+	if file != null:
+		file.store_string(legacy)
+		file.close()
+	_expect(GameState.load_save(), "a save carrying the old \"mode\" key still loads")
+	GameState.save_now()
+	var written: Dictionary = JSON.parse_string(
+		FileAccess.get_file_as_string(GameState.get_save_path())
+	)
+	_expect(int(written.get("version", -1)) == GameState.SAVE_VERSION,
+		"...and is written back at the same schema v%d (%s)"
+		% [GameState.SAVE_VERSION, written.get("version")])
+	_expect(not written.has("mode"),
+		"...with the vestigial key dropped, because nothing reads it any more")
+	_delete_recursive(TEST_SAVE_ROOT)
 
 
 ## Leaves a deliberate, readable selection on screen for the human/screenshot pass.
 func _showcase() -> void:
-	_child_palette.select_color(SHOWCASE_CHILD_INDEX)
-	_adult_palette.select_color(SHOWCASE_ADULT_INDEX)
-	_adult_palette.select_brush_size(SHOWCASE_ADULT_SIZE_INDEX)
+	_palette.select_color(SHOWCASE_INDEX)
 	await _settle()
 	# BL-15: park a bubble over the showcase crayon so the screenshot shows the
 	# thing a still frame otherwise never catches.
-	var crayons := _child_palette.get_color_buttons()
-	if SHOWCASE_CHILD_INDEX < crayons.size():
-		_child_palette.get_pick_preview().show_color(
-			_child_def.get_color(SHOWCASE_CHILD_INDEX), _center_of(crayons[SHOWCASE_CHILD_INDEX])
+	var crayons := _palette.get_color_buttons()
+	if SHOWCASE_INDEX < crayons.size():
+		_palette.get_pick_preview().show_color(
+			_def.get_color(SHOWCASE_INDEX), _center_of(crayons[SHOWCASE_INDEX])
 		)
 	await _settle()
 
@@ -696,6 +877,32 @@ func _settle() -> void:
 
 func _wait(seconds: float) -> void:
 	await get_tree().create_timer(seconds).timeout
+
+
+## True when [param object] really exposes a property called [param name]. Used to
+## assert that a property is GONE, which `object.name` cannot do without erroring.
+static func _has_property(object: Object, name: String) -> bool:
+	for entry in object.get_property_list():
+		if String(entry.get("name", "")) == name:
+			return true
+	return false
+
+
+static func _delete_recursive(path: String) -> void:
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while entry != "":
+		var child := path.path_join(entry)
+		if dir.current_is_dir():
+			_delete_recursive(child)
+		else:
+			DirAccess.remove_absolute(child)
+		entry = dir.get_next()
+	dir.list_dir_end()
+	DirAccess.remove_absolute(path)
 
 
 ## Middle of [param control], in viewport coordinates -- where a finger aiming at
@@ -745,9 +952,21 @@ static func _all_positive(sizes: PackedFloat32Array) -> bool:
 	return not sizes.is_empty()
 
 
-func _closest_child_color_pair() -> Dictionary:
+## The tightest RGB gap between any two entries of [param colors]. INF for a list
+## of fewer than two.
+static func _closest_pair(colors: PackedColorArray) -> float:
+	var closest := INF
+	for i in colors.size():
+		for j in range(i + 1, colors.size()):
+			closest = minf(closest, Vector3(colors[i].r, colors[i].g, colors[i].b).distance_to(
+				Vector3(colors[j].r, colors[j].g, colors[j].b)
+			))
+	return closest
+
+
+func _closest_color_pair() -> Dictionary:
 	var best := {"a": -1, "b": -1, "distance": INF}
-	var colors := _child_def.colors
+	var colors := _def.colors
 	for i in colors.size():
 		for j in range(i + 1, colors.size()):
 			var d := Vector3(colors[i].r, colors[i].g, colors[i].b).distance_to(

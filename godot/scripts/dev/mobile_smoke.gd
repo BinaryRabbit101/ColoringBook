@@ -38,7 +38,7 @@ extends Control
 ##      not re-celebrate, and the per-page coloring lock stops strokes and Start
 ##      over -- and nothing else -- across a page change
 ##   e  portrait: the WINDOW is resized to PORTRAIT_WINDOW and the title screen,
-##      mode select and coloring page are all checked and screenshotted through
+##      the shelf and the coloring page are all checked and screenshotted through
 ##      the real stretch pipeline
 ##   f  the shared safe-area wrapper really insets the screens it wraps
 ##   g  the quit path: a close request saves synchronously, then DRAINS the GPU
@@ -131,7 +131,6 @@ func _run() -> void:
 	print("=== M6 mobile smoke test ===")
 	_delete_recursive(TEST_ROOT)
 	GameState.set_save_root(TEST_SAVE_ROOT)
-	GameState.mode = PaletteDef.MODE_CHILD
 	print("   save root: %s" % ProjectSettings.globalize_path(GameState.get_save_path()))
 
 	_test_book = load(TEST_BOOK_PATH) as BookDef
@@ -748,35 +747,13 @@ func _check_portrait() -> void:
 
 		title.get_tap_button().pressed.emit()
 
-	# --- mode select ----------------------------------------------------------
-	var reached := await _wait_for_screen(main, Main.SCREEN_MODE_SELECT)
-	_expect(reached, "tapping the title reaches mode select")
-	var modes := main.get_current_screen() as ModeSelect
-	if modes == null:
-		main.queue_free()
-		return
+	# --- the shelf (BL-20: the title's tap lands here, with nothing in between) --
+	var reached := await _wait_for_screen(main, Main.SCREEN_BOOK_SELECT)
+	_expect(reached, "tapping the title reaches the shelf directly in portrait")
 	await _settle_layout()
-	_expect(modes.is_portrait(), "mode select knows it is in portrait")
-	var cards := modes.get_cards()
-	_expect(cards.size() == 2, "both cards are there (%d)" % cards.size())
-	var stacked := cards.size() == 2 and cards[1].global_position.y >= cards[0].get_global_rect().end.y - 1.0
-	_expect(stacked, "the cards are STACKED, not squeezed side by side (card 1 ends at y=%.0f, card 2 starts at y=%.0f)"
-		% [cards[0].get_global_rect().end.y, cards[1].global_position.y])
-	var narrowest := INF
-	var overflowing := 0
-	for card in cards:
-		narrowest = minf(narrowest, minf(card.size.x, card.size.y))
-		if card.get_global_rect().end.y > viewport_size.y + 1.0:
-			overflowing += 1
-	_expect(narrowest >= ModeSelect.MIN_TOUCH_TARGET,
-		"every stacked card is at least %.0f px on its short side (%.0f)"
-		% [ModeSelect.MIN_TOUCH_TARGET, narrowest])
-	_expect(overflowing == 0, "no card runs off the bottom of the screen (%d)" % overflowing)
-	await _screenshot("mode_select_portrait.png")
+	await _screenshot("book_select_portrait.png")
 
 	# --- coloring page --------------------------------------------------------
-	modes.get_card(PaletteDef.MODE_CHILD).pressed.emit()
-	await _wait_for_screen(main, Main.SCREEN_BOOK_SELECT)
 	var shelf := main.get_current_screen() as BookSelect
 	var gear := main.get_gear_button()
 	_expect(minf(gear.size.x, gear.size.y) >= 72.0,
@@ -800,7 +777,7 @@ func _check_portrait() -> void:
 	await _settle_layout()
 
 	var palette := coloring.get_palette() as PaletteChild
-	_expect(palette != null, "child mode put a crayon row on the page")
+	_expect(palette != null, "the page carries the crayon row")
 	if palette == null:
 		main.queue_free()
 		return
@@ -812,7 +789,7 @@ func _check_portrait() -> void:
 	_expect(smallest >= CrayonButton.MIN_TOUCH_TARGET,
 		"every crayon holds its %.0f px touch target in portrait (%.0f)"
 		% [CrayonButton.MIN_TOUCH_TARGET, smallest])
-	var scroll := palette.get_node("Margin/Scroll") as ScrollContainer
+	var scroll := palette.get_scroll()
 	_expect(
 		scroll != null
 		and scroll.horizontal_scroll_mode != ScrollContainer.SCROLL_MODE_DISABLED,
@@ -824,7 +801,14 @@ func _check_portrait() -> void:
 	_expect(palette.get_global_rect().end.y <= viewport_size.y + 1.0,
 		"the palette sits inside the screen (ends at y=%.0f of %.0f)"
 		% [palette.get_global_rect().end.y, viewport_size.y])
+	# BL-21: portrait is the UNCHANGED case -- the strip runs along the bottom,
+	# under the canvas.
+	_expect(not coloring.is_landscape() and not palette.is_column(),
+		"the screen knows it is portrait, so the crayons stay a bottom row")
 	var page_view := coloring.get_page_view()
+	_expect(palette.global_position.y >= page_view.get_global_rect().end.y - 1.0,
+		"...below the canvas (palette top y=%.0f, page bottom y=%.0f)"
+		% [palette.global_position.y, page_view.get_global_rect().end.y])
 	_expect(page_view.size.y > page_view.size.x * 0.5,
 		"the page view still owns a usable slab of the portrait screen (%.0fx%.0f)"
 		% [page_view.size.x, page_view.size.y])
@@ -862,10 +846,35 @@ func _check_portrait() -> void:
 	await _screenshot("coloring_portrait.png")
 	await _screenshot("coyote_ingame.png")
 
+	# --- and back to landscape: the crayons dock BESIDE the canvas (BL-21) ------
+	# The same window, the same screen, the same palette scene -- only the aspect
+	# changed, which is the whole point of keying off it rather than off a width.
 	get_window().size = LANDSCAPE_WINDOW
 	await _settle_layout()
-	var back_to_landscape := not is_instance_valid(modes) or not modes.is_portrait()
-	_expect(back_to_landscape, "...and going back to landscape unstacks the cards again")
+	var landscape_size := get_viewport_rect().size
+	_expect(coloring.is_landscape() and palette.is_column(),
+		"a landscape window docks the crayons as a COLUMN (%s)" % landscape_size)
+	_expect(palette.global_position.x >= page_view.get_global_rect().end.x - 1.0,
+		"...on the SIDE of the canvas, not under it (palette x=%.0f, page ends x=%.0f)"
+		% [palette.global_position.x, page_view.get_global_rect().end.x])
+	_expect(palette.size.y > palette.size.x,
+		"...as a tall strip (%.0fx%.0f)" % [palette.size.x, palette.size.y])
+	_expect(palette.size.x <= PaletteChild.STRIP_THICKNESS + 1.0,
+		"...costing the canvas only the strip's %.0f px, never a slice of its height"
+		% PaletteChild.STRIP_THICKNESS)
+	var docked := palette.get_color_buttons()
+	var narrowest_docked := INF
+	for button in docked:
+		narrowest_docked = minf(narrowest_docked, minf(button.size.x, button.size.y))
+	_expect(narrowest_docked >= CrayonButton.MIN_TOUCH_TARGET,
+		"every docked crayon keeps its %.0f px touch target (%.0f)"
+		% [CrayonButton.MIN_TOUCH_TARGET, narrowest_docked])
+	if not docked.is_empty():
+		palette.select_color(0)
+		_expect((docked[0] as CrayonButton).lift_direction() == Vector2.LEFT,
+			"...and lifts LEFT when picked, into the canvas it sits beside")
+	await _screenshot("coloring_landscape_dock.png")
+
 	main.queue_free()
 	await get_tree().process_frame
 
@@ -1039,6 +1048,10 @@ func _settle_layout() -> void:
 func _screenshot(file_name: String) -> void:
 	await RenderingServer.frame_post_draw
 	var path := _shot_dir.path_join(file_name)
+	# _run() wipes TEST_ROOT, which the default shot dir lives under, so the
+	# directory has to be re-made here rather than only in _ready.
+	if not DirAccess.dir_exists_absolute(_shot_dir):
+		DirAccess.make_dir_recursive_absolute(_shot_dir)
 	var error := get_viewport().get_texture().get_image().save_png(path)
 	print("   screenshot: %s (%s)" % [
 		ProjectSettings.globalize_path(path), "ok" if error == OK else "error %d" % error

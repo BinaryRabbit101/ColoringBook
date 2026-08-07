@@ -4,7 +4,7 @@ extends Control
 ## paper, crayons resting along the bottom edge, and "tap anywhere to start".
 ##
 ## One-shot: it reports [signal start_requested] and nothing else. The parent
-## ([code]main.tscn[/code]) decides that this means "go to mode select" -- this
+## ([code]main.tscn[/code]) decides that this means "go to the shelf" -- this
 ## screen never swaps itself (godot-practices: signals up, calls down).
 ##
 ## [b]No art assets[/b]. Everything is drawn from primitives, the same way
@@ -125,7 +125,7 @@ var _title_font_size := 0
 
 
 func _ready() -> void:
-	_palette = GameState.get_palette_for_mode(GameState.MODE_CHILD)
+	_palette = GameState.get_active_palette()
 	_tap_target.pressed.connect(_on_tap_pressed)
 	_crayon_row.resized.connect(_layout_crayons)
 	resized.connect(_apply_responsive_layout)

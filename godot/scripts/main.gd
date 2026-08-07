@@ -8,26 +8,24 @@ extends Control
 ## swaps. Nothing ever reaches sideways:
 ##
 ## [codeblock]
-## TitleScreen.start_requested   -> ModeSelect
-## ModeSelect.mode_chosen        -> GameState.mode = m -> BookSelect
+## TitleScreen.start_requested   -> BookSelect
 ## BookSelect.book_chosen        -> ColoringPage.load_book(book, resume_index)
 ## ColoringPage.back_requested   -> BookSelect
 ## [/codeblock]
+##
+## [b]BL-20 removed the mode-select screen[/b] along with the Child/Adult split:
+## the title now goes straight to the shelf, and there is one palette for everyone
+## (DESIGN.md 1).
 ##
 ## [b]There is no completion screen[/b] (BL-11, DESIGN.md 2). Finishing a page --
 ## including the last one -- is celebrated on the coloring page itself and takes
 ## the player nowhere; [signal ColoringPage.back_requested] is the only exit from
 ## a book, so the flow above is the whole flow.
 ##
-## [b]Ordering rule inherited from M4[/b]: [code]GameState.mode[/code] is set
-## BEFORE [ColoringPage] is instantiated, because the palette scene and the
-## completion threshold are read while that screen builds itself.
-##
 ## [b]Overlays[/b] are main's too, and they are the reason [BookSelect] could stay
 ## frozen: the settings gear is not inside the shelf scene, it is an overlay this
-## node shows while the shelf is the current screen. The settings panel and (when
-## a book is open) the mode picker are overlays for the same reason -- changing
-## mode must not throw the player out of the book they are colouring.
+## node shows while the shelf is the current screen. The settings panel is an
+## overlay for the same reason.
 ##
 ## [b]WP10 added three more overlays and one more shelf button[/b], on exactly that
 ## pattern, so [code]book_select.tscn[/code] is STILL frozen:
@@ -76,12 +74,10 @@ signal screen_changed(screen_id: String)
 signal settings_toggled(is_open: bool)
 
 const SCREEN_TITLE := "title"
-const SCREEN_MODE_SELECT := "mode_select"
 const SCREEN_BOOK_SELECT := "book_select"
 const SCREEN_COLORING := "coloring"
 
 const TITLE_SCENE: PackedScene = preload("res://scenes/screens/title_screen.tscn")
-const MODE_SELECT_SCENE: PackedScene = preload("res://scenes/screens/mode_select.tscn")
 const BOOK_SELECT_SCENE: PackedScene = preload("res://scenes/screens/book_select.tscn")
 const COLORING_PAGE_SCENE: PackedScene = preload("res://scenes/screens/coloring_page.tscn")
 const SETTINGS_PANEL_SCENE: PackedScene = preload("res://scenes/components/settings_panel.tscn")
@@ -171,7 +167,6 @@ var _more_books: Button
 var _current_screen: Control
 var _current_id := ""
 var _settings: SettingsPanel
-var _mode_overlay: ModeSelect
 var _adult_gate: AdultGate
 var _account_panel: AccountPanel
 var _pack_shop: PackShop
@@ -256,12 +251,6 @@ func show_title() -> Control:
 	return await _show_screen(TITLE_SCENE, SCREEN_TITLE)
 
 
-func show_mode_select(from_settings: bool = false) -> Control:
-	return await _show_screen(MODE_SELECT_SCENE, SCREEN_MODE_SELECT, func(screen: Control) -> void:
-		(screen as ModeSelect).set_back_visible(from_settings)
-	)
-
-
 func show_book_select() -> Control:
 	GameState.clear_book()
 	return await _show_screen(BOOK_SELECT_SCENE, SCREEN_BOOK_SELECT, func(screen: Control) -> void:
@@ -339,10 +328,6 @@ func _connect_screen(screen: Control, id: String) -> void:
 	match id:
 		SCREEN_TITLE:
 			(screen as TitleScreen).start_requested.connect(_on_title_start)
-		SCREEN_MODE_SELECT:
-			var mode_select := screen as ModeSelect
-			mode_select.mode_chosen.connect(_on_mode_chosen)
-			mode_select.back_requested.connect(_on_mode_select_cancelled)
 		SCREEN_BOOK_SELECT:
 			(screen as BookSelect).book_chosen.connect(_on_book_chosen)
 		SCREEN_COLORING:
@@ -363,19 +348,8 @@ func _fade_to(target_alpha: float, seconds: float) -> void:
 
 # =============================================================== screen hooks ==
 
+## BL-20: the title goes straight to the shelf. There is nothing to choose first.
 func _on_title_start() -> void:
-	await show_mode_select()
-
-
-func _on_mode_chosen(mode_id: String) -> void:
-	# Before any screen that reads it is built (M4 handoff).
-	GameState.set_mode(mode_id)
-	await show_book_select()
-
-
-## Only reachable when the picker was opened from settings, so "cancel" means
-## "back to the shelf".
-func _on_mode_select_cancelled() -> void:
 	await show_book_select()
 
 
@@ -413,7 +387,6 @@ func open_settings() -> SettingsPanel:
 	_settings.name = "SettingsPanel"
 	_settings.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_settings.closed.connect(close_settings)
-	_settings.mode_change_requested.connect(_on_settings_mode_change)
 	_settings.erase_all_confirmed.connect(_on_settings_erase_all)
 	_settings.account_requested.connect(_on_settings_account)
 	_overlays.add_child(_settings)
@@ -428,18 +401,6 @@ func close_settings() -> void:
 	_settings.queue_free()
 	_settings = null
 	settings_toggled.emit(false)
-
-
-## "Change mode" from settings. With a book open the picker is an OVERLAY, so the
-## player returns to the page they were colouring with the new palette already
-## swapped in; otherwise it is a normal screen with a way back to the shelf.
-func _on_settings_mode_change() -> void:
-	var over_a_book := _current_id == SCREEN_COLORING
-	close_settings()
-	if over_a_book:
-		_open_mode_overlay()
-	else:
-		await show_mode_select(true)
 
 
 func _on_settings_erase_all() -> void:
@@ -591,37 +552,8 @@ func _rescan_shelf() -> void:
 		_populate_shelf(_current_screen as BookSelect)
 
 
-func _open_mode_overlay() -> ModeSelect:
-	if is_instance_valid(_mode_overlay):
-		return _mode_overlay
-	_mode_overlay = MODE_SELECT_SCENE.instantiate() as ModeSelect
-	_mode_overlay.name = "ModeSelectOverlay"
-	_mode_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	_overlays.add_child(_mode_overlay)
-	_mode_overlay.set_back_visible(true)
-	_mode_overlay.mode_chosen.connect(_on_mode_overlay_chosen)
-	_mode_overlay.back_requested.connect(_close_mode_overlay)
-	return _mode_overlay
-
-
-func _on_mode_overlay_chosen(mode_id: String) -> void:
-	# The live ColoringPage listens to GameState.mode_changed and rebuilds its
-	# palette + threshold itself; main only has to get out of the way.
-	GameState.set_mode(mode_id)
-	_close_mode_overlay()
-
-
-func _close_mode_overlay() -> void:
-	if not is_instance_valid(_mode_overlay):
-		return
-	_overlays.remove_child(_mode_overlay)
-	_mode_overlay.queue_free()
-	_mode_overlay = null
-
-
 func _close_overlays() -> void:
 	close_settings()
-	_close_mode_overlay()
 	_close_adult_gate()
 	close_account_panel()
 	close_pack_shop()
@@ -644,10 +576,6 @@ func is_transitioning() -> bool:
 
 func get_settings_panel() -> SettingsPanel:
 	return _settings if is_instance_valid(_settings) else null
-
-
-func get_mode_select_overlay() -> ModeSelect:
-	return _mode_overlay if is_instance_valid(_mode_overlay) else null
 
 
 func get_gear_button() -> Button:

@@ -1,6 +1,6 @@
 class_name CrayonButton
 extends BaseButton
-## One crayon in the child palette row, drawn from primitives -- no art assets.
+## One crayon in the palette row, drawn from primitives -- no art assets.
 ##
 ## Extends [BaseButton] so touch and mouse arrive through the engine's single
 ## button path (DESIGN.md 3.3: no separate mouse/touch branches) while [method
@@ -26,15 +26,34 @@ extends BaseButton
 ## bounce[/b] -- it springs up past its resting height and drops back
 ## ([constant SELECT_BOUNCE_SCALE]). The bounce is why [constant LIFT_HEADROOM],
 ## not [constant LIFT_PX], is the space reserved at the top of the box: the row's
-## [ScrollContainer] clips vertically, and an overshoot with nowhere to go would be
-## sliced off at the peak of the very motion that is supposed to draw the eye.
+## [ScrollContainer] clips across the crayon's LONG axis, and an overshoot with
+## nowhere to go would be sliced off at the peak of the very motion that is
+## supposed to draw the eye.
+##
+## [b]BL-21 gave the crayon a second orientation[/b], for the landscape dock where
+## the palette is a vertical column beside the canvas. Rather than a second set of
+## drawing code, [method _draw] always works in the crayon's own [b]canonical
+## space[/b] -- tip at the top, lift rising -- and [constant ORIENT_LEFT] rotates
+## that space a quarter turn anticlockwise before anything is drawn. Canonical UP
+## then points screen LEFT, which is where the canvas is when the column is docked
+## on the right, so the lift still rises INTO the page. Everything that depends on
+## the lift direction -- the headroom, the halo's flattened spread, the paddings --
+## is expressed in canonical space and therefore follows for free.
 
-## Minimum touch target for child mode (DESIGN.md 1 "large touch targets"); the
-## global floor is 48 px, child mode is deliberately more generous.
+## Minimum touch target for a crayon (DESIGN.md 1 "large touch targets"); the
+## global floor is 48 px, the crayon row is deliberately more generous.
 const MIN_TOUCH_TARGET := 64.0
-## Default box for one crayon. Width is the touch target; height gives the ~1:2.5
-## body proportion that reads as "crayon" rather than "stick".
+## Default box for one crayon, in CANONICAL space (tip up). Width is the touch
+## target; height gives the ~1:2.5 body proportion that reads as "crayon" rather
+## than "stick". [method box_for] turns this into the control's real box for an
+## orientation.
 const DEFAULT_SIZE := Vector2(68.0, 176.0)
+
+## Drawn tip up; the lift rises. The bottom-of-the-canvas row (portrait).
+const ORIENT_UP := 0
+## Drawn tip LEFT; the lift moves left. The side-of-the-canvas column (BL-21
+## landscape), where "left" is into the page.
+const ORIENT_LEFT := 1
 ## How far a selected crayon rises out of the box (16 -> 26 in BL-15, 26 -> 34 in
 ## BL-16: half the crayon's own width).
 const LIFT_PX := 34.0
@@ -88,6 +107,17 @@ var selected: bool = false:
 ## Index of this crayon in the [PaletteDef]'s colour list.
 var color_index: int = 0
 
+## Which way this crayon points (BL-21). Setting it also resizes the control's
+## box, because a crayon lying on its side needs the long axis horizontal.
+var orientation: int = ORIENT_UP:
+	set(value):
+		var resolved := ORIENT_LEFT if value == ORIENT_LEFT else ORIENT_UP
+		if orientation == resolved:
+			return
+		orientation = resolved
+		custom_minimum_size = box_for(resolved)
+		queue_redraw()
+
 ## Multiplier on [constant LIFT_PX] while the settle bounce plays (BL-16). 1.0 at
 ## rest; it starts at [constant SELECT_BOUNCE_SCALE] and springs down to 1.0.
 var _lift_scale := 1.0
@@ -95,7 +125,7 @@ var _bounce_tween: Tween
 
 
 func _init() -> void:
-	custom_minimum_size = DEFAULT_SIZE
+	custom_minimum_size = box_for(orientation)
 	focus_mode = Control.FOCUS_NONE
 	mouse_filter = Control.MOUSE_FILTER_STOP
 
@@ -106,6 +136,23 @@ func _ready() -> void:
 	mouse_exited.connect(queue_redraw)
 	button_down.connect(queue_redraw)
 	button_up.connect(queue_redraw)
+
+
+## The control box one crayon needs in [param orientation]: the canonical box for
+## [constant ORIENT_UP], the same box on its side for [constant ORIENT_LEFT].
+static func box_for(orientation_id: int) -> Vector2:
+	return (
+		Vector2(DEFAULT_SIZE.y, DEFAULT_SIZE.x)
+		if orientation_id == ORIENT_LEFT
+		else DEFAULT_SIZE
+	)
+
+
+## Unit vector, in SCREEN space, that a selected crayon lifts along -- up in the
+## portrait row, left in the landscape column. Public so the palette smoke can
+## assert the lift really points into the canvas rather than trusting the constant.
+func lift_direction() -> Vector2:
+	return Vector2.LEFT if orientation == ORIENT_LEFT else Vector2.UP
 
 
 ## How far this crayon is currently lifted out of its box, in pixels: 0 when it is
@@ -147,11 +194,24 @@ func _kill_bounce() -> void:
 	_bounce_tween = null
 
 
+## Sets up the canonical drawing space, then draws the crayon in it (BL-21).
+##
+## [constant ORIENT_LEFT] rotates the canvas item a quarter turn ANTICLOCKWISE and
+## slides it back into the box: canonical (x, y) lands at screen
+## [code](y, height - x)[/code], so the canonical box (short x long) covers the
+## control's real box (long x short) and canonical UP comes out screen LEFT. Every
+## pixel below is then written exactly once, for both orientations.
 func _draw() -> void:
 	var box := size
 	if box.x <= 0.0 or box.y <= 0.0:
 		return
+	if orientation == ORIENT_LEFT:
+		draw_set_transform(Vector2(0.0, size.y), -PI * 0.5)
+		box = Vector2(size.y, size.x)
+	_draw_crayon(box)
 
+
+func _draw_crayon(box: Vector2) -> void:
 	var lift := current_lift()
 	var press_sink := 4.0 if is_pressed() else 0.0
 	var width_scale := SELECTED_WIDTH_SCALE

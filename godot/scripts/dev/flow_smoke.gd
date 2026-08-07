@@ -104,8 +104,6 @@ func _run() -> void:
 	# coverage". Point saves at a scratch root and wipe it.
 	GameState.set_save_root("user://flow_smoke/state")
 	GameState.erase_all_progress()
-	# M4 is exercised in child mode: generous threshold, one big forgiving brush.
-	GameState.mode = PaletteDef.MODE_CHILD
 
 	_check_resources()
 	await _check_coverage_tracker()
@@ -524,7 +522,10 @@ func _check_coloring_flow() -> void:
 		"GameState cursor is (test_book, page 0)")
 
 	var palette := screen.get_palette()
-	_expect(palette != null, "the mode's palette component was instantiated (%s)" % (palette.get_class() if palette else "none"))
+	# BL-20: there is ONE palette component, and the screen loads it without
+	# consulting anything but GameState.get_palette_scene_path().
+	_expect(palette is PaletteChild,
+		"the crayon palette component was instantiated (%s)" % _script_name(palette))
 	var palette_def := GameState.get_active_palette()
 	_expect(palette != null and palette.get_palette() == palette_def,
 		"the palette was handed the active PaletteDef")
@@ -1005,6 +1006,18 @@ func _check_sub_smokes() -> void:
 
 
 # =================================================================== helpers ==
+
+## The registered class_name of a node's script ([method Object.get_class] only
+## ever reports the engine base class, "Control", for a scripted node).
+static func _script_name(node: Object) -> String:
+	if node == null:
+		return "none"
+	var script := node.get_script() as Script
+	if script == null:
+		return node.get_class()
+	var global_name := script.get_global_name()
+	return global_name if global_name != "" else node.get_class()
+
 
 func _expect(condition: bool, description: String) -> void:
 	_checks += 1

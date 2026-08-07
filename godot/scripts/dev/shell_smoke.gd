@@ -9,7 +9,7 @@ extends Control
 ## Extra user args (after a bare `--`):
 ##   --stay             leave the app running afterwards, on whatever screen it
 ##                      reached, WITHOUT deleting the scratch save
-##   --shot-dir <dir>   where title.png / mode_select.png / page_complete.png go
+##   --shot-dir <dir>   where title.png / page_complete.png go
 ##                      (default user://shell_smoke/shots)
 ##
 ## [b]Persistence is isolated.[/b] The harness drives the REAL [code]GameState[/code]
@@ -18,7 +18,7 @@ extends Control
 ## the other smoke tests) are never touched.
 ##
 ## Checks, in order:
-##   a  main.tscn boots to the title; tap -> mode select -> child -> shelf; the
+##   a  main.tscn boots to the title; tap -> shelf (BL-20: no mode select); the
 ##      settings gear opens and closes; picking the book opens page 1/2
 ##   b  strokes in region 4, then Back: the save file, its schema, the book entry
 ##      and the paint PNG all exist on disk
@@ -34,8 +34,8 @@ extends Control
 ##      erase_book_progress wipes paint + status and the book reopens clean at 1/2
 ##   e  settings "erase all progress" (two-step confirm) empties the save and the
 ##      paint directory
-##   f  changing mode mid-book swaps the palette component and the completion
-##      threshold live
+##   f  the open book has ONE palette and ONE threshold, and the settings
+##      overlay carries nothing that could change either (BL-20)
 ##   g  NOTIFICATION_WM_CLOSE_REQUEST writes the save
 ##   h  a corrupt save, and a save from a FUTURE schema, both start fresh without
 ##      crashing (the future one is backed up first)
@@ -110,7 +110,7 @@ func _run() -> void:
 	await _check_coloring_lock()
 	await _check_complete_and_again()
 	await _check_erase_all()
-	await _check_mode_change_mid_book()
+	await _check_single_palette_mid_book()
 	await _check_quit_save()
 	_check_broken_saves()
 
@@ -150,7 +150,7 @@ func _finish(code: int) -> void:
 # ============================================ a: boot, navigation, settings ==
 
 func _check_boot_and_navigation() -> void:
-	print("\n-- check a: boot -> title -> mode select -> shelf -> page --")
+	print("\n-- check a: boot -> title -> shelf -> page --")
 
 	_expect(
 		String(ProjectSettings.get_setting("application/run/main_scene", "")) == "res://scenes/main.tscn",
@@ -177,30 +177,15 @@ func _check_boot_and_navigation() -> void:
 	await _settle_layout()
 	await _screenshot("title.png")
 
-	# --- tap to start --------------------------------------------------------
+	# --- tap to start: BL-20 put the shelf directly behind the title ---------
 	title.get_tap_button().pressed.emit()
-	var reached_modes := await _wait_for_screen(Main.SCREEN_MODE_SELECT)
-	_expect(reached_modes, "tapping the title goes to mode select (%s)" % _main.get_current_screen_id())
-	var modes := _main.get_current_screen() as ModeSelect
-	if modes == null:
-		return
-	var cards := modes.get_cards()
-	_expect(cards.size() == 2, "mode select shows 2 cards (%d)" % cards.size())
-	var smallest := INF
-	for card in cards:
-		smallest = minf(smallest, minf(card.size.x, card.size.y))
-	_expect(smallest >= ModeSelect.MIN_TOUCH_TARGET,
-		"every card is at least %.0f px on its short side (%.0f)"
-		% [ModeSelect.MIN_TOUCH_TARGET, smallest])
-	_expect(not modes.is_back_visible(), "no Cancel button on the first-run mode select")
-	await _screenshot("mode_select.png")
-
-	# --- child mode ----------------------------------------------------------
-	modes.get_card(PaletteDef.MODE_CHILD).pressed.emit()
 	var reached_shelf := await _wait_for_screen(Main.SCREEN_BOOK_SELECT)
-	_expect(reached_shelf, "choosing Child goes to the shelf (%s)" % _main.get_current_screen_id())
-	_expect(GameState.mode == PaletteDef.MODE_CHILD,
-		"GameState.mode is 'child' (%s)" % GameState.mode)
+	_expect(reached_shelf,
+		"tapping the title goes STRAIGHT to the shelf (%s)" % _main.get_current_screen_id())
+	_expect(not ResourceLoader.exists("res://scenes/screens/mode_select.tscn"),
+		"...because the mode-select screen no longer exists in the project")
+	_expect(not _main.has_method("show_mode_select") and not _main.has_method("get_mode_select_overlay"),
+		"...and main has no way to reach one, as a screen or as an overlay")
 
 	# --- the settings gear (an OVERLAY, because book_select.tscn is frozen) ---
 	_expect(_main.get_gear_button().visible, "the settings gear is showing on the shelf")
@@ -212,8 +197,13 @@ func _check_boot_and_navigation() -> void:
 		_expect(panel.get_version_text().contains(
 			String(ProjectSettings.get_setting("application/config/version", ""))),
 			"the panel shows the version ('%s')" % panel.get_version_text())
-		_expect(panel.get_mode_text().to_lower().contains("child"),
-			"the panel shows the current mode ('%s')" % panel.get_mode_text())
+		# BL-20: the panel reports WHICH crayons the game paints with, and offers
+		# nothing to change about it -- there is only the one box.
+		_expect(panel.get_palette_text() == GameState.get_active_palette().display_name,
+			"the panel names the one palette ('%s')" % panel.get_palette_text())
+		_expect(not panel.has_method("get_change_mode_button")
+				and not panel.has_signal("mode_change_requested"),
+			"...and carries no mode switch at all")
 		_expect(not panel.is_confirming(), "the erase confirm step starts hidden")
 		panel.get_close_button().pressed.emit()
 		await get_tree().process_frame
@@ -286,8 +276,10 @@ func _check_paint_and_save() -> void:
 		return
 	_expect(int(data_dict.get("version", 0)) == GameState.SAVE_VERSION,
 		"schema version is %d (%s)" % [GameState.SAVE_VERSION, data_dict.get("version")])
-	_expect(String(data_dict.get("mode", "")) == PaletteDef.MODE_CHILD,
-		"the saved mode is 'child' (%s)" % data_dict.get("mode"))
+	# BL-20: the "mode" key is vestigial. It is READ tolerantly (check h plants a
+	# file carrying one) but never written again, and SAVE_VERSION did not move.
+	_expect(not data_dict.has("mode"),
+		"the save carries no 'mode' key any more (%s)" % [data_dict.keys()])
 	var books: Dictionary = data_dict.get("books", {})
 	# WP7 / save schema v2: the key is the book's OWN identity, not the path this
 	# build happens to load it from.
@@ -637,48 +629,44 @@ func _check_erase_all() -> void:
 	_expect(_main.get_settings_panel() == null, "the panel closed")
 
 
-# ================================================ f: mode change mid-book ==
+# ================================================ f: one palette, mid-book ==
 
-func _check_mode_change_mid_book() -> void:
-	print("\n-- check f: change mode while a book is open --")
+## BL-20 rewrote this check rather than deleting it. It used to prove that a mode
+## switch swapped the palette component and the threshold under an open book;
+## there is no switch any more, so what it proves now is the property that
+## replaced it -- the open book has exactly one palette and one threshold, and
+## the settings overlay it could once be changed from can no longer touch either.
+func _check_single_palette_mid_book() -> void:
+	print("\n-- check f: one palette, one threshold, nothing to change mid-book --")
 	var coloring := _main.get_current_screen() as ColoringPage
 	if coloring == null:
 		_expect(false, "a book is still open (%s)" % _main.get_current_screen_id())
 		return
-	var child_palette := GameState.get_palette_for_mode(PaletteDef.MODE_CHILD)
-	var adult_palette := GameState.get_palette_for_mode(PaletteDef.MODE_ADULT)
+	var palette := GameState.get_active_palette()
 	_expect(coloring.get_palette() is PaletteChild,
-		"the open book started with the child palette (%s)" % _script_name(coloring.get_palette()))
+		"the open book uses the crayon palette (%s)" % _script_name(coloring.get_palette()))
+	_expect(coloring.get_palette().get_palette() == palette,
+		"...built from the one PaletteDef GameState hands out")
 	_expect(is_equal_approx(coloring.get_coverage_tracker().get_threshold(),
-			child_palette.completion_threshold),
-		"...and the child threshold %.2f" % coloring.get_coverage_tracker().get_threshold())
+			palette.completion_threshold),
+		"...and the tracker carries its threshold (%.2f)"
+		% coloring.get_coverage_tracker().get_threshold())
+	_expect(is_equal_approx(coloring.get_coverage_tracker().get_threshold(), 0.90),
+		"...which is the single generous 0.90 (BL-5's child value, kept by BL-20)")
+	_expect(not coloring.has_signal("palette_rebuilt"),
+		"the screen no longer announces a palette rebuild -- nothing rebuilds it")
 
 	var panel := _main.open_settings()
 	await get_tree().process_frame
-	panel.get_change_mode_button().pressed.emit()
-	await get_tree().process_frame
-	var overlay := _main.get_mode_select_overlay()
-	_expect(overlay != null, "'Change' opened the mode picker over the book")
+	_expect(panel != null and panel.get_node_or_null("Center/Panel/Margin/Column/ModeRow") == null,
+		"the settings overlay over the book has no Mode row")
 	_expect(_main.get_current_screen_id() == Main.SCREEN_COLORING,
 		"the book is still the current SCREEN behind the overlay (%s)" % _main.get_current_screen_id())
-	if overlay == null:
-		return
-	_expect(overlay.is_back_visible(), "the overlay picker offers a way back")
-
-	overlay.get_card(PaletteDef.MODE_ADULT).pressed.emit()
+	panel.get_close_button().pressed.emit()
 	await get_tree().process_frame
-	_expect(GameState.mode == PaletteDef.MODE_ADULT, "the mode is now 'adult' (%s)" % GameState.mode)
-	_expect(_main.get_mode_select_overlay() == null, "the overlay closed itself")
 	_expect(_main.get_current_screen() == coloring, "the same coloring page is still open")
-
-	_expect(coloring.get_palette() is PaletteAdult,
-		"the palette component was rebuilt as PaletteAdult (%s)" % _script_name(coloring.get_palette()))
-	_expect(is_equal_approx(coloring.get_coverage_tracker().get_threshold(),
-			adult_palette.completion_threshold),
-		"the completion threshold is now %.2f (%.2f)"
-		% [adult_palette.completion_threshold, coloring.get_coverage_tracker().get_threshold()])
-	_expect(is_equal_approx(coloring.get_coverage_tracker().get_threshold(), 0.96),
-		"...which is the strict adult 0.96 BL-5 tightened it to")
+	_expect(coloring.get_palette().get_palette() == palette,
+		"...with the same palette it opened with")
 
 
 # ==================================================== g: saving on quit ==
@@ -705,7 +693,6 @@ func _check_quit_save() -> void:
 func _check_broken_saves() -> void:
 	print("\n-- check h: corrupt and future save files --")
 	GameState.mark_page_status(_book, 0, GameState.STATUS_COMPLETE)
-	GameState.set_mode(PaletteDef.MODE_ADULT)
 	_expect(not GameState.get_book_progress(BOOK_UID).get("pages", []).is_empty(),
 		"there is in-memory progress before the corrupt read")
 
@@ -714,9 +701,6 @@ func _check_broken_saves() -> void:
 	_expect(not loaded, "load_save() reports that nothing was loaded")
 	_expect((GameState.get_book_progress(BOOK_UID).get("pages", []) as Array).is_empty(),
 		"the in-memory progress was reset")
-	_expect(GameState.mode == GameState.DEFAULT_MODE,
-		"the mode fell back to the shipped default '%s' (%s)"
-		% [GameState.DEFAULT_MODE, GameState.mode])
 	_expect(is_instance_valid(_main), "nothing crashed")
 
 	# --- a save from a build that does not exist yet -------------------------
@@ -743,7 +727,8 @@ func _check_broken_saves() -> void:
 		('{"version": 1, "mode": "child", "books": {"%s": '
 		+ '{"current_page_index": 3, "pages": ["complete", "in_progress", "complete", "complete"]}}}')
 		% BOOK_UID)
-	_expect(GameState.load_save(), "a save listing 4 pages for a 2-page book loads")
+	_expect(GameState.load_save(),
+		"a pre-BL-20 save -- \"mode\" key and all -- listing 4 pages for a 2-page book loads")
 	# ...and those page entries are BARE STATUS STRINGS -- the shape every save
 	# written before BL-10 used. Reading them is the backward-compatibility half of
 	# widening a page entry into an object.
@@ -954,6 +939,10 @@ func _settle_layout() -> void:
 func _screenshot(file_name: String) -> void:
 	await RenderingServer.frame_post_draw
 	var path := _shot_dir.path_join(file_name)
+	# _isolate_persistence() wipes TEST_ROOT, which the default shot dir lives
+	# under, so the directory has to be re-made here rather than only in _ready.
+	if not DirAccess.dir_exists_absolute(_shot_dir):
+		DirAccess.make_dir_recursive_absolute(_shot_dir)
 	var error := get_viewport().get_texture().get_image().save_png(path)
 	print("   screenshot: %s (%s)" % [
 		ProjectSettings.globalize_path(path), "ok" if error == OK else "error %d" % error

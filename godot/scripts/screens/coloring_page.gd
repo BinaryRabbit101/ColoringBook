@@ -1,13 +1,13 @@
 class_name ColoringPage
 extends Control
-## The screen the game is about: one page of a book, the mode's palette, a
+## The screen the game is about: one page of a book, the crayon palette, a
 ## minimal toolbar, and the page-flip that carries the player to the next page
 ## (DESIGN.md 2, 3.4).
 ##
 ## [b]Composition[/b] -- it owns four things and wires them together, and that is
 ## all it does:
 ##   [PageView]        the painting stack (M2, frozen)
-##   palette component the mode's, from [code]GameState.get_palette_scene_path()[/code] (M3, frozen)
+##   palette component the crayon row, from [code]GameState.get_palette_scene_path()[/code] (M3, frozen)
 ##   [CoverageTracker] completion, threshold injected from the active [PaletteDef]
 ##   [PageFlip]        the transition between pages
 ##
@@ -45,15 +45,12 @@ extends Control
 ## blocking readback. [method get_last_readback_usec] reports the BLOCKING part of
 ## the last readback, which is what the mobile pass cares about.
 ##
-## [b]M5 additions[/b] -- the two hooks M4's handoff called for, and nothing else:
+## [b]M5 addition[/b] -- the hook M4's handoff called for, and nothing else.
+## (M5 also carried a live mode swap that rebuilt the palette and re-injected the
+## threshold; [b]BL-20 deleted it with the modes[/b] -- there is one palette and
+## one threshold, fixed for the whole visit.)
 ##
-## 1. [b]Live mode changes[/b]. [method _build_palette] used to run once in
-##    [method _ready]; it now also runs on [signal GameState.mode_changed], and the
-##    new mode's [member PaletteDef.completion_threshold] is re-injected into the
-##    live [CoverageTracker]. Regions already done stay done (coverage is
-##    monotonic and completion sticky), so lowering the bar can finish more
-##    regions but raising it can never un-finish one.
-## 2. [b]Paint save / restore[/b]. The screen is the only thing that can reach the
+## 1. [b]Paint save / restore[/b]. The screen is the only thing that can reach the
 ##    paint layer, so it owns the TIMING; [code]GameState[/code] owns the FILES.
 ##    Paint is handed to [code]GameState.save_page_paint()[/code] at exactly the
 ##    three moments the design allows a full readback: a page completing (before
@@ -148,8 +145,6 @@ signal history_applied(undone: bool)
 ## replayed into the tracker. [param restored] is false when there was nothing
 ## saved. Tests wait on this; the game ignores it.
 signal paint_restored(page_index: int, restored: bool)
-## Fired after the palette component has been rebuilt for a new mode.
-signal palette_rebuilt(mode: String)
 ## The page's paint layer was written. [param manual] is true when the player
 ## asked for it rather than a timer or a save point. Tests wait on this.
 signal page_saved(page_index: int, manual: bool)
@@ -197,8 +192,13 @@ const UNDO_DEPTH := 50
 ## generous for the deepest legal history, and still a bound rather than a hang.
 const MAX_REPLAY_WAIT_FRAMES := 240
 
-@onready var _page_view: PageView = $Ui/PageView
+@onready var _page_view: PageView = $Ui/Body/PageView
 @onready var _ui: VBoxContainer = $Ui
+## Page + palette. Vertical in portrait (crayons under the canvas), horizontal in
+## landscape (crayons docked beside it) -- see [method _apply_orientation], BL-21.
+## A plain [BoxContainer] on purpose: [HBoxContainer]/[VBoxContainer] refuse
+## [member BoxContainer.vertical], so a scene that has to flip cannot use them.
+@onready var _body: BoxContainer = $Ui/Body
 @onready var _page_label: Label = $Ui/Toolbar/Row/PageLabel
 @onready var _title_label: Label = $Ui/Toolbar/Row/PageTitle
 @onready var _back_button: Button = $Ui/Toolbar/Row/BackButton
@@ -323,17 +323,17 @@ func _ready() -> void:
 	_configure_confetti()
 	resized.connect(_layout_confetti)
 	_layout_confetti()
-	# M5: the mode is changeable mid-book, so the palette is rebuilt on demand
-	# rather than only here.
-	GameState.mode_changed.connect(_on_mode_changed)
 	# BL-6: the interval autosave announces the moment; this screen is what can
 	# actually reach the pixels.
 	GameState.autosave_due.connect(_on_autosave_due)
-	# M6: portrait windows get a leaner toolbar.
+	# M6: portrait windows get a leaner toolbar. BL-21: and landscape ones dock the
+	# crayons beside the canvas instead of under it.
 	resized.connect(_apply_toolbar_layout)
+	resized.connect(_apply_orientation)
 	_apply_toolbar_layout()
 	_refresh_nav()
 	_build_palette()
+	_apply_orientation()
 
 
 ## WP7: a worker task must never outlive the thing that started it. Dropping the
@@ -574,16 +574,41 @@ func _apply_toolbar_layout() -> void:
 	_title_label.visible = size.x >= NARROW_TOOLBAR_WIDTH
 
 
-## Instantiates the palette for the current mode and wires the two-signal
-## contract both palette components share (coloring-mechanics, M3).
+## True when the screen is wider than it is tall. [b]Aspect, not width[/b]
+## (DESIGN.md 3.5): with `canvas_items`/`expand` stretch over a 1152x648 base, a
+## portrait WINDOW never narrows the logical canvas below 1152 -- it grows the
+## height instead -- so any layout keyed off a pixel width is keyed off nothing.
+func is_landscape() -> bool:
+	return size.x > size.y
+
+
+## BL-21. Landscape docks the crayons as a vertical column on the SIDE of the
+## canvas; portrait keeps the strip along the bottom, unchanged. Both are the same
+## palette scene and the same [BoxContainer] -- only its direction moves.
+func _apply_orientation() -> void:
+	if not is_instance_valid(_body):
+		return
+	var landscape := is_landscape()
+	_body.vertical = not landscape
+	if _palette is PaletteChild:
+		(_palette as PaletteChild).set_layout(
+			PaletteChild.LAYOUT_COLUMN if landscape else PaletteChild.LAYOUT_ROW
+		)
+
+
+## Instantiates the game's one palette component -- the crayon row (BL-20) -- and
+## wires the two-signal contract it exposes (coloring-mechanics, M3).
 func _build_palette() -> void:
 	var scene := load(GameState.get_palette_scene_path()) as PackedScene
 	if scene == null:
-		push_error("ColoringPage: could not load the palette scene for mode '%s'." % GameState.mode)
+		push_error("ColoringPage: could not load '%s'." % GameState.get_palette_scene_path())
 		return
 	_palette = scene.instantiate() as Control
-	# Appended last, so the palette sits under PageView in the vertical stack.
-	_ui.add_child(_palette)
+	# Appended after PageView, so the palette lands under the canvas in portrait
+	# and to the RIGHT of it in landscape -- the same child order, read the way the
+	# body box happens to be pointing (BL-21).
+	_body.add_child(_palette)
+	_apply_orientation()
 
 	_palette.color_picked.connect(_on_color_picked)
 	_palette.brush_size_picked.connect(_on_brush_size_picked)
@@ -829,8 +854,8 @@ func has_unsaved_paint() -> bool:
 #
 #   locked   presses start no stroke ([member PageView.painting_enabled]), and
 #            Start over is disabled -- the two ways a page can lose work
-#   still on  pan, zoom, two-finger gestures, Save, navigation, palette browsing,
-#            mode switching. The lock stops PAINT, not looking or leaving.
+#   still on  pan, zoom, two-finger gestures, Save, navigation and palette
+#            browsing. The lock stops PAINT, not looking or leaving.
 #
 # One tap on, one tap off, no confirm dialog: a lock that takes two decisions to
 # undo is worse than no lock for a four-year-old. The state persists per page in
@@ -1149,37 +1174,6 @@ func is_toast_visible() -> bool:
 	return is_instance_valid(_toast) and _toast.visible
 
 
-# ================================================================ mode swap ==
-
-## The mode changed while this screen is alive (settings -> mode select). Swap the
-## palette component and re-inject the new completion threshold, without touching
-## the page or the paint already on it.
-func _on_mode_changed(new_mode: String) -> void:
-	if is_instance_valid(_palette):
-		_ui.remove_child(_palette)
-		_palette.queue_free()
-		_palette = null
-	_build_palette()
-
-	var palette_def := GameState.get_active_palette()
-	if _coverage != null and palette_def != null:
-		_coverage.set_threshold(palette_def.completion_threshold)
-	# Emitted BEFORE the re-settle: the palette and the threshold are already the
-	# new mode's, and callers must not have to wait out a readback to see that.
-	palette_rebuilt.emit(new_mode)
-
-	# Re-settle: a LOWER threshold can finish regions that were already past it.
-	# update_all is monotonic, so a higher threshold changes nothing. M6: async,
-	# so changing mode never stalls the frame it happens on.
-	if _coverage == null or palette_def == null or not _page_view.is_page_loaded():
-		return
-	var generation := _page_generation
-	var image := await _read_paint_async()
-	if image == null or generation != _page_generation or _coverage == null:
-		return
-	_coverage.update_all(image)
-
-
 # =================================================================== accessors ==
 
 func get_page_view() -> PageView:
@@ -1194,7 +1188,7 @@ func get_coverage_tracker() -> CoverageTracker:
 	return _coverage
 
 
-## The live palette component (a [PaletteChild] or [PaletteAdult]).
+## The live palette component -- the crayon strip ([PaletteChild]).
 func get_palette() -> Control:
 	return _palette
 
@@ -1586,7 +1580,7 @@ func is_celebrating() -> bool:
 # -------------------------------------------------------------------- confetti --
 # Lifted from the deleted BookComplete screen, which is where this look was built:
 # ONE [CPUParticles2D], no art assets, and its scraps take their colours from the
-# CHILD palette through a CONSTANT-interpolation [member
+# crayon palette through a CONSTANT-interpolation [member
 # CPUParticles2D.color_initial_ramp], so each scrap is one flat crayon colour
 # instead of a muddy blend. The only change is that it is a one-shot BURST here
 # rather than a screen that rains forever.
@@ -1595,7 +1589,7 @@ func _configure_confetti() -> void:
 	if not is_instance_valid(_confetti):
 		return
 	_confetti.texture = _make_scrap_texture()
-	var palette := GameState.get_palette_for_mode(GameState.MODE_CHILD)
+	var palette := GameState.get_active_palette()
 	if palette == null or palette.color_count() == 0:
 		return
 	var gradient := Gradient.new()

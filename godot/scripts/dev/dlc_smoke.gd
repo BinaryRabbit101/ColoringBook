@@ -607,8 +607,10 @@ func _check_save_migration() -> void:
 
 	# --- migrate --------------------------------------------------------------
 	_expect(GameState.load_save(), "a v1 save loads")
-	_expect(GameState.mode == PaletteDef.MODE_ADULT,
-		"the saved mode came across (%s)" % GameState.mode)
+	# BL-20: the v1 file's "mode" key is vestigial -- it is read past, not honoured,
+	# and never written back. What has to survive the migration is the PROGRESS.
+	_expect(not GameState.to_save_dict().has("mode"),
+		"...and the vestigial \"mode\" key it carried is not carried forward")
 	_expect(GameState.has_book_progress(COYOTE_UID) and GameState.has_book_progress(TEST_BOOK_UID),
 		"both known books are keyed by uid now")
 	_expect(not GameState.has_book_progress(COYOTE_BOOK_PATH),

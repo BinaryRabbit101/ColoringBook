@@ -1,49 +1,50 @@
 class_name PaletteDef
 extends Resource
-## Authored palette + brush configuration for one difficulty mode (DESIGN.md 1, 3.4).
+## Authored palette + brush configuration for the game's one palette
+## (DESIGN.md 1, 3.4).
 ##
 ## Pure data: no nodes, no logic beyond validation and small lookups. The palette
-## UI components ([code]palette_child.tscn[/code] / [code]palette_adult.tscn[/code])
-## are handed one of these via [code]set_palette()[/code] and build themselves from
-## it; the coloring screen reads [member default_brush_size] /
-## [member default_brush_hardness] to prime [code]PageView[/code], and M4 reads
-## [member completion_threshold] for coverage.
+## UI component ([code]palette_child.tscn[/code] -- the crayon row) is handed one
+## of these via [code]set_palette()[/code] and builds itself from it; the coloring
+## screen reads [member default_brush_size] / [member default_brush_hardness] to
+## prime [code]PageView[/code] and [member completion_threshold] for coverage.
+##
+## [b]BL-20 removed the Child/Adult split[/b]. There is exactly one palette --
+## [code]res://resources/palettes/child_palette.tres[/code], the crayon box -- so
+## this resource no longer carries a mode id, and the adult grid's
+## [code]shades_per_family[/code] grouping went with the swatch grid that read it.
+## What is left is what the crayon row actually uses.
+##
+## [b]The intensity ladder (BL-22) lives here but is not authored[/b] -- see
+## [method shade_of]. It is a pure function of a base colour, so every crayon of
+## every [CrayonSetDef] gets its light-to-dark range for free and no set can ever
+## be missing one.
 ##
 ## Instances live in [code]res://resources/palettes/*.tres[/code]. Never hardcode
 ## colours or sizes in scripts.
 
-## Mode id for a child palette.
-const MODE_CHILD := "child"
-## Mode id for an adult palette.
-const MODE_ADULT := "adult"
-
-## Shown in settings / mode select. Not a gameplay key -- [member mode] is.
+## Shown in settings. Not a gameplay key.
 @export var display_name: String = ""
 
-## Which difficulty mode this palette belongs to: "child" or "adult".
-## GameState maps mode -> palette with this, so it must match the file it lives in.
-@export_enum("child", "adult") var mode: String = MODE_CHILD
-
 @export_group("Colours")
-## Every colour offered, in display order. Child: 8-12 bold, well-separated hues.
-## Adult: hue families laid out consecutively, [member shades_per_family] entries
-## each (light -> dark), so the swatch grid can group them without extra data.
+## Every colour offered, in display order: 8-12 bold, well-separated hues.
+##
+## This is the DEFAULT crayon box, and the one anything outside the palette strip
+## uses when it wants "the game's colours" (the title screen, the boot splash, the
+## confetti). Additional authored boxes are [CrayonSetDef] resources (BL-23) which
+## replace this list on the strip and nothing else -- the brush and the threshold
+## below always come from here.
 @export var colors: PackedColorArray = PackedColorArray()
-
-## How many consecutive entries of [member colors] form one shade family, for the
-## adult grid's column grouping. 1 (or anything that does not divide the colour
-## count) means "no grouping" -- the UI then falls back to a single flat run.
-@export_range(1, 16, 1) var shades_per_family: int = 1
 
 @export_group("Brush")
 ## Brush DIAMETERS in page pixels, ascending. PageView.brush_size is a DIAMETER,
-## so these go straight into it with no conversion. Child ships one forgiving
-## size; adult ships three.
+## so these go straight into it with no conversion. The crayon row ships exactly
+## one forgiving size (BL-20 deleted the size slider along with the adult palette).
 @export var brush_sizes: PackedFloat32Array = PackedFloat32Array()
 
-## Diameter (page px) selected before the player touches the size control. Should
-## be one of [member brush_sizes]; [method get_default_brush_size_index] snaps to
-## the nearest entry if it is not.
+## Diameter (page px) selected before anything else happens. Should be one of
+## [member brush_sizes]; [method get_default_brush_size_index] snaps to the
+## nearest entry if it is not.
 @export_range(2.0, 512.0, 0.5) var default_brush_size: float = 56.0
 
 ## Feathering of the brush dab, 0 = fully soft, 1 = hard. Never affects the
@@ -53,16 +54,117 @@ const MODE_ADULT := "adult"
 @export_group("Completion")
 ## Fraction of a region's pixels that must be painted for it to count as done
 ## (DESIGN.md 1 "Completion", coloring-mechanics "Coverage & completion").
-## Read by M4's coverage tracker -- exported here so the value is authored data,
+## Read by the coverage tracker -- exported here so the value is authored data,
 ## never a constant in code.
 ##
-## Shipped values (BL-5 tightened both): child [b]0.90[/b] (forgiving -- the
-## player may leave a fringe of paper, but not a patch of it), adult [b]0.96[/b]
-## (strict -- near-complete fill required). Must be in (0, 1]; child must be lower
-## than adult, and both must clear
+## Shipped value: [b]0.90[/b] (BL-5's forgiving child number, kept as THE
+## threshold by BL-20 -- the player may leave a fringe of paper, but not a patch
+## of it). Must be in (0, 1] and must clear
 ## [constant CoverageTracker.MIN_REGION_THRESHOLD], which the tracker clamps
 ## against so no authored value can make a blank-looking page "complete".
 @export_range(0.05, 1.0, 0.01) var completion_threshold: float = 0.9
+
+## Rungs on the intensity ladder (BL-22): pale tint at 0, deep shade at the top.
+## Seven is enough that neighbouring rungs are clearly different and few enough
+## that the whole ladder fits the crayon strip without scrolling.
+const INTENSITY_STEPS := 7
+## The rung that IS the crayon's own colour. Picking a new crayon always comes
+## back here (DESIGN.md 1: "picking a new base color resets intensity to the
+## full/middle step"), so a child who never touches the ladder never notices it.
+const INTENSITY_BASE_STEP := 3
+## How pale the palest rung gets, and how deep the deepest -- as the [param amount]
+## handed to [method Color.lightened] / [method Color.darkened]. Tuned so rung 0
+## still reads as the same colour rather than as white, and rung 6 still reads as
+## a colour rather than as black.
+const MAX_TINT := 0.72
+const MAX_SHADE := 0.60
+
+
+# ======================================================== crayon sets (BL-23) ==
+# One index covers both kinds of box: 0 is this palette's own [member colors] --
+# the default crayon box, which is authored HERE because everything outside the
+# strip reads it -- and 1..n are the [CrayonSetDef]s discovered on disk, in their
+# authored cycle order. Callers never have to know which is which.
+#
+# Sets are cached after the first look: they are immutable authored data, and the
+# strip asks for them every time it cycles.
+
+## Discovered sets, or null before the first lookup. Cleared by
+## [method reload_crayon_sets].
+var _sets: Array[CrayonSetDef] = []
+var _sets_loaded := false
+
+
+## The authored extra boxes, in cycle order (the default box is not among them).
+func crayon_sets() -> Array[CrayonSetDef]:
+	if not _sets_loaded:
+		_sets = CrayonSetDef.discover()
+		_sets_loaded = true
+	return _sets
+
+
+## How many boxes the strip can cycle through: the default one plus every
+## discovered set.
+func crayon_set_count() -> int:
+	return 1 + crayon_sets().size()
+
+
+## Cycle index wrapped into range, so "next box" is one line at every call site.
+func wrap_crayon_set(index: int) -> int:
+	return wrapi(index, 0, crayon_set_count())
+
+
+func get_crayon_set_name(index: int) -> String:
+	var wrapped := wrap_crayon_set(index)
+	if wrapped == 0:
+		return display_name
+	return crayon_sets()[wrapped - 1].display_name
+
+
+## The colours box [param index] puts on the strip.
+func get_crayon_set_colors(index: int) -> PackedColorArray:
+	var wrapped := wrap_crayon_set(index)
+	if wrapped == 0:
+		return colors
+	return crayon_sets()[wrapped - 1].colors
+
+
+## Drops the discovered sets so an edited or newly added .tres is picked up.
+## Dev/tests only -- the shipped game discovers once and never changes.
+func reload_crayon_sets() -> void:
+	_sets = []
+	_sets_loaded = false
+
+
+# ========================================================= intensity (BL-22) ==
+
+## [param base] at rung [param step] of the intensity ladder, [b]computed[/b].
+##
+## The ladder is deliberately derived rather than authored: a per-colour table
+## would be nine more numbers to get wrong for every crayon of every set, and a
+## new set would ship without one. Below [constant INTENSITY_BASE_STEP] the colour
+## is lightened towards paper, above it darkened towards ink, linearly across each
+## half so the two ends are reached exactly at rungs 0 and
+## [code]INTENSITY_STEPS - 1[/code]. Alpha is carried through untouched.
+func shade_of(base: Color, step: int) -> Color:
+	var rung := clampi(step, 0, INTENSITY_STEPS - 1)
+	if rung == INTENSITY_BASE_STEP:
+		return base
+	if rung < INTENSITY_BASE_STEP:
+		var tint := float(INTENSITY_BASE_STEP - rung) / float(INTENSITY_BASE_STEP)
+		return base.lightened(MAX_TINT * tint)
+	var deepest := float(INTENSITY_STEPS - 1 - INTENSITY_BASE_STEP)
+	var shade := float(rung - INTENSITY_BASE_STEP) / deepest
+	return base.darkened(MAX_SHADE * shade)
+
+
+## The whole ladder for [param base], pale first. What the crayon strip renders
+## when it is showing intensities.
+func shades_of(base: Color) -> PackedColorArray:
+	var out := PackedColorArray()
+	for step in INTENSITY_STEPS:
+		out.append(shade_of(base, step))
+	return out
 
 
 # ==================================================================== lookups ==
@@ -104,36 +206,6 @@ func get_default_brush_size_index() -> int:
 	return best
 
 
-## How many colours each shade family actually holds, after sanity-checking
-## [member shades_per_family] against the colour count. 1 = ungrouped.
-func effective_shades_per_family() -> int:
-	if shades_per_family <= 1 or colors.is_empty():
-		return 1
-	if colors.size() % shades_per_family != 0:
-		return 1
-	return shades_per_family
-
-
-## Number of shade families, i.e. columns of the adult grid. Ungrouped palettes
-## report one family per colour, so the grid degrades to a single row of columns.
-func family_count() -> int:
-	if colors.is_empty():
-		return 0
-	@warning_ignore("integer_division")
-	var count := colors.size() / effective_shades_per_family()
-	return count
-
-
-## The colours of one shade family (a column of the adult grid), light -> dark.
-func get_family(family_index: int) -> PackedColorArray:
-	var families := family_count()
-	if families <= 0:
-		return PackedColorArray()
-	var per_family := effective_shades_per_family()
-	var start := clampi(family_index, 0, families - 1) * per_family
-	return colors.slice(start, start + per_family)
-
-
 # ================================================================= validation ==
 
 ## Human-readable problems with this palette; empty means valid. Used by the
@@ -142,8 +214,6 @@ func validate() -> PackedStringArray:
 	var problems := PackedStringArray()
 	if display_name.strip_edges() == "":
 		problems.append("display_name is empty")
-	if mode != MODE_CHILD and mode != MODE_ADULT:
-		problems.append("mode '%s' is neither '%s' nor '%s'" % [mode, MODE_CHILD, MODE_ADULT])
 	if colors.size() < 1:
 		problems.append("colors is empty")
 	for i in colors.size():
@@ -170,10 +240,6 @@ func validate() -> PackedStringArray:
 		problems.append(
 			"completion_threshold (%.2f) is below the %.2f floor the coverage tracker enforces"
 			% [completion_threshold, CoverageTracker.MIN_REGION_THRESHOLD]
-		)
-	if shades_per_family > 1 and colors.size() % shades_per_family != 0:
-		problems.append(
-			"shades_per_family %d does not divide %d colours" % [shades_per_family, colors.size()]
 		)
 	return problems
 

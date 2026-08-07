@@ -44,12 +44,27 @@ theme_override_constants/margin_top = 12
 theme_override_constants/margin_right = 14
 theme_override_constants/margin_bottom = 12
 
-[node name="Scroll" type="ScrollContainer" parent="Margin"]
+[node name="Body" type="BoxContainer" parent="Margin"]
 layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 12
+
+[node name="Controls" type="BoxContainer" parent="Margin/Body"]
+layout_mode = 2
+size_flags_horizontal = 4
+size_flags_vertical = 4
+mouse_filter = 2
+vertical = true
+theme_override_constants/separation = 6
+
+[node name="Scroll" type="ScrollContainer" parent="Margin/Body"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
 horizontal_scroll_mode = 1
 vertical_scroll_mode = 0
 
-[node name="CrayonRow" type="HBoxContainer" parent="Margin/Scroll"]
+[node name="CrayonRow" type="BoxContainer" parent="Margin/Body/Scroll"]
 layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3

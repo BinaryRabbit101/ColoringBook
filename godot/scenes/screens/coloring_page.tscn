@@ -218,7 +218,15 @@ theme_override_styles/disabled = SubResource("StyleBoxFlat_nav_off")
 text = "›"
 tooltip_text = "Next page"
 
-[node name="PageView" parent="Ui" instance=ExtResource("2_page_view")]
+[node name="Body" type="BoxContainer" parent="Ui"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+mouse_filter = 2
+vertical = true
+theme_override_constants/separation = 0
+
+[node name="PageView" parent="Ui/Body" instance=ExtResource("2_page_view")]
 layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3

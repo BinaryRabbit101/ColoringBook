@@ -277,7 +277,7 @@ func _ready() -> void:
 func _run() -> void:
 	print("=== BL-13 splash render ===")
 	var out_path := _arg_value("--out", OUTPUT_PATH)
-	var palette := GameState.get_palette_for_mode(GameState.MODE_CHILD)
+	var palette := GameState.get_active_palette()
 	var logo := load(LOGO_PATH) as Texture2D
 	if logo == null:
 		push_warning("splash_render: %s did not load; the splash gets no engine mark." % LOGO_PATH)

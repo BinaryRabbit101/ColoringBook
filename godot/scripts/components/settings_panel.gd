@@ -1,18 +1,20 @@
 class_name SettingsPanel
 extends Control
-## The settings overlay: change mode, erase progress, read the version.
+## The settings overlay: the account, erase progress, read the version.
 ##
 ## [b]An overlay, not a screen[/b]. [code]main.tscn[/code] owns it and puts it on
 ## top of whatever screen is showing, which is why it is in
 ## [code]scenes/components/[/code]: it composes into a parent rather than
-## replacing one. That also makes it reachable over the coloring page, so
-## changing mode mid-book does not throw the player out of their book.
+## replacing one.
+##
+## [b]BL-20 removed the mode row.[/b] There is one palette for everyone now
+## (DESIGN.md 1), so the panel shows WHICH palette the game paints with and offers
+## nothing to change about it.
 ##
 ## [b]It never writes anything.[/b] Erasing progress is a signal
 ## ([signal erase_all_confirmed]) that the parent turns into a
-## [code]GameState.erase_all_progress()[/code] call, and "change mode" only asks
-## ([signal mode_change_requested]) -- the parent decides whether that means a
-## screen swap or an overlay. Signals up, calls down, no exceptions for settings.
+## [code]GameState.erase_all_progress()[/code] call. Signals up, calls down, no
+## exceptions for settings.
 ##
 ## [b]The confirm step is a mode of this panel[/b], not a second dialog:
 ## "Erase all progress" swaps the button for a confirm row and back again. One
@@ -21,8 +23,6 @@ extends Control
 
 ## The player closed the panel.
 signal closed()
-## The player wants to pick a mode. The parent opens [ModeSelect].
-signal mode_change_requested()
 ## The player confirmed the destructive erase.
 signal erase_all_confirmed()
 ## The grown-up tapped "Account" (WP10). The parent puts the [AdultGate] in front
@@ -39,8 +39,7 @@ const ACK_SECONDS := 2.2
 
 
 @onready var _scrim: Button = $Scrim
-@onready var _mode_value: Label = $Center/Panel/Margin/Column/ModeRow/ModeValue
-@onready var _change_button: Button = $Center/Panel/Margin/Column/ModeRow/ChangeButton
+@onready var _palette_value: Label = $Center/Panel/Margin/Column/PaletteRow/PaletteValue
 @onready var _account_value: Label = $Center/Panel/Margin/Column/AccountRow/AccountValue
 @onready var _account_button: Button = $Center/Panel/Margin/Column/AccountRow/AccountButton
 @onready var _erase_button: Button = $Center/Panel/Margin/Column/EraseButton
@@ -55,12 +54,10 @@ const ACK_SECONDS := 2.2
 func _ready() -> void:
 	_scrim.pressed.connect(_on_close_pressed)
 	_close_button.pressed.connect(_on_close_pressed)
-	_change_button.pressed.connect(func() -> void: mode_change_requested.emit())
 	_account_button.pressed.connect(func() -> void: account_requested.emit())
 	_erase_button.pressed.connect(_on_erase_pressed)
 	_cancel_button.pressed.connect(_on_cancel_pressed)
 	_confirm_button.pressed.connect(_on_confirm_pressed)
-	GameState.mode_changed.connect(_on_mode_changed)
 	_confirm_box.visible = false
 	_status.visible = false
 	refresh()
@@ -70,10 +67,7 @@ func _ready() -> void:
 ## kept around shows current values.
 func refresh() -> void:
 	var palette := GameState.get_active_palette()
-	_mode_value.text = "%s — %s" % [
-		GameState.mode.capitalize(),
-		palette.display_name if palette != null else "?",
-	]
+	_palette_value.text = palette.display_name if palette != null else "?"
 	# WP10: the account row reads Backend, which is inert (and therefore reads
 	# "Not signed in") whenever there is no account or no server configured. This
 	# panel still never talks to the network itself.
@@ -125,19 +119,11 @@ func _acknowledge(text: String) -> void:
 	tween.tween_callback(func() -> void: _status.visible = false)
 
 
-func _on_mode_changed(_mode: String) -> void:
-	refresh()
-
-
 func _on_close_pressed() -> void:
 	closed.emit()
 
 
 # ===================================================================== access ==
-
-func get_change_mode_button() -> Button:
-	return _change_button
-
 
 func get_account_button() -> Button:
 	return _account_button
@@ -163,8 +149,9 @@ func get_close_button() -> Button:
 	return _close_button
 
 
-func get_mode_text() -> String:
-	return _mode_value.text
+## The palette the game paints with, as shown. There is exactly one (BL-20).
+func get_palette_text() -> String:
+	return _palette_value.text
 
 
 func get_version_text() -> String:
