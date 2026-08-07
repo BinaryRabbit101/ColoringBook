@@ -696,11 +696,16 @@ func _build_palette() -> void:
 
 	_palette.color_picked.connect(_on_color_picked)
 	_palette.brush_size_picked.connect(_on_brush_size_picked)
+	# BL-35's finish reaches the paint path HERE and only here: an explicit third
+	# signal, wired like the other two. The palette resolves which box is out; the
+	# page view is told the answer and never asks.
+	_palette.brush_effect_picked.connect(_on_brush_effect_picked)
 
 	var palette_def := GameState.get_active_palette()
 	if palette_def != null:
 		_page_view.brush_hardness = palette_def.default_brush_hardness
-		# set_palette auto-emits both signals once, so the brush is primed here.
+		# set_palette auto-emits all three signals once, so the brush is primed here
+		# with a size, a finish and a colour before anything can be painted.
 		_palette.set_palette(palette_def)
 
 
@@ -1478,16 +1483,24 @@ func get_average_readback_usec() -> float:
 
 # ==================================================================== palette ==
 
-## The palette's two signals are the whole contract: what the player picked is what
-## the brush loads. (BL-15 also mirrored them into a toolbar chip; BL-16 deleted
-## it -- the pick bubble and the selected states answer "which one is it" where the
-## player is already looking.)
+## The palette's signals are the whole contract: what the player picked is what the
+## brush loads. (BL-15 also mirrored them into a toolbar chip; BL-16 deleted it --
+## the pick bubble and the selected states answer "which one is it" where the player
+## is already looking.)
+##
+## BL-35 added the third one. Three one-line handlers, no logic between them: the
+## palette resolves "crayon C of box B at rung R, in box B's finish" on its own side
+## and hands over the answers.
 func _on_color_picked(color: Color) -> void:
 	_page_view.brush_color = color
 
 
 func _on_brush_size_picked(size: float) -> void:
 	_page_view.brush_size = size
+
+
+func _on_brush_effect_picked(effect: StringName) -> void:
+	_page_view.brush_effect = effect
 
 
 ## Leaving the book is one of the save points: flush the paint layer before the

@@ -14,6 +14,7 @@ extends Control
 ## [codeblock]
 ## signal color_picked(color: Color)
 ## signal brush_size_picked(size: float)
+## signal brush_effect_picked(effect: StringName)
 ## func set_palette(def: PaletteDef) -> void
 ## func select_color(index: int) -> void
 ## func select_brush_size(index: int) -> void
@@ -40,6 +41,15 @@ extends Control
 ##
 ## [b]BL-23 crayon sets[/b]: a [CrayonBoxButton] cycles the strip through the
 ## default box and every authored [CrayonSetDef]. See [method set_crayon_set].
+##
+## [b]BL-35 finishes[/b]: every box carries the SAME crayons and differs in how its
+## paint looks -- classic wax, neon glow, textured wax, glitter, each louder than
+## the last. That is one new thing the paint path has to learn, and it learns it
+## through its OWN explicit signal, [signal brush_effect_picked], never by reaching
+## into the palette: [signal color_picked] still carries exactly one resolved
+## [Color] and nothing else travels through it. [method set_palette] primes the
+## finish the way it primes the size and the colour, so the brush is never
+## finish-less, and cycling a box emits it exactly once beside the colour.
 ##
 ## The pick is therefore always "crayon C of box B at rung R", resolved in
 ## [method get_selected_color] and nowhere else.
@@ -71,6 +81,10 @@ extends Control
 signal color_picked(color: Color)
 ## The brush diameter (page px) changed. Emitted once by [method set_palette].
 signal brush_size_picked(size: float)
+## The FINISH the strip's crayons paint with changed (BL-35) -- a [BrushFinish] id.
+## Emitted once by [method set_palette] and once by every box change, and by nothing
+## else: within a box, picking a crayon or a rung changes the colour, not the wax.
+signal brush_effect_picked(effect: StringName)
 
 ## Crayon-row touch target floor (DESIGN.md 1: "large touch targets").
 const MIN_TOUCH_TARGET := CrayonButton.MIN_TOUCH_TARGET
@@ -334,18 +348,24 @@ func _refresh_tools() -> void:
 # whatever base colour is in hand.
 
 ## Puts box [param index] on the strip (wrapping), back on its first crayon, and
-## emits [signal color_picked] with that crayon.
+## emits [signal brush_effect_picked] then [signal color_picked] for it.
+##
+## The finish goes out FIRST and the colour second, in the same order
+## [method set_palette] primes them, so a listener that reacts to the colour is
+## already holding the right wax when it does.
 func set_crayon_set(index: int) -> void:
 	if _palette == null:
 		return
 	var wrapped := _palette.wrap_crayon_set(index)
 	_set_index = wrapped
 	# A new box is a fresh start: first crayon, own colour, colours face. Leaving a
-	# child on rung 6 of a colour that no longer exists is the alternative.
+	# child on rung 6 of a colour that no longer exists is the alternative. BL-35:
+	# the FINISH resets with it -- the finish belongs to the box, not to the hand.
 	_selected_index = 0
 	_intensity_step = PaletteDef.INTENSITY_BASE_STEP
 	_view = VIEW_COLORS
 	_rebuild_strip()
+	brush_effect_picked.emit(get_selected_effect())
 	color_picked.emit(get_selected_color())
 
 
@@ -361,6 +381,15 @@ func get_crayon_set_index() -> int:
 ## Display name of the box on the strip -- the palette's own for the default box.
 func get_crayon_set_name() -> String:
 	return _palette.get_crayon_set_name(_set_index) if _palette != null else ""
+
+
+## [b]The finish that will actually be painted[/b] (BL-35): the box in hand's, and
+## the only thing [signal brush_effect_picked] ever carries. Classic wax whenever
+## there is no palette to ask, so the brush is never finish-less.
+func get_selected_effect() -> StringName:
+	if _palette == null:
+		return BrushFinish.CLASSIC
+	return _palette.get_crayon_set_effect(_set_index)
 
 
 ## The crayon-box cycle control (BL-23). Never null after [method _resolve_nodes];
@@ -390,6 +419,11 @@ func set_palette(def: PaletteDef) -> void:
 	_selected_index = 0
 	_rebuild_strip()
 	select_brush_size(def.get_default_brush_size_index())
+	# BL-35: prime the finish exactly the way the size is primed, and before the
+	# colour, so the first stroke of the visit can never be painted with wax nobody
+	# chose. The default box is classic, so this is a no-op for the brush -- but the
+	# brush is now told so, rather than left to assume it.
+	brush_effect_picked.emit(get_selected_effect())
 	select_color(0)
 
 
@@ -407,10 +441,14 @@ func _rebuild_strip() -> void:
 		_palette.shades_of(get_base_color()) if shades else _active_colors()
 	)
 	var selected := _intensity_step if shades else _selected_index
+	# BL-35: every crayon on the strip wears the box's finish, the ladder's rungs
+	# included -- a rung is the same wax at a different intensity.
+	var finish := get_selected_effect()
 	for i in colors.size():
 		var crayon := CrayonButton.new()
 		crayon.name = ("Shade%d" if shades else "Crayon%d") % i
 		crayon.color_index = i
+		crayon.finish = finish
 		crayon.orientation = (
 			CrayonButton.ORIENT_LEFT if is_column() else CrayonButton.ORIENT_UP
 		)

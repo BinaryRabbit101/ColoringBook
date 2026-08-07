@@ -124,41 +124,6 @@ the crayons, one at each end of the long axis.
 - Affected: `palette_child.gd`, `crayon_box_button.gd` (reshaped into arrow
   buttons or replaced), `palette_def.gd`, palette smoke tile-fit block.
 
-### BL-35: Crayon sets round 2 — same lineup, escalating finishes — `open` (2026-08-07)
-Playtest: the default box is right; the authored sets (Pastel/Neon/Earth/Candy/
-Spooky) read as washed out, dull, or dark — "more color options", not more fun.
-New vision: **every box carries the SAME crayon lineup; what changes is the
-finish**, and each box stands out more than the one before. Working ladder:
-box 1 classic wax (today's look) → box 2 neon glow (strokes bloom) → box 3
-textured wax (directional crayon-grain strokes) → box 4 animated (shimmer /
-sparkle) → whatever tops that. Design notes for the implementing agent:
-- `CrayonSetDef` gains an effect identity (e.g. `effect: StringName`). This is
-  a conscious amendment to BL-23's "colours and nothing else": a finish is how
-  the paint LOOKS, not how the game plays — brush size, hardness and threshold
-  stay forbidden on sets, and the coloring-mechanics skill + DESIGN.md must be
-  updated to say so.
-- The paint pipeline flattens strokes into the SubViewport, so finishes split
-  into two tiers:
-  1. **Bakeable at stamp time** — glow = bright core + additive halo in
-     `brush.gdshader` stamps; grain = noise/stroke-texture-modulated stamps.
-     These persist in the saved paint PNG for free. Ship these first.
-  2. **Live/animated** — needs an effect-mask channel or per-stroke metadata
-     that survives save/restore (BL-17 recipes are per-visit only today).
-     Phase 2, after the persistence question is answered — do not block the
-     bakeable finishes on it.
-- BL-17 undo recipes must capture the finish params so rebuilds stay
-  pixel-exact; the region-clip rule (shader discards outside the locked
-  region's id) applies to every finish, glow halos included.
-- The intensity ladder (BL-22) keeps working on every crayon of every box.
-- The crayon buttons themselves should preview their finish — a glowing crayon,
-  a sparkling crayon — so a box sells itself before the first stroke.
-- Existing `sets/*.tres` are re-authored to the shared lineup + a finish, not
-  deleted; count can change if the ladder wants fewer, better boxes.
-- Affected: `crayon_set_def.gd` + `resources/palettes/sets/*.tres`,
-  `palette_def.gd`, `scenes/components/brush.gdshader` + `page_view.gd`
-  (stamp effects), `crayon_button.gd`/`palette_child.gd` (finish previews),
-  DESIGN.md + coloring-mechanics skill, palette/paint smokes.
-
 ### BL-36: Sticker sets — the cycle keeps going past crayons — `open` (2026-08-07)
 Cycling past the last crayon box lands on sticker sets: the strip swaps crayons
 for a row of stickers, tap the page to place one. Decisions to settle in
@@ -225,6 +190,31 @@ Sticker sets are catalog content, delivered exactly like coloring books
 - Affected: `server/` (catalog-kind migration, authoring UI + publish, API),
   `docs/DLC_SERVER.md` §5/§7/§10/§11, `scripts/backend/pack_installer.gd`,
   `sticker_set_def.gd` discovery, backend/dlc smokes.
+### BL-38: Animated crayon finishes — phase 2 of BL-35 — `open` (2026-08-07)
+BL-35 shipped the **bakeable** half of the finish ladder (classic wax → neon
+glow → textured wax → glitter): every finish is computed in `brush.gdshader` at
+stamp time, so it is flattened into the paint SubViewport and the saved PNG
+carries it for free. The finishes that have to keep MOVING after the stroke is
+down — a shimmer that travels, glitter that twinkles — are what is left.
+- **The seam already exists.** `BrushFinish.is_animated(id)` is false for every
+  shipped finish and is the thing to branch on; the palette already resolves a
+  finish per box and hands it to the paint path on `brush_effect_picked`, and
+  `PageView.brush_effect` already carries it into every stamp and every BL-17
+  recipe. An animated box is a new entry in `BrushFinish.FINISHES` plus whatever
+  answers the question below — no reshaping of any of the above.
+- **The open question is PERSISTENCE, and it is the whole entry.** A live effect
+  cannot live in the flattened paint layer: it needs either an effect-mask
+  channel rendered beside the paint (a second SubViewport, sampled by a display
+  shader, saved as a second PNG) or per-stroke metadata that survives save and
+  restore — and BL-17 recipes are per-visit only today, cleared on navigation and
+  never written to disk. Answer that first; the shading is the easy half.
+- Constraints that do not move: region clipping still owns every finish (an
+  animated glow is still discarded outside the locked region's id), coverage and
+  completion must not see the animation, and a page reopened must look the way it
+  looked when it was closed.
+- Affected: `scripts/components/brush_finish.gd`, `scenes/components/brush.gdshader`,
+  `page_view.gd` (a second layer, if that is the answer), `game_state.gd` (save
+  shape), `coloring_page.gd` (restore), paint/flow smokes.
 
 ## Completed — archived
 
@@ -250,7 +240,7 @@ Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md
 - **BL-20** — Child/Adult split removed — one crayon palette
 - **BL-21** — Landscape: crayons dock beside the canvas
 - **BL-22** — Crayon intensity ladder (light→dark, derived)
-- **BL-23** — Fun crayon sets (Pastel, Neon, Earth, Candy, Spooky)
+- **BL-23** — Fun crayon sets (superseded by BL-35's finish boxes)
 - **BL-24** — Web authoring: book/page CRUD + server-side mapping + one-button publish
 - **BL-25** — All books served by the server; release builds ship none
 - **BL-26** — Client-side delta pack updates (fetch only changed files, zip fallback)
@@ -259,3 +249,5 @@ Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md
 - **BL-29** — Toolbar crayon styling + save/start-over/undo-redo feedback
 - **BL-30** — Book-open/close transition; richer page-curl (arc, shading, settle)
 - **BL-31** — Crayon wax-stroke download animation in the pack shop
+- **BL-35** — Crayon boxes round 2: same lineup, escalating bakeable finishes
+  (glow / grain / glitter). Animated finishes are BL-38.

@@ -86,6 +86,11 @@ const MAX_SHADE := 0.60
 # strip reads it -- and 1..n are the [CrayonSetDef]s discovered on disk, in their
 # authored cycle order. Callers never have to know which is which.
 #
+# BL-35 made the boxes differ in FINISH rather than in colour: every box offers the
+# same lineup (the sets inherit it), and box i paints it with
+# [method get_crayon_set_effect]'s finish -- classic wax, then glow, then grain,
+# then glitter, each louder than the last.
+#
 # Sets are cached after the first look: they are immutable authored data, and the
 # strip asks for them every time it cycles.
 
@@ -122,11 +127,25 @@ func get_crayon_set_name(index: int) -> String:
 
 
 ## The colours box [param index] puts on the strip.
+##
+## [b]Normally the same ten every time[/b] (BL-35): a set that authors no colours of
+## its own inherits this palette's lineup, because the boxes differ in their FINISH
+## and a lineup copied into five files is a lineup that drifts.
 func get_crayon_set_colors(index: int) -> PackedColorArray:
 	var wrapped := wrap_crayon_set(index)
 	if wrapped == 0:
 		return colors
-	return crayon_sets()[wrapped - 1].colors
+	var set_def := crayon_sets()[wrapped - 1]
+	return set_def.colors if set_def.has_own_colors() else colors
+
+
+## The FINISH box [param index] paints with (BL-35). The default box is plain wax;
+## every authored set names its own.
+func get_crayon_set_effect(index: int) -> StringName:
+	var wrapped := wrap_crayon_set(index)
+	if wrapped == 0:
+		return BrushFinish.CLASSIC
+	return crayon_sets()[wrapped - 1].get_effect()
 
 
 ## Drops the discovered sets so an edited or newly added .tres is picked up.

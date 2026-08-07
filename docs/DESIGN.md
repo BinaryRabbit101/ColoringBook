@@ -39,12 +39,27 @@ The crayon row grows three features (designed 2026-08-07):
   never authored per color), so every crayon set gets it for free. The active pick is
   always *base color + intensity step*; `color_picked` carries the resolved color and
   nothing downstream of the palette changes.
-- **Crayon sets (BL-23).** Mario-Paint-style fun: additional authored **crayon sets**
-  beyond the default box — e.g. Pastel, Neon, Earth, Candy, Spooky — cycled with a
-  crayon-box control on the row. Each set is authored data (colors only; brush and
-  threshold stay with the base palette); swapping sets swaps the row's colors and nothing
-  else. Optional stretch: a special rainbow crayon that cycles hue along the stroke
-  (cheap — the brush stamps per-dab color).
+- **Crayon boxes (BL-23, rebuilt by BL-35).** Mario-Paint-style fun: additional authored
+  **crayon sets** beyond the default box, cycled with a control on the row. BL-23 shipped
+  five recolours (Pastel, Neon, Earth, Candy, Spooky) and the playtest verdict was "more
+  colour options, not more fun" — so **every box now carries the SAME crayon lineup and
+  differs in its FINISH**, each box louder than the one before: classic wax → **Neon Glow**
+  (strokes bloom) → **Textured Wax** (visible crayon grain) → **Glitter** (grain, drifting
+  rainbow bands and specks of glitter). A set authors a finish and, normally, no colours at
+  all — it inherits the palette's lineup.
+  - **A finish is how the paint LOOKS, never how the game PLAYS.** That is the exact width
+    of BL-35's amendment to BL-23's "colours and nothing else": brush diameter, hardness
+    and the completion threshold remain forbidden on a crayon set and remain on the base
+    palette, because a box that could move those would be a difficulty mode again (§3.4,
+    BL-20). Adding a finish changes the pixels a stroke lays down and nothing else.
+  - Finishes are **baked into the stamp** by the brush shader, so the flattened paint layer
+    — and the saved PNG — carries them for free, and the region clip owns every one of them
+    (a glow halo is discarded outside the locked region exactly like the core of the dab).
+    Animated/live finishes need an effect channel or persistent per-stroke metadata and are
+    deliberately a later phase (BL-38).
+  - The finish reaches the paint path on its own palette signal (`brush_effect_picked`);
+    `color_picked` still carries one resolved colour and nothing else, and the crayon
+    buttons preview their box's finish so a box sells itself before the first stroke.
 - **Layout (BL-21).** In portrait the crayon row sits along the bottom of the canvas
   (unchanged — it reads well). In **landscape the crayons dock on the side of the canvas**
   as a vertical column instead of eating the already-short screen height. Same palette
@@ -195,7 +210,9 @@ godot/
                                      #    exclude res:// books; shipped builds get every
                                      #    book from the server, BL-25)
     books/<book_name>/pages/         # PageDef .tres per page
-    palettes/child_palette.tres (+ one resource per crayon set, BL-23)
+    palettes/child_palette.tres (+ palettes/sets/*.tres — one per crayon box,
+                                     #    BL-23; since BL-35 each names a FINISH and
+                                     #    inherits the palette's own lineup)
   assets/
     books/<book_name>/page_01.png / page_01_idmap.png / page_01_regions.json
                                      #   (dev fixtures — excluded from release exports
