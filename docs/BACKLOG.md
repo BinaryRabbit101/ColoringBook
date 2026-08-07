@@ -178,14 +178,45 @@ design, then build:
 - **Persistence**: a per-page sticker list in the save (additive key beside
   `status`/`locked`, reader tolerates its absence — same trick as BL-10's
   entry upgrade), and the paint-layer sync (BL-8/WP11) carries it.
-- **Discovery**: `StickerSetDef` discovered like crayon sets and books —
-  `resources/palettes/stickers/*.tres` naming textures; art needed (start with
-  primitive-drawn or emoji-style shapes; real art can follow).
+- **Discovery**: `StickerSetDef.discover()` scans installed packs under
+  `user://dlc`, mirroring `BookDef` post-BL-25 — sticker sets are SERVER
+  content, see BL-37. The repo keeps dev-fixture sets for smokes only
+  (excluded from release exports like `resources/books/*`). Art: start with
+  primitive-drawn or emoji-style shapes; real art flows through the BL-37
+  authoring pipeline.
 - Depends on BL-34 (the cycle ring is what grows); independent of BL-35.
 - Affected: new `sticker_set_def.gd` + assets, `palette_child.gd` (mode +
   cycle ring), `coloring_page.gd` (placement, history, save points),
   `game_state.gd` (save shape), a new sticker layer component over `PageView`,
   DESIGN.md, palette/flow smokes.
+
+### BL-37: Sticker packs served by the API server — `open` (2026-08-07)
+Sticker sets are catalog content, delivered exactly like coloring books
+(BL-25 rule: release builds ship none; the server serves everything):
+- **Pack format**: the same data-bundle shape as book packs (DLC_SERVER.md
+  §7.1–7.2) — the manifest gains a content `kind` (`book` today; add
+  `sticker_set`), files are the sticker images + the set definition. Delta
+  updates (BL-26) apply unchanged: they diff the manifest's file hashes and
+  never cared what the files are.
+- **Server**: catalog rows carry the kind; the BL-24 web-authoring dashboard
+  grows a sticker-set CRUD (name, sort order, upload sticker images,
+  thumbnails) with the same one-button publish. No headless-Godot mapping
+  step — stickers have no regions; validation is image checks only, so the
+  publish path is strictly simpler than a book's.
+- **Delivery**: same catalog/entitlement/download endpoints (§7.4, §11).
+  Free sticker packs ride the free-entitlement path; paid waits for Phase 6
+  like everything else.
+- **Client**: `StickerSetDef.discover()` scans installed packs under
+  `user://dlc` (mirroring `BookDef` post-BL-25); `pack_installer.gd` learns
+  the new kind — mostly *stops assuming every pack is a book*; the shop lists
+  sticker packs beside books with the kind visible on the card.
+- Repo keeps dev-fixture sticker sets for the smokes, excluded from release
+  exports exactly like `resources/books/*` (the BL-25 preset rule).
+- Depends on BL-36 for the client feature it feeds; the server half can start
+  as soon as BL-36 pins the set-def and save shapes.
+- Affected: `server/` (catalog-kind migration, authoring UI + publish, API),
+  `docs/DLC_SERVER.md` §5/§7/§10/§11, `scripts/backend/pack_installer.gd`,
+  `sticker_set_def.gd` discovery, backend/dlc smokes.
 
 ## Completed — archived
 
