@@ -185,6 +185,12 @@ signal paint_restored(page_index: int, restored: bool)
 signal page_saved(page_index: int, manual: bool)
 ## [param page_index] was reset to blank by the player (BL-7).
 signal page_restarted(page_index: int)
+## A sticker was stuck on the page (BL-36). [param placement] is the
+## [StickerLayer] dictionary that went into the history and the save. Tests wait on
+## this; the game ignores it.
+signal sticker_placed(placement: Dictionary)
+## The palette turned the strip into stickers, or back into crayons (BL-36).
+signal sticker_mode_changed(active: bool)
 
 ## The congratulation pool (BL-11, DESIGN.md 2.2). Picked from at random so the
 ## twentieth finished page does not read like the first one again. Authored, not
@@ -226,6 +232,15 @@ const UNDO_DEPTH := 50
 ## rebuild costs one frame per stroke plus a readback, so this is ~4 s at 60 Hz:
 ## generous for the deepest legal history, and still a bound rather than a hang.
 const MAX_REPLAY_WAIT_FRAMES := 240
+
+## Keys and kinds of one entry in the undo timeline (BL-17, widened by BL-36).
+## Never written to disk -- the history is per page VISIT -- so these are internal
+## names, unlike [StickerLayer]'s placement keys, which ARE the save shape.
+const HISTORY_KIND := "kind"
+const HISTORY_STROKE := "stroke"
+const HISTORY_STICKER := "sticker"
+const HISTORY_RECIPE := "recipe"
+const HISTORY_PLACEMENT := "placement"
 
 # --- BL-29 feedback ---------------------------------------------------------
 # Referenced through preloads rather than by global class name: a new class_name
@@ -323,11 +338,22 @@ var _restoring := false
 ## further, which is exactly the "the restored PNG is baseline, not an undoable
 ## stroke" rule. Dropped on page change and on Start over.
 var _baseline_paint: Image
-## Every stroke committed during this page visit, oldest first (BL-17).
-var _stroke_recipes: Array[Dictionary] = []
-## Strokes taken back and not yet re-applied, most recent LAST. Cleared by any new
-## stroke, as everywhere else in the world.
-var _redo_recipes: Array[Dictionary] = []
+## Everything the player DID during this page visit, oldest first (BL-17, widened
+## by BL-36). One timeline, two kinds of entry:
+## [codeblock]
+## {kind: "stroke",  recipe: {...}}    a stroke PageView recorded
+## {kind: "sticker", sticker: {...}}   a sticker placement (StickerLayer's shape)
+## [/codeblock]
+## [b]One list, not two.[/b] Undo has to take back the last thing that HAPPENED,
+## and a stroke stack beside a sticker stack cannot answer that question -- it
+## would rub out a stroke the player made before the sticker they are looking at.
+## The paint rebuild filters this list for its recipes ([method _stroke_recipes]),
+## which costs a pass over at most [constant UNDO_DEPTH] entries and cannot go out
+## of sync with the order.
+var _history: Array[Dictionary] = []
+## Entries taken back and not yet re-applied, most recent LAST. Cleared by any new
+## stroke or sticker, as everywhere else in the world.
+var _redo_history: Array[Dictionary] = []
 ## Index below which strokes can no longer be undone -- see [constant UNDO_DEPTH].
 ## Those strokes stay in the list because the rebuild still has to draw them; what
 ## the cap bounds is how far BACK the player can go, not what the page is made of.
@@ -357,6 +383,11 @@ var _saving := false
 var _completed_this_visit := false
 ## True while this page carries the coloring lock (BL-10).
 var _locked := false
+## True while the palette is showing STICKERS rather than crayons (BL-36). Painting
+## is off for as long as it holds, and a tap on the page sticks one down instead.
+var _sticker_mode := false
+## The sticker a tap would place, or null. Whatever the palette last reported.
+var _selected_sticker: StickerDef = null
 ## True while the transient celebration is on screen (BL-11).
 var _celebrating := false
 ## So the pool never hands out the same line twice in a row.
@@ -489,6 +520,10 @@ func _apply_current_page() -> bool:
 		GameState.is_page_locked(GameState.book_key(_book), GameState.current_page_index),
 		false
 	)
+	# BL-36: the page's stickers come back with it. Synchronous and cheap -- a
+	# handful of transforms, no readback, no compositing frame -- so unlike the paint
+	# restore below there is nothing to wait for.
+	_restore_stickers(GameState.current_page_index)
 	# Deliberately NOT awaited: load_book() and the flip both call this and both
 	# need a plain bool back. The restore runs over the next few frames; anything
 	# that needs it settled waits on `paint_restored` / has_pending_restore().
@@ -701,6 +736,11 @@ func _build_palette() -> void:
 	# signal, wired like the other two. The palette resolves which box is out; the
 	# page view is told the answer and never asks.
 	_palette.brush_effect_picked.connect(_on_brush_effect_picked)
+	# BL-36's two, wired the same way and reaching a different part of the screen:
+	# neither one goes anywhere near the paint path.
+	if _palette.has_signal("sticker_mode_changed"):
+		_palette.sticker_mode_changed.connect(_on_sticker_mode_changed)
+		_palette.sticker_picked.connect(_on_sticker_picked)
 
 	var palette_def := GameState.get_active_palette()
 	if palette_def != null:
@@ -961,9 +1001,7 @@ func _on_lock_pressed() -> void:
 ## a page LOAD applies what was already saved) writes it.
 func _set_locked(locked: bool, persist: bool = true) -> void:
 	_locked = locked
-	# The gate itself: one additive flag on the frozen painting component, checked
-	# at stroke start. Setting it false also cancels a stroke already down.
-	_page_view.painting_enabled = not locked
+	_apply_painting_gate()
 	if is_instance_valid(_lock_button):
 		_lock_button.locked = locked
 	if locked:
@@ -975,10 +1013,35 @@ func _set_locked(locked: bool, persist: bool = true) -> void:
 	_refresh_nav()
 
 
-## The press the lock refused. The padlock shakes: it is the control that caused
-## the nothing-happened, so it is the control that has to explain it -- and a
-## shake needs no reading age and no modal (this ships to the web).
-func _on_paint_blocked(_page_position: Vector2) -> void:
+## [b]The one place [code]PageView.painting_enabled[/code] is written.[/b] Two
+## things can turn painting off and they must not fight over one flag: the BL-10
+## padlock, and BL-36's sticker mode. Either one is enough, and the padlock is the
+## one that also blocks the sticker.
+func _apply_painting_gate() -> void:
+	# The gate itself: one additive flag on the frozen painting component, checked
+	# at stroke start. Setting it false also cancels a stroke already down.
+	_page_view.painting_enabled = not (_locked or _sticker_mode)
+
+
+## A press that started no stroke, and what it meant.
+##
+## [b]This is BL-36's placement hook, and deliberately so.[/b] Sticker mode turns
+## painting off through the SAME flag the padlock uses, so every press on the page
+## comes back here with its page position and nothing new had to be added to
+## [PageView]'s input path. The order below is the whole rule: the padlock is asked
+## first, so a locked page refuses a sticker exactly the way it refuses a stroke,
+## and the shake explains the refusal either way.
+func _on_paint_blocked(page_position: Vector2) -> void:
+	if _locked:
+		# The padlock shakes: it is the control that caused the nothing-happened, so
+		# it is the control that has to explain it -- and a shake needs no reading age
+		# and no modal (this ships to the web).
+		if is_instance_valid(_lock_button):
+			_lock_button.wiggle()
+		return
+	if _sticker_mode:
+		place_sticker_at(page_position)
+		return
 	if is_instance_valid(_lock_button):
 		_lock_button.wiggle()
 
@@ -994,6 +1057,186 @@ func set_page_locked(locked: bool) -> void:
 	if _book == null or locked == _locked:
 		return
 	_set_locked(locked)
+
+
+# ============================================================== stickers (BL-36) ==
+# Cycling the palette past the last crayon box lands on a sticker set. From then
+# until a crayon box is cycled back, a tap on the page STICKS ONE DOWN instead of
+# painting.
+#
+# [b]Three rules, and they are what make a sticker not-paint:[/b]
+#   1. ON TOP. The layer lives above the display art inside the page transform, so
+#      a sticker covers line work, pans and zooms with the drawing, and is never
+#      clipped to a region.
+#   2. NEVER COUNTED. Coverage reads the paint SubViewport; the sticker layer is
+#      not it. A page papered in stickers is exactly as unfinished as it was.
+#   3. NOT PIXELS. A placement is five numbers and two ids, so it survives a save
+#      exactly, at any page resolution, and BL-17's undo can peel one off without
+#      redrawing anything.
+#
+# The gate is BL-10's, reused: sticker mode turns `painting_enabled` off (see
+# [method _apply_painting_gate]), so the press arrives as `paint_blocked` with its
+# page position and there is no second input path. The padlock outranks it -- a
+# locked page takes neither paint nor stickers.
+
+## The palette swapped the strip. Painting stops (or resumes); nothing else about
+## the screen changes -- the toolbar, navigation, save and the lock all keep
+## working, because sticker mode is a TOOL, not a mode of the app.
+func _on_sticker_mode_changed(active: bool) -> void:
+	if _sticker_mode == active:
+		return
+	_sticker_mode = active
+	if not active:
+		_selected_sticker = null
+	_apply_painting_gate()
+	sticker_mode_changed.emit(active)
+
+
+func _on_sticker_picked(sticker: StickerDef) -> void:
+	_selected_sticker = sticker
+
+
+## True while a tap on the page would stick a sticker down rather than paint.
+func is_sticker_mode() -> bool:
+	return _sticker_mode
+
+
+## The sticker a tap would place, or null.
+func get_selected_sticker() -> StickerDef:
+	return _selected_sticker
+
+
+## The layer this page's stickers live on ([PageView]'s, above the line art).
+func get_sticker_layer() -> StickerLayer:
+	return _page_view.get_sticker_layer()
+
+
+## The stickers currently on the page, oldest first -- exactly what is in the save.
+func get_page_stickers() -> Array[Dictionary]:
+	var layer := get_sticker_layer()
+	return layer.get_placements() if layer != null else ([] as Array[Dictionary])
+
+
+## Whether a sticker could be stuck down right now. The same interlocks as
+## [method _can_edit_history] -- a placement IS a history entry -- plus "there is a
+## sticker in hand".
+func can_place_sticker() -> bool:
+	return (
+		_sticker_mode
+		and _selected_sticker != null
+		and _can_edit_history()
+		and get_sticker_layer() != null
+	)
+
+
+## Sticks the selected sticker on the page at [param page_position]. Returns false
+## when it was refused: no sticker in hand, the page locked, a stroke or a
+## transition in flight, or a tap that landed off the page.
+##
+## [b]The tilt is random and the size is a fraction of the page[/b], so a sticker
+## is never quite straight (which is what a sticker put down by hand looks like)
+## and is the same size on a 512 px page and a 2048 px one.
+func place_sticker_at(page_position: Vector2) -> bool:
+	if not can_place_sticker():
+		return false
+	# A press in the margin around the page is not a placement. Line art (region 0)
+	# very much is -- a sticker goes OVER the drawing, that is the whole point.
+	if _page_view.get_region_id_at(page_position) == PageView.OUT_OF_BOUNDS_ID:
+		return false
+	var set_def := _selected_sticker_set()
+	if set_def == null:
+		return false
+	var placement := StickerLayer.make_placement(
+		set_def.get_uid(),
+		_selected_sticker.sticker_id,
+		page_position,
+		StickerLayer.random_tilt()
+	)
+	get_sticker_layer().push(placement, _selected_sticker.load_texture(), true)
+	_push_history({HISTORY_KIND: HISTORY_STICKER, HISTORY_PLACEMENT: placement})
+	_persist_stickers()
+	_refresh_nav()
+	sticker_placed.emit(placement)
+	return true
+
+
+## Undo/redo of a sticker entry. No rebuild, no readback, no coverage: peeling a
+## sticker off changes no paint pixel, so the expensive half of
+## [method _apply_history] is not just skipped, it would be wrong to run.
+func _apply_sticker_history(undone: bool, entry: Dictionary) -> bool:
+	var layer := get_sticker_layer()
+	if layer == null:
+		return false
+	var placement: Dictionary = entry.get(HISTORY_PLACEMENT, {})
+	if undone:
+		# Always the LAST one on the layer: only a placement grows that list, so the
+		# newest sticker entry in the timeline is by construction the newest sticker
+		# on the page (see [method StickerLayer.pop]).
+		layer.pop()
+	else:
+		var sticker := _resolve_sticker(
+			String(placement.get(StickerLayer.KEY_SET, "")),
+			String(placement.get(StickerLayer.KEY_STICKER, ""))
+		)
+		if sticker == null:
+			return false
+		layer.push(placement, sticker.load_texture(), true)
+	_persist_stickers()
+	_refresh_nav()
+	history_applied.emit(undone)
+	return true
+
+
+## Writes the page's sticker list. Cheap JSON, so it is written the moment it
+## changes -- exactly like the coloring lock, and for the same reason: a sticker a
+## child stuck on has to still be there after a killed browser tab.
+func _persist_stickers() -> void:
+	if _book == null:
+		return
+	GameState.set_page_stickers(_book, GameState.current_page_index, get_page_stickers())
+
+
+## Puts this page's saved stickers back on it. Runs on every page load, beside the
+## paint restore, and is the sticker half of the same idea: these are BASELINE
+## stickers, from a previous visit, and undo can no more peel one of them off than
+## it can rub out the restored paint layer.
+func _restore_stickers(page_index: int) -> void:
+	var layer := get_sticker_layer()
+	if layer == null or _book == null:
+		return
+	layer.clear()
+	layer.set_page_size(_page_view.get_page_size())
+	for raw in GameState.get_page_stickers(GameState.book_key(_book), page_index):
+		var placement := StickerLayer.to_placement(raw)
+		if placement.is_empty():
+			continue
+		var sticker := _resolve_sticker(
+			String(placement[StickerLayer.KEY_SET]), String(placement[StickerLayer.KEY_STICKER])
+		)
+		if sticker == null:
+			# The set is not installed any more (a pack removed, a sticker renamed).
+			# One sticker goes missing; the page, the save and every other sticker on
+			# it are untouched.
+			continue
+		layer.push(placement, sticker.load_texture(), false)
+
+
+## "Set X, sticker Y" -> the [StickerDef], through the palette's discovered sets.
+## The palette is the one thing that knows what this device has, and it discovered
+## it once when the strip was built.
+func _resolve_sticker(set_uid: String, sticker_id: String) -> StickerDef:
+	if set_uid == "" or sticker_id == "" or not (_palette is PaletteChild):
+		return null
+	for set_def in (_palette as PaletteChild).get_sticker_sets():
+		if set_def.get_uid() == set_uid:
+			return set_def.find_sticker(sticker_id)
+	return null
+
+
+func _selected_sticker_set() -> StickerSetDef:
+	if not (_palette is PaletteChild):
+		return null
+	return (_palette as PaletteChild).get_sticker_set()
 
 
 # ======================================================== stroke history (BL-17) ==
@@ -1029,23 +1272,33 @@ func set_page_locked(locked: bool) -> void:
 # that re-crosses the line cannot re-celebrate either, because the tracker's
 # page_completed fires once.
 
-## True when there is a stroke to take back.
+## True when there is something to take back.
 func can_undo() -> bool:
-	return _stroke_recipes.size() > _undo_floor
+	return _history.size() > _undo_floor
 
 
-## True when a stroke has been taken back and not yet re-applied.
+## True when something has been taken back and not yet re-applied.
 func can_redo() -> bool:
-	return not _redo_recipes.is_empty()
+	return not _redo_history.is_empty()
 
 
-## How many strokes deep the player can still undo.
+## How many actions deep the player can still undo.
 func undo_depth() -> int:
-	return maxi(_stroke_recipes.size() - _undo_floor, 0)
+	return maxi(_history.size() - _undo_floor, 0)
 
 
 func redo_depth() -> int:
-	return _redo_recipes.size()
+	return _redo_history.size()
+
+
+## The stroke recipes in the timeline, in order -- what a rebuild draws the page
+## from. Sticker entries are not paint and are simply not here.
+func _stroke_recipes() -> Array[Dictionary]:
+	var recipes: Array[Dictionary] = []
+	for entry in _history:
+		if String(entry.get(HISTORY_KIND, "")) == HISTORY_STROKE:
+			recipes.append(entry[HISTORY_RECIPE])
+	return recipes
 
 
 ## True while a rebuild (or its coverage re-settle) is running.
@@ -1066,21 +1319,23 @@ func _can_edit_history() -> bool:
 	)
 
 
-## Takes back the last stroke. Returns false if it was refused (see
+## Takes back the last stroke or sticker. Returns false if it was refused (see
 ## [method _can_edit_history]).
 func undo() -> bool:
 	if not can_undo() or not _can_edit_history():
 		return false
-	_redo_recipes.append(_stroke_recipes.pop_back())
-	return await _apply_history(true)
+	var entry: Dictionary = _history.pop_back()
+	_redo_history.append(entry)
+	return await _apply_history(true, entry)
 
 
-## Puts back the last undone stroke.
+## Puts back the last undone stroke or sticker.
 func redo() -> bool:
 	if not can_redo() or not _can_edit_history():
 		return false
-	_stroke_recipes.append(_redo_recipes.pop_back())
-	return await _apply_history(false)
+	var entry: Dictionary = _redo_history.pop_back()
+	_history.append(entry)
+	return await _apply_history(false, entry)
 
 
 func _on_undo_pressed() -> void:
@@ -1096,7 +1351,9 @@ func _on_redo_pressed() -> void:
 ## [param undone] only picks between the two ways to get there: taking a stroke
 ## away means the page has to be drawn again from the baseline, while putting one
 ## back is just that one stroke, stamped on top of what is already there.
-func _apply_history(undone: bool) -> bool:
+func _apply_history(undone: bool, entry: Dictionary) -> bool:
+	if String(entry.get(HISTORY_KIND, "")) == HISTORY_STICKER:
+		return _apply_sticker_history(undone, entry)
 	_replaying = true
 	# The BL-7 guard: a coverage readback already in flight was taken from paint we
 	# are about to redraw, so retire it before touching a pixel.
@@ -1106,10 +1363,11 @@ func _apply_history(undone: bool) -> bool:
 	_paint_dirty = true
 	_refresh_nav()
 
+	var recipes := _stroke_recipes()
 	if undone:
-		await _page_view.rebuild_paint(_baseline_paint, _stroke_recipes)
+		await _page_view.rebuild_paint(_baseline_paint, recipes)
 	else:
-		_page_view.stamp_recipe(_stroke_recipes[_stroke_recipes.size() - 1])
+		_page_view.stamp_recipe(entry[HISTORY_RECIPE])
 		await _settle_paint()
 
 	if generation != _page_generation or not is_inside_tree():
@@ -1133,26 +1391,33 @@ func _apply_history(undone: bool) -> bool:
 	return true
 
 
-## Records the stroke [PageView] just finished. The one place the undo stack grows.
+## Records the stroke [PageView] just finished. One of the two places the undo
+## timeline grows (the other is [method place_sticker_at]).
 func _record_stroke() -> void:
 	if _replaying:
 		return
 	var recipe := _page_view.take_last_stroke_recipe()
 	if recipe.is_empty():
 		return
-	_stroke_recipes.append(recipe)
-	# Standard everywhere: drawing something new is a decision, and it ends the
+	_push_history({HISTORY_KIND: HISTORY_STROKE, HISTORY_RECIPE: recipe})
+
+
+## Appends [param entry] to the timeline, ends the redo branch and applies the
+## depth cap. One place, so a stroke and a sticker are bounded the same way.
+func _push_history(entry: Dictionary) -> void:
+	_history.append(entry)
+	# Standard everywhere: doing something new is a decision, and it ends the
 	# branch the player had undone their way into.
-	_redo_recipes.clear()
-	if _stroke_recipes.size() - _undo_floor > UNDO_DEPTH:
-		_undo_floor = _stroke_recipes.size() - UNDO_DEPTH
+	_redo_history.clear()
+	if _history.size() - _undo_floor > UNDO_DEPTH:
+		_undo_floor = _history.size() - UNDO_DEPTH
 
 
 ## Forgets this page's history and its baseline. Page load and Start over only --
 ## the history is per VISIT and is never persisted.
 func _clear_history() -> void:
-	_stroke_recipes.clear()
-	_redo_recipes.clear()
+	_history.clear()
+	_redo_history.clear()
 	_undo_floor = 0
 	_baseline_paint = null
 	_replaying = false
@@ -1220,6 +1485,12 @@ func restart_current_page() -> bool:
 	_hide_celebration()
 
 	_page_view.clear_paint()
+	# BL-36: a blank page has no stickers on it either. Start over is the ONE thing
+	# that takes a sticker off without an undo -- and it takes every one of them,
+	# including the ones a previous visit stuck down.
+	var layer := get_sticker_layer()
+	if layer != null:
+		layer.clear()
 	# After clear_paint(), not before: cancelling a stroke that was still down
 	# records its recipe, and that recipe describes paint this button just wiped.
 	_clear_history()

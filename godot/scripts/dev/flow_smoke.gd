@@ -722,6 +722,11 @@ func _check_coloring_flow() -> void:
 	_expect(screen.get_next_page_button().disabled and not screen.get_back_button().disabled,
 		"the only control that leaves the book is still Back")
 
+	# BL-36's stickers run LAST, deliberately: the check navigates and presses Start
+	# over, both of which rebuild the coverage tracker, and every assertion above is
+	# holding a reference to the one it was given.
+	await _check_stickers(screen)
+
 	# --- back button ---------------------------------------------------------
 	# M6: leaving the book flushes the paint layer through the ASYNC readback and
 	# only then reports back_requested, so the parent cannot free the screen out
@@ -856,6 +861,190 @@ func _check_undo_redo(screen: ColoringPage) -> void:
 	page_view.end_stroke()
 	await _wait_for_coverage(screen)
 	_expect(screen.can_undo(), "...and is available again the moment it lifts")
+
+
+## (4b) BL-36: stickers. The cycle ring reaches them, sticker mode stops painting,
+## a tap sticks one on TOP of the page without touching coverage, undo peels it off
+## and redo puts it back, the padlock refuses one, and the save round-trips.
+func _check_stickers(screen: ColoringPage) -> void:
+	print("\n-- check 4b: sticker sets (BL-36) --")
+	var page_view := screen.get_page_view()
+	var tracker := screen.get_coverage_tracker()
+	var layer := screen.get_sticker_layer()
+	var palette := screen.get_palette() as PaletteChild
+	_expect(layer != null, "PageView hosts a sticker layer")
+	_expect(palette != null and palette.sticker_set_count() > 0,
+		"the palette discovered %d sticker set(s)"
+		% [palette.sticker_set_count() if palette else 0])
+	if layer == null or palette == null or palette.sticker_set_count() == 0:
+		return
+	# The layer is ABOVE the display art and inside the page transform, which is
+	# what makes a sticker sit on top of the line work and pan/zoom with it.
+	var page_root := page_view.get_node("PageRoot")
+	var line_art := page_view.get_node("PageRoot/LineArtSprite")
+	_expect(layer.get_parent() == page_root
+			and layer.get_index() > line_art.get_index(),
+		"...inside the page transform and ON TOP of the line art (index %d > %d)"
+		% [layer.get_index(), line_art.get_index()])
+	_expect(layer.get_page_size() == page_view.get_page_size(),
+		"...measured against the page it is drawn over (%s)" % [layer.get_page_size()])
+
+	var placed: Array[Dictionary] = []
+	screen.sticker_placed.connect(func(p: Dictionary) -> void: placed.append(p))
+
+	# --- entering sticker mode stops painting --------------------------------
+	# Everything below is expressed against the page that happens to be open and a
+	# region looked up from it, so the check does not care which page the flow left
+	# it on.
+	var page_index := GameState.current_page_index
+	var book_key := GameState.book_key(screen.get_book())
+	var region_id := page_view.get_region_ids()[0]
+	var centroid: Vector2 = page_view.get_region_data(region_id)["centroid"]
+	var coverage_before := tracker.region_coverage(region_id)
+	var complete_before := tracker.is_page_complete()
+	var painted_before := _paint_pixel(page_view, Vector2i(340, 340))
+	palette.set_sticker_set(0)
+	await _settle_layout()
+	_expect(screen.is_sticker_mode(), "cycling onto a sticker set puts the screen in sticker mode")
+	_expect(not page_view.painting_enabled,
+		"...which turns painting off through BL-10's ONE gate (painting_enabled)")
+	_expect(screen.get_selected_sticker() != null,
+		"...with a sticker in hand ('%s')"
+		% [screen.get_selected_sticker().sticker_id if screen.get_selected_sticker() else "<none>"])
+
+	# --- a tap places one, through the real input path ------------------------
+	# begin_stroke() IS the press: with painting off it starts no stroke, reports
+	# paint_blocked, and the screen turns that into a placement.
+	_expect(not page_view.begin_stroke(Vector2(340.5, 340.5)),
+		"a press on the page starts NO stroke while stickers are out")
+	await _settle_layout()
+	_expect(layer.count() == 1 and placed.size() == 1,
+		"...it sticks a sticker down instead (%d on the page)" % layer.count())
+	_expect(_paint_pixel(page_view, Vector2i(340, 340)).a8 == painted_before.a8,
+		"...and lays down NO paint (alpha %d, unchanged)" % painted_before.a8)
+	var first: Dictionary = layer.get_placements()[0]
+	_expect(is_equal_approx(float(first[StickerLayer.KEY_X]), 340.5)
+			and is_equal_approx(float(first[StickerLayer.KEY_Y]), 340.5),
+		"the placement records where the finger landed, in PAGE pixels (%.1f, %.1f)"
+		% [first[StickerLayer.KEY_X], first[StickerLayer.KEY_Y]])
+	_expect(absf(float(first[StickerLayer.KEY_ROTATION])) <= StickerLayer.MAX_TILT
+			and absf(float(first[StickerLayer.KEY_ROTATION])) > 0.0,
+		"...at a slight random tilt (%.3f rad, cap %.3f)"
+		% [first[StickerLayer.KEY_ROTATION], StickerLayer.MAX_TILT])
+	_expect(float(first[StickerLayer.KEY_SIZE]) > 0.0 and float(first[StickerLayer.KEY_SIZE]) < 0.5,
+		"...and a size that is a FRACTION of the page, not a pixel count (%.3f)"
+		% first[StickerLayer.KEY_SIZE])
+	_expect(layer.sticker_pixels(float(first[StickerLayer.KEY_SIZE])) > 0.0,
+		"...which the layer resolves against the page's short side (%.0f px)"
+		% layer.sticker_pixels(float(first[StickerLayer.KEY_SIZE])))
+	_expect(String(first[StickerLayer.KEY_SET]) == palette.get_sticker_set().get_uid()
+			and String(first[StickerLayer.KEY_STICKER])
+				== screen.get_selected_sticker().sticker_id,
+		"...naming the set and the sticker, which is how it survives a save")
+
+	# --- never counted toward coverage ---------------------------------------
+	await _wait_for_coverage(screen)
+	_expect(is_equal_approx(tracker.region_coverage(region_id), coverage_before),
+		"a sticker changes NO region's coverage (%.3f, unchanged)"
+		% tracker.region_coverage(region_id))
+	_expect(tracker.is_page_complete() == complete_before,
+		"...and moves the page no closer to (or further from) complete: stickers are not paint")
+
+	# --- undo peels it off, redo sticks it back ------------------------------
+	_expect(screen.can_undo(), "a placement arms undo like a stroke does")
+	_expect(await screen.undo(), "undo accepted")
+	await _settle_layout()
+	_expect(layer.count() == 0, "...and the sticker is gone (%d left)" % layer.count())
+	_expect(screen.can_redo(), "...with a redo waiting")
+	_expect(await screen.redo(), "redo accepted")
+	await _settle_layout()
+	_expect(layer.count() == 1, "...and the sticker is back")
+	var restored: Dictionary = layer.get_placements()[0]
+	_expect(restored == first,
+		"...at exactly the same place, tilt and size -- a placement round-trips byte for byte")
+
+	# --- the timeline is ONE list: undo takes back the last THING -------------
+	palette.set_crayon_set(0)
+	await _settle_layout()
+	_expect(not screen.is_sticker_mode() and page_view.painting_enabled,
+		"cycling back to a crayon box gives painting back")
+	page_view.begin_stroke(centroid)
+	page_view.continue_stroke(centroid + Vector2(30.0, 0.0))
+	page_view.end_stroke()
+	await _wait_for_coverage(screen)
+	var depth_after_stroke := screen.undo_depth()
+	palette.set_sticker_set(0)
+	await _settle_layout()
+	page_view.begin_stroke(Vector2(300.5, 300.5))
+	await _settle_layout()
+	_expect(layer.count() == 2
+			and screen.undo_depth() == mini(depth_after_stroke + 1, ColoringPage.UNDO_DEPTH),
+		"a stroke and then a sticker: two things on one timeline (%d deep)"
+		% screen.undo_depth())
+	_expect(await screen.undo(), "undo once")
+	await _settle_layout()
+	_expect(layer.count() == 1,
+		"...takes back the STICKER, because it is what happened last (%d left)" % layer.count())
+	palette.set_crayon_set(0)
+	await _settle_layout()
+	_expect(await screen.undo(), "undo again")
+	await _settle_layout()
+	_expect(layer.count() == 1 and screen.redo_depth() == 2,
+		"...and now the STROKE goes, with the sticker left alone (%d on the page, %d to redo)"
+		% [layer.count(), screen.redo_depth()])
+
+	# --- the padlock refuses a sticker exactly as it refuses a stroke ---------
+	palette.set_sticker_set(0)
+	await _settle_layout()
+	screen.set_page_locked(true)
+	_expect(not screen.can_place_sticker(),
+		"a locked page will not take a sticker")
+	page_view.begin_stroke(Vector2(420.5, 420.5))
+	await _settle_layout()
+	_expect(layer.count() == 1, "...and a tap on it places nothing (%d)" % layer.count())
+	screen.set_page_locked(false)
+	page_view.begin_stroke(Vector2(420.5, 420.5))
+	await _settle_layout()
+	_expect(layer.count() == 2, "unlocking gives sticker placement back (%d)" % layer.count())
+	# ...and a tap in the MARGIN, off the page image, is not a placement either.
+	page_view.begin_stroke(Vector2(-40.0, -40.0))
+	await _settle_layout()
+	_expect(layer.count() == 2, "a tap off the page edge places nothing (%d)" % layer.count())
+
+	# --- the save round-trips -------------------------------------------------
+	var on_page: Array[Dictionary] = layer.get_placements()
+	var saved := GameState.get_page_stickers(book_key, page_index)
+	_expect(saved.size() == on_page.size(),
+		"the save holds all %d of them (%d)" % [on_page.size(), saved.size()])
+	_expect(saved.size() == on_page.size() and saved[0] == on_page[0] and saved[-1] == on_page[-1],
+		"...as the same placement dictionaries the layer is drawing")
+
+	palette.set_crayon_set(0)
+	await _settle_layout()
+	var other_page := 1 - page_index
+	_expect(await screen.go_to_page(other_page), "leaving for the other page")
+	await _settle_layout()
+	_expect(layer.count() == 0,
+		"...takes this page's stickers off with it (%d on the next page)" % layer.count())
+	_expect(GameState.get_page_stickers(book_key, other_page).is_empty(),
+		"...and a page with no sticker key of its own loads with none")
+	_expect(await screen.go_to_page(page_index), "and back again")
+	await _settle_layout()
+	_expect(layer.count() == on_page.size(),
+		"...its stickers are all back (%d)" % layer.count())
+	_expect(layer.get_placements() == on_page,
+		"...exactly where they were, at the same tilt and size")
+	_expect(not screen.can_undo(),
+		"...as BASELINE stickers: a new visit cannot undo what a previous one stuck down")
+
+	# --- Start over takes them off, and the save with them --------------------
+	_expect(screen.restart_current_page(), "Start over on a page with stickers")
+	await _settle_layout()
+	_expect(layer.count() == 0, "...clears every sticker (%d)" % layer.count())
+	_expect(GameState.get_page_stickers(book_key, page_index).is_empty(),
+		"...and clears them from the save too")
+	_expect(not screen.is_sticker_mode() and page_view.painting_enabled,
+		"...leaving the page painting again")
 
 
 ## One pixel of the paint layer. The blocking readback is deliberate here -- this is

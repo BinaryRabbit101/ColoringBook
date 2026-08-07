@@ -21,7 +21,15 @@ extends Control
 ## reaches out of its own subtree.
 ##
 ## Layer order, back to front: paper -> paint SubViewport texture -> mask (only
-## when the page has one, BL-12) -> line art -> debug overlay.
+## when the page has one, BL-12) -> line art -> [b]stickers (BL-36)[/b] -> debug
+## overlay.
+##
+## [b]BL-36 added one node and one accessor[/b] ([method get_sticker_layer]) and
+## touched nothing else. Stickers sit ON TOP of the line art because they are
+## stickers, not paint: they are never clipped to a region, never reach the paint
+## SubViewport and therefore never reach coverage or the saved paint PNG. Placement
+## is the parent's business -- this component only hosts the layer inside the page
+## transform, so a sticker pans and zooms with the drawing it was stuck on.
 ##
 ## [b]BL-10 added one flag[/b], [member painting_enabled]: with it off a press
 ## starts no stroke and reports [signal paint_blocked] instead. That is the entire
@@ -217,6 +225,10 @@ class PaintRestoreQuad extends Node2D:
 @onready var _paint_sprite: Sprite2D = $PageRoot/PaintSprite
 @onready var _mask_sprite: Sprite2D = $PageRoot/MaskSprite
 @onready var _line_art_sprite: Sprite2D = $PageRoot/LineArtSprite
+## BL-36's stickers, ABOVE the display art and inside the page transform, so they
+## pan and zoom with the drawing. Nothing in the painting stack reads it: a
+## sticker is not paint, is not clipped, and never reaches the coverage tracker.
+@onready var _sticker_layer: StickerLayer = $PageRoot/StickerLayer
 @onready var _debug_overlay: Node2D = $PageRoot/DebugOverlay
 
 # ------------------------------------------------------------ runtime state --
@@ -391,6 +403,14 @@ func load_page_textures(
 
 	_apply_mask_layer(mask)
 
+	# BL-36: the stickers of the page we are LEAVING must not be on the page we are
+	# arriving at, and the layer measures everything against the page's short side,
+	# so it is emptied and re-measured here. The screen restores this page's own
+	# saved stickers afterwards, exactly as it restores the paint layer.
+	if is_instance_valid(_sticker_layer):
+		_sticker_layer.clear()
+		_sticker_layer.set_page_size(_page_size)
+
 	_build_debug_overlay()
 
 	_loaded = true
@@ -559,6 +579,14 @@ func has_mask_layer() -> bool:
 ## page's own mask; nothing in the game reads it.
 func get_mask_texture() -> Texture2D:
 	return _mask_sprite.texture if is_instance_valid(_mask_sprite) else null
+
+
+## The layer BL-36's stickers live on -- above the display art, inside the page
+## transform. Additive, like [member painting_enabled]: the owning screen drives
+## it, and nothing else in this component reads or writes it. Painting, region
+## clipping, the recipes and the coverage readback are all exactly what they were.
+func get_sticker_layer() -> StickerLayer:
+	return _sticker_layer
 
 
 # =========================================================== stroke lifecycle ==

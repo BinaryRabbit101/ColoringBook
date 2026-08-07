@@ -91,6 +91,18 @@ var preview_colors: PackedColorArray = PackedColorArray():
 		preview_colors = value
 		queue_redraw()
 
+## True when the stage this bar would fetch is a STICKER SET rather than a crayon
+## box (BL-36). The stripe then carries a little star as well as its colours, so
+## the two kinds of destination are told apart by SHAPE and not only by hue -- the
+## youngest player cannot read the flash banner that says which it was.
+var preview_stickers: bool = false:
+	set(value):
+		if preview_stickers == value:
+			return
+		preview_stickers = value
+		_apply_box()
+		queue_redraw()
+
 ## Which box is on the strip, and how many there are. The pip row.
 var set_index: int = 0:
 	set(value):
@@ -125,10 +137,13 @@ static func box_for(is_vertical: bool) -> Vector2:
 
 func _apply_box() -> void:
 	custom_minimum_size = box_for(vertical)
-	tooltip_text = (
-		"The box of crayons before this one" if direction == DIR_PREV
-		else "Another box of crayons"
-	)
+	if preview_stickers:
+		tooltip_text = "Stickers"
+	else:
+		tooltip_text = (
+			"The box of crayons before this one" if direction == DIR_PREV
+			else "Another box of crayons"
+		)
 
 
 ## Unit vector, in this control's own space, that the chevron points along: OUT of
@@ -203,6 +218,28 @@ func _draw_stripe(tile: Rect2) -> void:
 		var a := _at(tile, along, centre - segment * 0.5)
 		var b := _at(tile, along, centre + segment * 0.5)
 		draw_line(a, b, preview_colors[i], STRIPE_THICKNESS)
+	if preview_stickers:
+		_draw_sticker_mark(_at(tile, along - STRIPE_THICKNESS * 2.2, 0.0))
+
+
+## A little four-point star over the stripe, marking a destination that is a
+## sticker set (BL-36). Same primitive [CrayonButton] uses for the glitter box --
+## a shape, not a word, because the audience cannot read one.
+func _draw_sticker_mark(centre: Vector2) -> void:
+	var arm := STRIPE_THICKNESS * 1.9
+	draw_colored_polygon(
+		PackedVector2Array([
+			Vector2(centre.x, centre.y - arm),
+			Vector2(centre.x + arm * 0.28, centre.y - arm * 0.28),
+			Vector2(centre.x + arm, centre.y),
+			Vector2(centre.x + arm * 0.28, centre.y + arm * 0.28),
+			Vector2(centre.x, centre.y + arm),
+			Vector2(centre.x - arm * 0.28, centre.y + arm * 0.28),
+			Vector2(centre.x - arm, centre.y),
+			Vector2(centre.x - arm * 0.28, centre.y - arm * 0.28),
+		]),
+		ARROW
+	)
 
 
 ## One pip per box along the INNER edge, the current one filled: "there are five

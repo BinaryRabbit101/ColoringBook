@@ -1,0 +1,59 @@
+[gd_resource type="Resource" script_class="StickerSetDef" load_steps=11 format=3]
+
+[ext_resource type="Script" path="res://scripts/resources/sticker_set_def.gd" id="1_sticker_set_def"]
+[ext_resource type="Script" path="res://scripts/resources/sticker_def.gd" id="2_sticker_def"]
+
+[sub_resource type="Resource" id="Sticker_star"]
+script = ExtResource("2_sticker_def")
+sticker_id = "star"
+display_name = "Star"
+image_path = "res://assets/stickers/starter/star.png"
+
+[sub_resource type="Resource" id="Sticker_heart"]
+script = ExtResource("2_sticker_def")
+sticker_id = "heart"
+display_name = "Heart"
+image_path = "res://assets/stickers/starter/heart.png"
+
+[sub_resource type="Resource" id="Sticker_smiley"]
+script = ExtResource("2_sticker_def")
+sticker_id = "smiley"
+display_name = "Smiley"
+image_path = "res://assets/stickers/starter/smiley.png"
+
+[sub_resource type="Resource" id="Sticker_rainbow"]
+script = ExtResource("2_sticker_def")
+sticker_id = "rainbow"
+display_name = "Rainbow"
+image_path = "res://assets/stickers/starter/rainbow.png"
+
+[sub_resource type="Resource" id="Sticker_balloon"]
+script = ExtResource("2_sticker_def")
+sticker_id = "balloon"
+display_name = "Balloon"
+image_path = "res://assets/stickers/starter/balloon.png"
+
+[sub_resource type="Resource" id="Sticker_paw"]
+script = ExtResource("2_sticker_def")
+sticker_id = "paw"
+display_name = "Paw Print"
+image_path = "res://assets/stickers/starter/paw.png"
+
+[sub_resource type="Resource" id="Sticker_flower"]
+script = ExtResource("2_sticker_def")
+sticker_id = "flower"
+display_name = "Flower"
+image_path = "res://assets/stickers/starter/flower.png"
+
+[sub_resource type="Resource" id="Sticker_crown"]
+script = ExtResource("2_sticker_def")
+sticker_id = "crown"
+display_name = "Crown"
+image_path = "res://assets/stickers/starter/crown.png"
+
+[resource]
+script = ExtResource("1_sticker_set_def")
+set_uid = "starter-stickers-2026"
+display_name = "Starter Stickers"
+sort_order = 10
+stickers = [SubResource("Sticker_star"), SubResource("Sticker_heart"), SubResource("Sticker_smiley"), SubResource("Sticker_rainbow"), SubResource("Sticker_balloon"), SubResource("Sticker_paw"), SubResource("Sticker_flower"), SubResource("Sticker_crown")]

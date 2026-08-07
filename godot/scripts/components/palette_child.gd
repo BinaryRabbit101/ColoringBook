@@ -15,6 +15,8 @@ extends Control
 ## signal color_picked(color: Color)
 ## signal brush_size_picked(size: float)
 ## signal brush_effect_picked(effect: StringName)
+## signal sticker_picked(sticker: StickerDef)
+## signal sticker_mode_changed(active: bool)
 ## func set_palette(def: PaletteDef) -> void
 ## func select_color(index: int) -> void
 ## func select_brush_size(index: int) -> void
@@ -63,8 +65,30 @@ extends Control
 ## finish the way it primes the size and the colour, so the brush is never
 ## finish-less, and cycling a box emits it exactly once beside the colour.
 ##
+## [b]BL-36 stickers[/b]: the cycle ring does not stop at the last crayon box. It
+## keeps going into the discovered [StickerSetDef]s -- the strip swaps its crayons
+## for a row of sticker cards -- and cycling on past the last sticker set wraps
+## home to crayon box 0. See [method set_stage] / [method stage_count]: one ring,
+## one index, and the two cycle bars still call
+## [method next_crayon_set] / [method prev_crayon_set].
+##
+## Sticker mode adds exactly two things to the contract and changes none of the
+## three that were there:
+## [codeblock]
+## sticker_mode_changed(active)  the screen turns PageView.painting_enabled off
+##                               (BL-10's one gate) and starts placing instead
+## sticker_picked(sticker)       which StickerDef a tap would stick down
+## [/codeblock]
+## [signal color_picked] still carries exactly one resolved [Color] and is NOT
+## emitted when the strip turns into stickers -- no colour changed, and there is no
+## painting to prime. Neither is [signal brush_effect_picked]: the wax did not
+## change either. Cycling BACK onto a crayon box emits the mode signal first, then
+## the box's finish and colour in the order they have always gone out, so a
+## listener is holding the right wax before the colour lands.
+##
 ## The pick is therefore always "crayon C of box B at rung R", resolved in
-## [method get_selected_color] and nowhere else.
+## [method get_selected_color] and nowhere else -- or, in sticker mode, "sticker S
+## of set T", resolved in [method get_selected_sticker].
 ## [method set_palette] auto-selects the first colour and the palette's default
 ## brush size, emitting [signal brush_size_picked] then [signal color_picked]
 ## once each -- the brush is never colourless or sizeless.
@@ -97,9 +121,45 @@ signal brush_size_picked(size: float)
 ## Emitted once by [method set_palette] and once by every box change, and by nothing
 ## else: within a box, picking a crayon or a rung changes the colour, not the wax.
 signal brush_effect_picked(effect: StringName)
+## The sticker a tap on the page would stick down (BL-36), or null when the strip
+## is showing crayons. Emitted once by every sticker pick and once by every cycle
+## that lands on a sticker set.
+signal sticker_picked(sticker: StickerDef)
+## The strip turned into stickers (or back into crayons) -- BL-36. The screen's cue
+## to flip [code]PageView.painting_enabled[/code]: sticker mode places stickers and
+## paints nothing. Emitted only on a real change, and always BEFORE the pick that
+## goes with it.
+signal sticker_mode_changed(active: bool)
 
 ## Crayon-row touch target floor (DESIGN.md 1: "large touch targets").
 const MIN_TOUCH_TARGET := CrayonButton.MIN_TOUCH_TARGET
+
+## The strip is showing a box of crayons.
+const MODE_CRAYONS := 0
+## The strip is showing a set of stickers (BL-36).
+const MODE_STICKERS := 1
+
+## Colours the box-name flash and the cycle bars use to advertise a STICKER set. A
+## sticker set has no crayon lineup to shout over, so it gets the bright confetti
+## palette instead -- the same "this is a treat" reading the finish boxes get from
+## their own colours. A typed [Array], because only that can be a [code]const[/code];
+## [method sticker_accent_colors] is the [PackedColorArray] the controls take.
+const STICKER_ACCENTS: Array[Color] = [
+	Color(1.0, 0.803922, 0.223529),
+	Color(0.929412, 0.294118, 0.372549),
+	Color(0.396078, 0.658824, 0.929412),
+	Color(0.396078, 0.752941, 0.435294),
+	Color(0.945098, 0.462745, 0.686275),
+]
+
+
+## [constant STICKER_ACCENTS] as the [PackedColorArray] the flash banner and the
+## cycle bars are fed.
+static func sticker_accent_colors() -> PackedColorArray:
+	var colors := PackedColorArray()
+	for color in STICKER_ACCENTS:
+		colors.append(color)
+	return colors
 
 ## The crayons run left to right along the BOTTOM of the canvas (portrait).
 const LAYOUT_ROW := 0
@@ -134,7 +194,11 @@ const CRAYON_SEPARATION := 6.0
 const MAX_RANKS := 3
 
 var _palette: PaletteDef
-var _crayons: Array[CrayonButton] = []
+## Whatever is on the strip right now: [CrayonButton]s, or [StickerButton]s in
+## sticker mode. One array, because BL-33's fit sizes and ranks the strip's items
+## and does not care which kind they are -- both offer [code]canonical_size[/code]
+## and [code]orientation[/code] and the same [code]box_for()[/code] contract.
+var _items: Array[Control] = []
 ## Rank containers inside [member _row], one per rank of crayons.
 var _ranks: Array[BoxContainer] = []
 ## True when even [constant MAX_RANKS] ranks of floor-sized crayons do not fit, so
@@ -146,6 +210,14 @@ var _selected_size := 0.0
 var _layout := LAYOUT_ROW
 ## Which box of crayons is out (BL-23). 0 is the palette's own default box.
 var _set_index := 0
+## Crayons or stickers (BL-36).
+var _mode := MODE_CRAYONS
+## The sticker sets on this device, in ring order. Discovered once per
+## [method set_palette] -- they are content, and content does not change mid-visit.
+var _sticker_sets: Array[StickerSetDef] = []
+## Which sticker set is out, and which sticker of it is in hand (BL-36).
+var _sticker_index := 0
+var _sticker_pick := 0
 ## Which face the strip is showing: colours, or the intensity ladder (BL-22).
 var _view := VIEW_COLORS
 ## The rung of the ladder in hand. Reset to the crayon's own colour by every
@@ -319,8 +391,8 @@ func _apply_layout() -> void:
 		arrow.size_flags_vertical = Control.SIZE_FILL if column else Control.SIZE_EXPAND_FILL
 
 	var orientation := CrayonButton.ORIENT_LEFT if column else CrayonButton.ORIENT_UP
-	for crayon in _crayons:
-		crayon.orientation = orientation
+	for item in _items:
+		_orient_item(item, orientation)
 	_fit_crayons()
 
 	if _preview != null:
@@ -356,12 +428,21 @@ func _apply_layout() -> void:
 ## layout flip and every resize.
 func _fit_crayons() -> void:
 	_resolve_nodes()
-	var count := _crayons.size()
+	var count := _items.size()
 	if count <= 0:
 		_apply_scroll_mode()
 		return
 	var column := is_column()
 	var room := _crayon_room()
+	# BL-36: a sticker card is square and a crayon is long, so the two clamps below
+	# come from whichever kind is on the strip. The FLOOR does not move -- 64 px is
+	# a fingertip either way, and that is the number that is not negotiable.
+	var default_size := (
+		StickerButton.DEFAULT_SIZE if is_sticker_mode() else CrayonButton.DEFAULT_SIZE
+	)
+	var aspect := (
+		StickerButton.CANONICAL_ASPECT if is_sticker_mode() else CrayonButton.CANONICAL_ASPECT
+	)
 	var ranks := 1
 	var pitch := 0.0
 	var length := 0.0
@@ -399,11 +480,11 @@ func _fit_crayons() -> void:
 	# fingertip, and never squeezed into a square: past CANONICAL_ASPECT it stops
 	# reading as a crayon, so a rank with room to spare draws a full-size one and
 	# leaves the slack as air.
-	pitch = clampf(pitch, CrayonButton.MIN_TOUCH_TARGET, CrayonButton.DEFAULT_SIZE.x)
+	pitch = clampf(pitch, CrayonButton.MIN_TOUCH_TARGET, default_size.x)
 	length = clampf(
 		length,
 		CrayonButton.MIN_TOUCH_TARGET,
-		minf(CrayonButton.DEFAULT_SIZE.y, pitch * CrayonButton.CANONICAL_ASPECT)
+		minf(default_size.y, pitch * aspect)
 	)
 
 	_build_ranks(ranks)
@@ -414,15 +495,33 @@ func _fit_crayons() -> void:
 	var canonical := Vector2(pitch, length)
 	var orientation := CrayonButton.ORIENT_LEFT if column else CrayonButton.ORIENT_UP
 	for i in count:
-		var crayon := _crayons[i]
-		crayon.orientation = orientation
-		crayon.canonical_size = canonical
+		var item := _items[i]
+		_orient_item(item, orientation)
+		_size_item(item, canonical)
 		var rank := _ranks[mini(i / per_rank, ranks - 1)]
-		if crayon.get_parent() != rank:
-			if crayon.get_parent() != null:
-				crayon.get_parent().remove_child(crayon)
-			rank.add_child(crayon)
+		if item.get_parent() != rank:
+			if item.get_parent() != null:
+				item.get_parent().remove_child(item)
+			rank.add_child(item)
 	_apply_scroll_mode()
+
+
+## The two properties the fit drives, applied to whichever kind of item is on the
+## strip. A typed branch rather than a duck-typed assignment: both classes really
+## do declare these, and spelling it out is what keeps a third kind of strip item
+## honest about the contract it is joining.
+static func _orient_item(item: Control, orientation: int) -> void:
+	if item is CrayonButton:
+		(item as CrayonButton).orientation = orientation
+	elif item is StickerButton:
+		(item as StickerButton).orientation = orientation
+
+
+static func _size_item(item: Control, canonical: Vector2) -> void:
+	if item is CrayonButton:
+		(item as CrayonButton).canonical_size = canonical
+	elif item is StickerButton:
+		(item as StickerButton).canonical_size = canonical
 
 
 ## Length available to the crayons along the strip (x), and across it (y).
@@ -558,7 +657,7 @@ func select_intensity(step: int) -> void:
 		return
 	_intensity_step = clampi(step, 0, PaletteDef.INTENSITY_STEPS - 1)
 	if is_showing_shades():
-		for crayon in _crayons:
+		for crayon in get_crayon_buttons():
 			crayon.selected = crayon.color_index == _intensity_step
 	_refresh_tools()
 	color_picked.emit(get_selected_color())
@@ -580,22 +679,28 @@ func _refresh_tools() -> void:
 		_intensity.base_color = get_base_color()
 		_intensity.active_step = _intensity_step
 		_intensity.showing_shades = is_showing_shades()
-	var boxes := _palette.crayon_set_count() if _palette != null else 1
+		# BL-36: a sticker has no intensity ladder, so the swap tile is not offered
+		# in sticker mode -- and the strip gets its 88 px back for sticker cards.
+		_intensity.visible = not is_sticker_mode()
+	var stages := stage_count()
+	var here := get_stage_index()
 	for arrow in [_prev, _next]:
 		if arrow == null:
 			continue
-		arrow.set_index = _set_index
-		arrow.set_count = boxes
-		# Each bar previews the box IT would fetch, so the two ends of the strip
+		arrow.set_index = here
+		arrow.set_count = stages
+		# Each bar previews the STAGE it would fetch, so the two ends of the strip
 		# answer "what happens if I press this" rather than repeating where we are.
 		var step := -1 if arrow.direction == CrayonCycleButton.DIR_PREV else 1
+		var destination := wrapi(here + step, 0, maxi(stages, 1))
+		arrow.preview_stickers = is_sticker_stage(destination)
 		arrow.preview_colors = (
-			_palette.get_crayon_set_colors(_set_index + step)
-			if _palette != null else PackedColorArray()
+			sticker_accent_colors() if is_sticker_stage(destination)
+			else _crayon_stage_colors(destination)
 		)
-		# One box means no carousel: two arrows that always land back here would be
-		# a lie, and the strip gets their length back for crayons.
-		arrow.visible = boxes > 1
+		# One stage means no carousel: two arrows that always land back here would
+		# be a lie, and the strip gets their length back for crayons.
+		arrow.visible = stages > 1
 
 
 # ================================================ crayon sets (BL-23, BL-34) ==
@@ -623,6 +728,8 @@ func set_crayon_set(index: int) -> void:
 	if _palette == null:
 		return
 	var wrapped := _palette.wrap_crayon_set(index)
+	var was_stickers := is_sticker_mode()
+	_mode = MODE_CRAYONS
 	_set_index = wrapped
 	# A new box is a fresh start: first crayon, own colour, colours face. Leaving a
 	# child on rung 6 of a colour that no longer exists is the alternative. BL-35:
@@ -631,29 +738,190 @@ func set_crayon_set(index: int) -> void:
 	_intensity_step = PaletteDef.INTENSITY_BASE_STEP
 	_view = VIEW_COLORS
 	_rebuild_strip()
+	# BL-36: painting comes back FIRST, so a listener has re-enabled the brush
+	# before it is told which wax and which colour to load it with.
+	if was_stickers:
+		sticker_picked.emit(null)
+		sticker_mode_changed.emit(false)
 	brush_effect_picked.emit(get_selected_effect())
-	_announce_crayon_set()
+	_announce_stage()
 	color_picked.emit(get_selected_color())
 
 
-## The next box in the cycle. What the trailing [CrayonCycleButton] calls.
+# =============================================================== the ring (BL-36) ==
+# The carousel does not stop at the last crayon box. Past it come the sticker sets
+# this device has -- the strip swaps its crayons for a row of sticker cards -- and
+# past the last of those it wraps home to crayon box 0. One ring, one index:
+#
+#   stage 0 .. crayon_set_count()-1        the crayon boxes (BL-23/BL-34/BL-35)
+#   stage crayon_set_count() ..            the discovered [StickerSetDef]s (BL-36)
+#
+# The two [CrayonCycleButton]s still call [method next_crayon_set] /
+# [method prev_crayon_set] and know nothing about any of this: their pips count
+# STAGES, and each previews whatever the stage it would fetch looks like.
+
+
+## How many stages the cycle ring has: every crayon box, then every sticker set.
+func stage_count() -> int:
+	var boxes := _palette.crayon_set_count() if _palette != null else 1
+	return boxes + _sticker_sets.size()
+
+
+## Where the strip is on the ring, 0..[method stage_count]-1.
+func get_stage_index() -> int:
+	if not is_sticker_mode():
+		return _set_index
+	var boxes := _palette.crayon_set_count() if _palette != null else 1
+	return boxes + _sticker_index
+
+
+## True when stage [param index] is a sticker set rather than a crayon box.
+func is_sticker_stage(index: int) -> bool:
+	var boxes := _palette.crayon_set_count() if _palette != null else 1
+	return index >= boxes and index < stage_count()
+
+
+## Puts stage [param index] on the strip, wrapping in BOTH directions. The one
+## entry point for the ring; [method set_crayon_set] and [method set_sticker_set]
+## are what it dispatches to, and they stay public because a test (and a future
+## "jump straight to my stickers" gesture) wants to name a stage directly.
+func set_stage(index: int) -> void:
+	var stages := stage_count()
+	if stages <= 0:
+		return
+	var wrapped := wrapi(index, 0, stages)
+	if is_sticker_stage(wrapped):
+		var boxes := _palette.crayon_set_count() if _palette != null else 1
+		set_sticker_set(wrapped - boxes)
+	else:
+		set_crayon_set(wrapped)
+
+
+## The next stage in the ring. What the trailing [CrayonCycleButton] calls.
+##
+## [b]The name is BL-34's and is deliberately kept[/b]: this is the strip's one
+## forward gesture, and it has walked past the crayon boxes into the sticker sets
+## since BL-36. Renaming it would churn every call site to say the same thing.
 func next_crayon_set() -> void:
-	set_crayon_set(_set_index + 1)
+	set_stage(get_stage_index() + 1)
 
 
-## The box BEFORE this one (BL-34). What the leading [CrayonCycleButton] calls;
-## from box 0 it wraps round to the last one.
+## The stage BEFORE this one (BL-34); from stage 0 it wraps round to the last one,
+## which since BL-36 is the last sticker set.
 func prev_crayon_set() -> void:
-	set_crayon_set(_set_index - 1)
+	set_stage(get_stage_index() - 1)
 
 
 func get_crayon_set_index() -> int:
 	return _set_index
 
 
-## Display name of the box on the strip -- the palette's own for the default box.
+## Display name of whatever is on the strip -- the crayon box's, or the sticker
+## set's. What the box-name flash shouts.
 func get_crayon_set_name() -> String:
+	if is_sticker_mode():
+		var set_def := get_sticker_set()
+		return set_def.display_name if set_def != null else ""
 	return _palette.get_crayon_set_name(_set_index) if _palette != null else ""
+
+
+# ------------------------------------------------------------ sticker sets (BL-36) --
+
+## True while the strip is showing stickers instead of crayons. [b]This is the
+## whole of the mode[/b] as far as anything outside the palette is concerned: the
+## screen turns painting off while it holds and places stickers instead.
+func is_sticker_mode() -> bool:
+	return _mode == MODE_STICKERS
+
+
+## The sticker sets this device has, in ring order. Empty on a build with no
+## fixture sets and no installed sticker packs, which is the shipped release's
+## normal state until the player downloads one (BL-25's rule, BL-37's packs).
+func get_sticker_sets() -> Array[StickerSetDef]:
+	return _sticker_sets
+
+
+func sticker_set_count() -> int:
+	return _sticker_sets.size()
+
+
+## The set on the strip, or null in crayon mode.
+func get_sticker_set() -> StickerSetDef:
+	if not is_sticker_mode() or _sticker_index < 0 or _sticker_index >= _sticker_sets.size():
+		return null
+	return _sticker_sets[_sticker_index]
+
+
+func get_sticker_set_index() -> int:
+	return _sticker_index
+
+
+## [b]The sticker that would actually be stuck down[/b] -- the one thing
+## [signal sticker_picked] ever carries, and null whenever the strip is showing
+## crayons.
+func get_selected_sticker() -> StickerDef:
+	var set_def := get_sticker_set()
+	if set_def == null:
+		return null
+	return set_def.get_sticker(_sticker_pick)
+
+
+func get_selected_sticker_index() -> int:
+	return _sticker_pick if is_sticker_mode() else -1
+
+
+## Puts sticker set [param index] on the strip (wrapping), on its first sticker,
+## and emits [signal sticker_mode_changed] (on entry) then
+## [signal sticker_picked].
+##
+## Emits NO [signal color_picked] and NO [signal brush_effect_picked]: no colour
+## and no wax changed, and there is no painting to prime -- the screen has just
+## been told to stop painting.
+func set_sticker_set(index: int) -> void:
+	if _sticker_sets.is_empty():
+		return
+	var wrapped := wrapi(index, 0, _sticker_sets.size())
+	var was_stickers := is_sticker_mode()
+	_mode = MODE_STICKERS
+	_sticker_index = wrapped
+	# A new set is a fresh start, exactly like a new crayon box: first sticker.
+	_sticker_pick = 0
+	_view = VIEW_COLORS
+	_rebuild_strip()
+	if not was_stickers:
+		sticker_mode_changed.emit(true)
+	_announce_stage()
+	sticker_picked.emit(get_selected_sticker())
+
+
+## Selects sticker [param index] of the set on the strip (clamped) and emits
+## [signal sticker_picked]. Exactly what a card press calls.
+func select_sticker(index: int) -> void:
+	var set_def := get_sticker_set()
+	if set_def == null or set_def.sticker_count() <= 0:
+		return
+	_sticker_pick = clampi(index, 0, set_def.sticker_count() - 1)
+	for card in get_sticker_buttons():
+		card.selected = card.sticker_index == _sticker_pick
+	_refresh_tools()
+	sticker_picked.emit(get_selected_sticker())
+
+
+## Drops and re-scans the sticker sets. Dev/tests only -- the shipped game
+## discovers once per visit, when [method set_palette] builds the strip, because a
+## pack cannot install itself while a page is open (DLC_SERVER.md §7.3).
+func reload_sticker_sets() -> void:
+	_sticker_sets = StickerSetDef.discover()
+	_sticker_index = clampi(_sticker_index, 0, maxi(_sticker_sets.size() - 1, 0))
+	_refresh_tools()
+
+
+## The colours crayon stage [param index] would put on the strip. Only ever asked
+## about a crayon stage -- a sticker stage has no lineup.
+func _crayon_stage_colors(index: int) -> PackedColorArray:
+	if _palette == null:
+		return PackedColorArray()
+	return _palette.get_crayon_set_colors(index)
 
 
 ## [b]The finish that will actually be painted[/b] (BL-35): the box in hand's, and
@@ -678,13 +946,17 @@ func get_box_flash() -> CrayonBoxFlash:
 	return _flash
 
 
-## Says the new box's name over the strip, once, and lets it fade. The whole of the
-## box's identity that is not the pip rows -- and the only place its name is ever
-## written (BL-34).
-func _announce_crayon_set() -> void:
-	if _flash == null or _palette == null or _palette.crayon_set_count() <= 1:
+## Says the new stage's name over the strip, once, and lets it fade. The whole of
+## the box's identity that is not the pip rows -- and the only place its name is
+## ever written (BL-34). A sticker set announces itself exactly like a crayon box
+## (BL-36): landing on the stickers is the same event as landing on Neon.
+func _announce_stage() -> void:
+	if _flash == null or stage_count() <= 1:
 		return
-	_flash.flash("%s!" % get_crayon_set_name(), _active_colors())
+	_flash.flash(
+		"%s!" % get_crayon_set_name(),
+		sticker_accent_colors() if is_sticker_mode() else _active_colors()
+	)
 
 
 # ================================================== shared palette contract ==
@@ -699,6 +971,14 @@ func set_palette(def: PaletteDef) -> void:
 	_intensity_step = PaletteDef.INTENSITY_BASE_STEP
 	_set_index = 0
 	_view = VIEW_COLORS
+	# BL-36: the ring is as long as this device's content, so the sticker sets are
+	# discovered here -- once per visit, beside the palette that is being installed.
+	# A pack cannot install itself while a page is open, so re-scanning per cycle
+	# would buy nothing and cost a directory walk on every press.
+	_mode = MODE_CRAYONS
+	_sticker_index = 0
+	_sticker_pick = 0
+	_sticker_sets = StickerSetDef.discover()
 	_clear_row()
 	if _flash != null:
 		_flash.hide_now()
@@ -725,6 +1005,9 @@ func _rebuild_strip() -> void:
 	_clear_row()
 	if _palette == null:
 		return
+	if is_sticker_mode():
+		_rebuild_sticker_strip()
+		return
 
 	var shades := is_showing_shades()
 	var colors := (
@@ -749,19 +1032,53 @@ func _rebuild_strip() -> void:
 		# so the selection can then follow the finger (see PaletteSlideInput).
 		crayon.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
 		crayon.pressed.connect(_pick_at.bind(i))
-		_crayons.append(crayon)
+		_items.append(crayon)
 
 	# Sizing and ranking is one job and it belongs to the fit, which is also what
 	# parents each crayon into a rank (BL-33).
 	_refresh_tools()
 	_fit_crayons()
-	_slide.set_targets(get_color_buttons(), _pick_at)
+	_slide.set_targets(get_strip_buttons(), _pick_at)
+
+
+## The same strip, filled with sticker cards instead of crayons (BL-36). Same
+## fit, same ranks, same slide-to-select, same scroller -- one press means
+## "stick this one down next" instead of "paint with this colour".
+func _rebuild_sticker_strip() -> void:
+	var set_def := get_sticker_set()
+	if set_def == null:
+		_refresh_tools()
+		_fit_crayons()
+		return
+	for i in set_def.sticker_count():
+		var sticker := set_def.get_sticker(i)
+		if sticker == null:
+			continue
+		var card := StickerButton.new()
+		card.name = "Sticker%d" % i
+		card.sticker_index = i
+		card.sticker_id = sticker.sticker_id
+		card.texture = sticker.load_texture()
+		card.tooltip_text = sticker.display_name
+		card.orientation = (
+			StickerButton.ORIENT_LEFT if is_column() else StickerButton.ORIENT_UP
+		)
+		card.selected = i == _sticker_pick
+		card.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
+		card.pressed.connect(_pick_at.bind(i))
+		_items.append(card)
+
+	_refresh_tools()
+	_fit_crayons()
+	_slide.set_targets(get_strip_buttons(), _pick_at)
 
 
 ## What a press or a slide onto strip position [param index] means, which depends
 ## on which face is up. One callback, so [PaletteSlideInput] never has to know.
 func _pick_at(index: int) -> void:
-	if is_showing_shades():
+	if is_sticker_mode():
+		select_sticker(index)
+	elif is_showing_shades():
 		select_intensity(index)
 	else:
 		select_color(index)
@@ -787,7 +1104,7 @@ func select_color(index: int) -> void:
 		# the ladder it is showing is the wrong colour's now.
 		_rebuild_strip()
 	else:
-		for crayon in _crayons:
+		for crayon in get_crayon_buttons():
 			crayon.selected = crayon.color_index == clamped
 	_refresh_tools()
 	color_picked.emit(get_selected_color())
@@ -840,10 +1157,41 @@ func get_selected_brush_size() -> float:
 
 
 ## The crayon controls, in palette order. For layout/touch-target verification.
+## [b]Empty in sticker mode[/b] -- a sticker card is not a colour button, and the
+## whole point of the split is that nothing asking for colours gets handed one.
+## Whatever is actually on the strip is [method get_strip_buttons].
 func get_color_buttons() -> Array[Control]:
 	var buttons: Array[Control] = []
-	for crayon in _crayons:
+	for crayon in get_crayon_buttons():
 		buttons.append(crayon)
+	return buttons
+
+
+## The crayons on the strip, typed. Empty in sticker mode.
+func get_crayon_buttons() -> Array[CrayonButton]:
+	var buttons: Array[CrayonButton] = []
+	for item in _items:
+		if item is CrayonButton:
+			buttons.append(item as CrayonButton)
+	return buttons
+
+
+## The sticker cards on the strip, in set order (BL-36). Empty in crayon mode.
+func get_sticker_buttons() -> Array[StickerButton]:
+	var buttons: Array[StickerButton] = []
+	for item in _items:
+		if item is StickerButton:
+			buttons.append(item as StickerButton)
+	return buttons
+
+
+## Everything the strip is offering right now, crayons OR sticker cards, in strip
+## order. This is what the no-scroll fit (BL-33) is measured against, because the
+## promise is about the STRIP, not about crayons specifically.
+func get_strip_buttons() -> Array[Control]:
+	var buttons: Array[Control] = []
+	for item in _items:
+		buttons.append(item)
 	return buttons
 
 
@@ -881,6 +1229,12 @@ func get_pick_preview() -> PickPreview:
 func _on_slide_candidate(index: int, viewport_position: Vector2) -> void:
 	if _preview == null or _palette == null:
 		return
+	# BL-36: the bubble exists because a finger covers the COLOUR it is picking. A
+	# sticker card is bigger than a fingertip and its art reads round the finger, so
+	# sticker mode raises no bubble rather than raising a meaningless colour.
+	if is_sticker_mode():
+		_preview.hide_now()
+		return
 	if index < 0:
 		_preview.move_to(viewport_position)
 		return
@@ -912,7 +1266,7 @@ func _on_slide_released() -> void:
 # =================================================================== internal ==
 
 func _clear_row() -> void:
-	_crayons.clear()
+	_items.clear()
 	if _preview != null:
 		_preview.hide_now()
 	var no_targets: Array[Control] = []

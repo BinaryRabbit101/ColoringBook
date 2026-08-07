@@ -79,6 +79,14 @@ const FINISH_LADDER: Array[StringName] = [
 ]
 const SET_NAMES: PackedStringArray = ["Neon Glow", "Textured Wax", "Glitter"]
 
+## BL-36: the repo's dev-fixture sticker sets. Exactly one -- the free "Starter
+## Stickers" set the BL-37 pack is built from. Every other set a player has comes
+## from the server, and a RELEASE build has this one excluded from the export.
+const EXPECTED_STICKER_SETS := 1
+const STARTER_SET_UID := "starter-stickers-2026"
+const STARTER_SET_NAME := "Starter Stickers"
+const STARTER_STICKER_COUNT := 8
+
 ## Per-channel tolerance (0..255) when checking painted pixels against the picked
 ## palette colour.
 const COLOR_TOLERANCE := 2
@@ -129,6 +137,7 @@ func _run() -> void:
 	await _check_landscape_dock()
 	await _check_intensity()
 	await _check_crayon_sets()
+	await _check_sticker_ring()
 	await _check_no_scroll_fit()
 	await _check_page_view_integration()
 	await _check_selection_feedback()
@@ -658,12 +667,19 @@ func _check_crayon_sets() -> void:
 		"...both OUTSIDE the crayon scroller, so a slide can never land on one")
 	_expect(_at_ends_of_strip(back, forward),
 		"...and parked at the two OUTER ENDS of the strip, beyond every crayon")
-	_expect(back.set_count == _def.crayon_set_count()
-			and forward.set_count == _def.crayon_set_count(),
-		"...showing all %d boxes as pips (%d)" % [_def.crayon_set_count(), forward.set_count])
+	# BL-36: the pips count STAGES, not crayon boxes -- the ring runs on into the
+	# sticker sets, and a pip row that stopped at the wax would be a lie about how
+	# far the carousel goes.
+	_expect(back.set_count == _palette.stage_count()
+			and forward.set_count == _palette.stage_count(),
+		"...showing all %d stages as pips (%d)" % [_palette.stage_count(), forward.set_count])
 	_expect(forward.preview_colors == _def.get_crayon_set_colors(1)
-			and back.preview_colors == _def.get_crayon_set_colors(-1),
-		"each bar previews the colours of the box IT would fetch, not the one in hand")
+			and not forward.preview_stickers,
+		"the forward bar previews the colours of the box IT would fetch, not the one in hand")
+	# ...and from box 0, going BACK lands on the last sticker set, so that bar has to
+	# advertise stickers rather than a lineup that does not exist.
+	_expect(back.preview_stickers == (_palette.sticker_set_count() > 0),
+		"the back bar says its destination is a STICKER set (%s)" % back.preview_stickers)
 	_expect(not ResourceLoader.exists(REPLACED_BY_ARROWS)
 			and not FileAccess.file_exists(REPLACED_BY_ARROWS),
 		"...and the forward-only carton tile they replaced is gone (%s)" % REPLACED_BY_ARROWS)
@@ -746,8 +762,10 @@ func _check_crayon_sets() -> void:
 	_palette.set_crayon_set(0)
 	_palette.prev_crayon_set()
 	await _settle()
-	_expect(_palette.get_crayon_set_index() == _def.crayon_set_count() - 1,
-		"cycling BACK off the first box wraps round to the last one ('%s')"
+	# BL-36 moved where "the last one" is: the ring runs past the crayon boxes into
+	# the sticker sets, so going back off box 0 lands on the LAST STICKER SET.
+	_expect(_palette.get_stage_index() == _palette.stage_count() - 1,
+		"cycling BACK off the first box wraps round to the last STAGE ('%s')"
 		% _palette.get_crayon_set_name())
 	_palette.set_crayon_set(1)
 	await _settle()
@@ -786,13 +804,16 @@ func _check_crayon_sets() -> void:
 	await _settle()
 
 	# --- all the way round ----------------------------------------------------
+	# The whole RING now (BL-36): the remaining crayon boxes, then every sticker
+	# set, then home.
 	var walked: Array[StringName] = []
-	for i in range(_palette.get_crayon_set_index(), _def.crayon_set_count()):
+	for i in range(_palette.get_stage_index(), _palette.stage_count()):
 		forward.pressed.emit()
-		walked.append(_palette.get_selected_effect())
+		if not _palette.is_sticker_mode():
+			walked.append(_palette.get_selected_effect())
 	await _settle()
-	_expect(_palette.get_crayon_set_index() == 0,
-		"cycling past the last box comes back to the default one ('%s')"
+	_expect(_palette.get_stage_index() == 0 and not _palette.is_sticker_mode(),
+		"cycling past the last STAGE comes back to the default box ('%s')"
 		% _palette.get_crayon_set_name())
 	_expect(_palette.get_color_buttons().size() == CRAYON_COUNT,
 		"...with its %d crayons back on the strip (%d)"
@@ -804,6 +825,132 @@ func _check_crayon_sets() -> void:
 		strip_reset = strip_reset and (control as CrayonButton).finish == BrushFinish.CLASSIC
 	_expect(strip_reset, "...on every crayon of it")
 	_palette.select_color(0)
+
+
+## (5f) BL-36: the cycle ring keeps going past the last crayon box into the
+## sticker sets, the strip swaps crayons for sticker cards, and cycling on wraps
+## home. Everything about how the game PAINTS has to be untouched by the trip.
+func _check_sticker_ring() -> void:
+	print("\n-- check 5f: the ring runs on into stickers (BL-36) --")
+	var sets := StickerSetDef.discover()
+	_expect(sets.size() == EXPECTED_STICKER_SETS,
+		"%d dev-fixture sticker set(s) were discovered on disk (%d)"
+		% [EXPECTED_STICKER_SETS, sets.size()])
+	if sets.is_empty():
+		return
+	var starter := sets[0]
+	_expect(starter.set_uid == STARTER_SET_UID and starter.display_name == STARTER_SET_NAME,
+		"...the free starter set ('%s' / '%s')" % [starter.set_uid, starter.display_name])
+	_expect(starter.sticker_count() == STARTER_STICKER_COUNT,
+		"...with %d stickers in it (%d)" % [STARTER_STICKER_COUNT, starter.sticker_count()])
+	_expect(starter.validate().is_empty(),
+		"...and it validates: every sticker has an id and art that exists (%s)"
+		% [starter.validate()])
+	var ids := PackedStringArray()
+	for i in starter.sticker_count():
+		ids.append(starter.get_sticker(i).sticker_id)
+	_expect(starter.find_sticker(ids[0]) != null and starter.find_sticker("nope-2026") == null,
+		"a saved placement resolves by ID, and an id the set no longer has resolves to null")
+
+	# --- the ring's shape -----------------------------------------------------
+	_expect(_palette.stage_count() == _def.crayon_set_count() + sets.size(),
+		"the ring is every crayon box THEN every sticker set (%d stages)"
+		% _palette.stage_count())
+	_expect(not _palette.is_sticker_stage(_def.crayon_set_count() - 1)
+			and _palette.is_sticker_stage(_def.crayon_set_count()),
+		"...with the stickers starting exactly where the boxes stop")
+
+	# --- cycling onto them ----------------------------------------------------
+	_palette.set_crayon_set(_def.crayon_set_count() - 1)
+	await _settle()
+	var colors_before := _colors.size()
+	var effects_before := _effects.size()
+	var brush_before := _palette.get_selected_brush_size()
+	var modes: Array[bool] = []
+	var picks: Array[StickerDef] = []
+	_palette.sticker_mode_changed.connect(func(active: bool) -> void: modes.append(active))
+	_palette.sticker_picked.connect(func(sticker: StickerDef) -> void: picks.append(sticker))
+
+	_palette.next_crayon_set()
+	await _settle()
+	_expect(_palette.is_sticker_mode(),
+		"cycling past the LAST crayon box lands on the stickers ('%s')"
+		% _palette.get_crayon_set_name())
+	_expect(modes == [true], "...announcing sticker mode exactly once (%s)" % [modes])
+	_expect(picks.size() == 1 and picks[0] != null and picks[0].sticker_id == ids[0],
+		"...with the set's first sticker in hand ('%s')"
+		% [picks[0].sticker_id if not picks.is_empty() and picks[0] != null else "<none>"])
+	# The contract's whole point: nothing about PAINTING moved.
+	_expect(_colors.size() == colors_before and _effects.size() == effects_before,
+		"...and NO colour and NO finish went out -- there is nothing to paint with")
+	_expect(is_equal_approx(_palette.get_selected_brush_size(), brush_before)
+			and _sizes.size() == 1,
+		"...and the brush never moved (%.0f px)" % _palette.get_selected_brush_size())
+
+	# --- the strip is stickers now --------------------------------------------
+	var cards := _palette.get_sticker_buttons()
+	_expect(cards.size() == starter.sticker_count(),
+		"the strip is now a row of %d sticker cards (%d)" % [starter.sticker_count(), cards.size()])
+	_expect(_palette.get_color_buttons().is_empty(),
+		"...and offers NO colour buttons -- a sticker card is not a crayon")
+	var arted := not cards.is_empty()
+	for card in cards:
+		arted = arted and card.texture != null
+	_expect(arted, "...every card carrying its own artwork")
+	_expect(not cards.is_empty() and cards[0].selected and not cards[-1].selected,
+		"...with the first one picked")
+	_expect(_smallest_target(_palette.get_strip_buttons()) >= PaletteChild.MIN_TOUCH_TARGET,
+		"...and no card under the %.0f px touch floor (%.1f)"
+		% [PaletteChild.MIN_TOUCH_TARGET, _smallest_target(_palette.get_strip_buttons())])
+	_expect(_palette.fits_without_scrolling() and not _scrollbars_visible(),
+		"...all of them visible at once, nothing scrolled (BL-33 holds for stickers too)")
+	_expect(not _palette.get_intensity_button().visible,
+		"the intensity swap is not offered -- a sticker has no light-to-dark ladder")
+
+	# --- picking one ----------------------------------------------------------
+	cards[2].pressed.emit()
+	_expect(picks.size() == 2 and picks[-1] != null and picks[-1].sticker_id == ids[2],
+		"pressing a card puts THAT sticker in hand ('%s')"
+		% [picks[-1].sticker_id if picks[-1] != null else "<none>"])
+	_expect(_palette.get_selected_sticker() != null
+			and _palette.get_selected_sticker().sticker_id == ids[2]
+			and cards[2].selected and not cards[0].selected,
+		"...and the strip says so")
+	_expect(_colors.size() == colors_before and _effects.size() == effects_before,
+		"...still with no colour and no finish in flight")
+
+	# --- the flash announces a sticker set like any other box ------------------
+	var flash := _palette.get_box_flash()
+	_expect(flash != null and flash.get_title().begins_with(STARTER_SET_NAME),
+		"the box-name banner shouted the SET's name ('%s')" % [flash.get_title() if flash else ""])
+
+	# --- and home again -------------------------------------------------------
+	_palette.next_crayon_set()
+	await _settle()
+	_expect(not _palette.is_sticker_mode() and _palette.get_stage_index() == 0,
+		"cycling past the last sticker set wraps home to crayon box 0 ('%s')"
+		% _palette.get_crayon_set_name())
+	_expect(modes == [true, false],
+		"...announcing the END of sticker mode exactly once (%s)" % [modes])
+	_expect(picks.size() == 3 and picks[-1] == null,
+		"...and reporting no sticker in hand any more")
+	_expect(_colors.size() == colors_before + 1 and _effects.size() == effects_before + 1
+			and _effects[-1] == BrushFinish.CLASSIC,
+		"...with the default box's finish and colour primed again, one each")
+	_expect(_palette.get_color_buttons().size() == CRAYON_COUNT
+			and _palette.get_sticker_buttons().is_empty(),
+		"...and the crayons back on the strip (%d)" % _palette.get_color_buttons().size())
+
+	# --- backwards onto them, which is the other end of the same ring ----------
+	_palette.prev_crayon_set()
+	await _settle()
+	_expect(_palette.is_sticker_mode()
+			and _palette.get_stage_index() == _palette.stage_count() - 1,
+		"cycling BACKWARDS off box 0 lands on the LAST sticker set ('%s')"
+		% _palette.get_crayon_set_name())
+	_palette.set_crayon_set(0)
+	await _settle()
+	_expect(not _palette.is_sticker_mode(), "...and back to the crayons")
 
 
 ## Finish ids as the names a human would read them by.
@@ -1145,11 +1292,45 @@ func _check_game_state() -> void:
 		% [GameState.SAVE_VERSION, written.get("version")])
 	_expect(not written.has("mode"),
 		"...with the vestigial key dropped, because nothing reads it any more")
+
+	# BL-36 pulled the same trick once more: a page entry gained a "stickers" key
+	# and SAVE_VERSION did not move, so a save from before BL-36 has to load with a
+	# bare page rather than fail or be migrated.
+	var pre_bl36 := (
+		'{"version": %d, "books": {"test-book-2026": {"slug": "t", "current_page_index": 0,'
+		+ ' "pages": [{"status": "in_progress", "locked": false}]}}}'
+	) % GameState.SAVE_VERSION
+	file = FileAccess.open(GameState.get_save_path(), FileAccess.WRITE)
+	if file != null:
+		file.store_string(pre_bl36)
+		file.close()
+	_expect(GameState.load_save(), "a save written BEFORE BL-36 (no \"stickers\" key) still loads")
+	_expect(GameState.get_page_status("test-book-2026", 0) == GameState.STATUS_IN_PROGRESS,
+		"...with its page status intact")
+	_expect(GameState.get_page_stickers("test-book-2026", 0).is_empty(),
+		"...and no stickers on the page, which is what a missing key means")
+	GameState.save_now()
+	var upgraded: Dictionary = JSON.parse_string(
+		FileAccess.get_file_as_string(GameState.get_save_path())
+	)
+	var page_entry: Dictionary = (
+		((upgraded["books"] as Dictionary)["test-book-2026"] as Dictionary)["pages"] as Array
+	)[0]
+	_expect(page_entry.has(GameState.PAGE_STICKERS_KEY)
+			and (page_entry[GameState.PAGE_STICKERS_KEY] as Array).is_empty(),
+		"...and the slot is upgraded in place the next time it is written (BL-10's trick)")
 	_delete_recursive(TEST_SAVE_ROOT)
 
 
 ## Leaves a deliberate, readable selection on screen for the human/screenshot pass.
 func _showcase() -> void:
+	# `--stickers` leaves the STRIP on a sticker set instead, for the eyeball pass
+	# and for a screenshot of BL-36 (the checks above have already put it back).
+	if "--stickers" in OS.get_cmdline_user_args() and _palette.sticker_set_count() > 0:
+		_palette.set_sticker_set(0)
+		_palette.select_sticker(2)
+		await _settle()
+		return
 	_palette.select_color(SHOWCASE_INDEX)
 	await _settle()
 	# BL-15: park a bubble over the showcase crayon so the screenshot shows the

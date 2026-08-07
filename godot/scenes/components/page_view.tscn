@@ -1,7 +1,8 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene load_steps=4 format=3]
 
 [ext_resource type="Script" path="res://scripts/components/page_view.gd" id="1_page_view"]
 [ext_resource type="Script" path="res://scripts/components/paint_canvas.gd" id="2_paint_canvas"]
+[ext_resource type="Script" path="res://scripts/components/sticker_layer.gd" id="3_sticker_layer"]
 
 [node name="PageView" type="Control"]
 anchors_preset = 15
@@ -39,6 +40,9 @@ centered = false
 
 [node name="LineArtSprite" type="Sprite2D" parent="PageRoot"]
 centered = false
+
+[node name="StickerLayer" type="Node2D" parent="PageRoot"]
+script = ExtResource("3_sticker_layer")
 
 [node name="DebugOverlay" type="Node2D" parent="PageRoot"]
 visible = false

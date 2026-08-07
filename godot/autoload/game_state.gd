@@ -85,6 +85,10 @@ signal page_paint_written(book: BookDef, page_index: int, path: String)
 ## already knows -- but the shelf will want it the day a locked page is badged.
 signal page_lock_changed(book: BookDef, page_index: int, locked: bool)
 
+## The stickers on a page were written (BL-36). Tests wait on this; the game
+## ignores it.
+signal page_stickers_changed(book: BookDef, page_index: int, count: int)
+
 ## The one palette the game paints with (BL-20 removed the Child/Adult split).
 ## The single place its path is written down.
 const PALETTE_PATH := "res://resources/palettes/child_palette.tres"
@@ -169,8 +173,18 @@ const STATUS_COMPLETE := "complete"
 ## move, because the change is additive in both directions: [method _to_page_entry]
 ## still accepts the old bare string (a save written before BL-10 loads with every
 ## page unlocked), and a missing [constant PAGE_LOCKED_KEY] means unlocked.
+##
+## [b]BL-36 widened it once more, the same way and for the same price[/b]: a page
+## also carries the STICKERS stuck on it. [constant SAVE_VERSION] did not move
+## again -- a save written before BL-36 has no such key and loads with a bare page,
+## and a build without BL-36 reads past a key it does not know (the reader has
+## tolerated unknown page keys since BL-20's vestigial [code]"mode"[/code]).
+## Stickers are not paint and are deliberately NOT in the paint PNG: they are a few
+## numbers per sticker, so they belong in the JSON where undo, a resolution change
+## and a re-published pack can all be survived exactly.
 const PAGE_STATUS_KEY := "status"
 const PAGE_LOCKED_KEY := "locked"
+const PAGE_STICKERS_KEY := "stickers"
 
 ## The book being colored, or null outside a book (title / book select).
 ## Assign through [method start_book]; read freely.
@@ -471,23 +485,44 @@ func get_paint_path_for_key(key: String, page_index: int) -> String:
 # string) is normalised on the way in rather than being checked for at every call
 # site.
 
-static func _new_page_entry(status: String = STATUS_UNTOUCHED, locked: bool = false) -> Dictionary:
-	return {PAGE_STATUS_KEY: status, PAGE_LOCKED_KEY: locked}
+static func _new_page_entry(
+	status: String = STATUS_UNTOUCHED, locked: bool = false, stickers: Array = []
+) -> Dictionary:
+	return {
+		PAGE_STATUS_KEY: status,
+		PAGE_LOCKED_KEY: locked,
+		PAGE_STICKERS_KEY: stickers,
+	}
 
 
 ## Whatever a save file put in a page slot, as the current object form. A bare
 ## string is a save written before BL-10 (status only, never locked); an unknown
-## status degrades to untouched rather than propagating garbage.
+## status degrades to untouched rather than propagating garbage; a missing sticker
+## list is a save written before BL-36 and means a page with no stickers on it.
 static func _to_page_entry(raw: Variant) -> Dictionary:
 	if typeof(raw) == TYPE_DICTIONARY:
 		var entry: Dictionary = raw
 		var status := String(entry.get(PAGE_STATUS_KEY, STATUS_UNTOUCHED))
 		return _new_page_entry(
 			status if _is_known_status(status) else STATUS_UNTOUCHED,
-			bool(entry.get(PAGE_LOCKED_KEY, false))
+			bool(entry.get(PAGE_LOCKED_KEY, false)),
+			_to_sticker_list(entry.get(PAGE_STICKERS_KEY, []))
 		)
 	var legacy := String(raw)
 	return _new_page_entry(legacy if _is_known_status(legacy) else STATUS_UNTOUCHED, false)
+
+
+## Whatever a save file put in a page's sticker slot, as a list of placement
+## dictionaries. Anything that is not one is dropped rather than propagated: a
+## corrupt entry costs one sticker, never the page and never the save.
+static func _to_sticker_list(raw: Variant) -> Array:
+	if typeof(raw) != TYPE_ARRAY:
+		return []
+	var out: Array = []
+	for entry: Variant in (raw as Array):
+		if typeof(entry) == TYPE_DICTIONARY:
+			out.append((entry as Dictionary).duplicate())
+	return out
 
 
 ## The MUTABLE entry at [param page_index], growing (and normalising) the array as
@@ -575,6 +610,38 @@ func set_page_locked(book: BookDef, page_index: int, locked: bool) -> bool:
 	page[PAGE_LOCKED_KEY] = locked
 	save_now()
 	page_lock_changed.emit(book, page_index, locked)
+	return true
+
+
+## The stickers stuck on one page (BL-36), oldest first -- a COPY, in
+## [StickerLayer]'s placement shape. Empty for a page with none, for a book that
+## has never been opened, and for every page of a save written before BL-36.
+func get_page_stickers(book_uid: String, page_index: int) -> Array:
+	if not _books.has(book_uid):
+		return []
+	var pages: Array = (_books[book_uid] as Dictionary)["pages"]
+	var stickers: Variant = _page_field(pages, page_index, PAGE_STICKERS_KEY, [])
+	return (stickers as Array).duplicate(true)
+
+
+## Records the stickers on ONE page and saves immediately.
+##
+## Written the moment it changes, exactly like [method set_page_locked] and for the
+## same reason: it is a few hundred bytes of JSON rather than a paint readback, and
+## a sticker a child stuck on has to survive a killed browser tab. Deliberately
+## INDEPENDENT of the page's status -- covering a page in stickers finishes nothing
+## (BL-36: stickers never count toward coverage).
+func set_page_stickers(book: BookDef, page_index: int, placements: Array) -> bool:
+	if book == null or page_index < 0 or not book.has_page(page_index):
+		return false
+	var entry := _entry_for(book, true)
+	var page := _page_slot(entry["pages"], page_index)
+	var stickers := _to_sticker_list(placements)
+	if page[PAGE_STICKERS_KEY] == stickers:
+		return true
+	page[PAGE_STICKERS_KEY] = stickers
+	save_now()
+	page_stickers_changed.emit(book, page_index, stickers.size())
 	return true
 
 
@@ -674,7 +741,11 @@ func erase_page_progress(book: BookDef, page_index: int) -> bool:
 	if path != "" and FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
 	var entry := _entry_for(book, true)
-	_page_slot(entry["pages"], page_index)[PAGE_STATUS_KEY] = STATUS_UNTOUCHED
+	var page := _page_slot(entry["pages"], page_index)
+	page[PAGE_STATUS_KEY] = STATUS_UNTOUCHED
+	# BL-36: Start over means blank paper, and a sticker is very much on the paper.
+	# (The coloring LOCK is still left alone -- it is not progress, BL-10.)
+	page[PAGE_STICKERS_KEY] = []
 	save_now()
 	page_progress_erased.emit(book, page_index)
 	return true

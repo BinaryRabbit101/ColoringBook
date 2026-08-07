@@ -72,6 +72,26 @@ The crayon row grows three features (designed 2026-08-07):
   crayons to the room it has (available length ÷ count, floored at the 64 px touch
   target) and wraps onto a second rank across the strip when the floor is reached. A
   crayon off the end of a scroller is a crayon that does not exist.
+- **The cycle ring runs on into STICKERS (BL-36).** Past the last crayon box the same
+  carousel reaches this device's **sticker sets**: the strip swaps its crayons for a row
+  of sticker cards, the name banner shouts the set exactly as it shouts "Neon!", and
+  cycling on past the last set wraps home to crayon box 0. One ring, one index, the same
+  two cycle bars — their pips count *stages*, not boxes.
+  - **A sticker is not paint, and that is the whole design.** It is placed on TOP of the
+    line art (never region-clipped, never counted toward coverage, never in the paint
+    layer or the saved PNG), at a slight random tilt, with a plop-and-settle animation
+    and a size that is a fraction of the page rather than a pixel count.
+  - **Sticker mode turns painting off through BL-10's one gate** (`painting_enabled`), so
+    the press comes back as `paint_blocked` and the screen places instead of painting —
+    no second input path. The **padlock outranks it**: a locked page takes neither paint
+    nor stickers.
+  - Placing one is an undoable **BL-17 entry on the same timeline as the strokes** (undo
+    takes back the last *thing*, whichever kind it was), and the per-page placement list
+    is an **additive key in the save** beside `status`/`locked` — a few numbers per
+    sticker, so it round-trips exactly at any page resolution.
+  - Sticker sets are **catalog content, not palette data** (BL-37): discovered from
+    installed packs under `user://dlc`, with the repo's "Starter Stickers" fixture set
+    excluded from every release export exactly like `resources/books/*` (BL-25).
 
 ## 2. Player flow
 
