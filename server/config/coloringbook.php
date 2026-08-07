@@ -175,6 +175,12 @@ return [
         // tint covers the display art.
         'preview_max_px' => (int) env('COLORINGBOOK_PREVIEW_MAX_PX', 768),
         'preview_tint_alpha' => (float) env('COLORINGBOOK_PREVIEW_TINT_ALPHA', 0.5),
+
+        // BL-37 sticker images. A sticker is drawn at ~17 % of a page's short
+        // side (BL-36), so the floor is "still crisp on a 2048 px page" and the
+        // ceiling is "not megabytes of texture for a shape a thumb covers".
+        'sticker_min_px' => (int) env('COLORINGBOOK_STICKER_MIN_PX', 64),
+        'sticker_max_px' => (int) env('COLORINGBOOK_STICKER_MAX_PX', 1024),
     ],
 
     /*

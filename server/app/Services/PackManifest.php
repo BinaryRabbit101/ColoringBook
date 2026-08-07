@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\PackPublishException;
+use App\Models\Pack;
 use Illuminate\Support\Str;
 use JsonException;
 
@@ -131,6 +132,25 @@ class PackManifest
     }
 
     /**
+     * What this pack CARRIES (BL-37, §7.2): `book` or `sticker_set`.
+     *
+     * **Absent means `book`**, and that is the whole back-compatibility story:
+     * every manifest written before BL-37 has no `kind` key, and every one of
+     * them is a colouring book. An unrecognised value is returned verbatim so
+     * `PackManifestValidator` can say what it was rather than silently treating
+     * a future pack as a book.
+     */
+    public function kind(): string
+    {
+        return $this->string('kind') ?? Pack::KIND_BOOK;
+    }
+
+    public function isStickerSet(): bool
+    {
+        return $this->kind() === Pack::KIND_STICKER_SET;
+    }
+
+    /**
      * @return array<int, array<string, mixed>>
      */
     public function books(): array
@@ -159,18 +179,53 @@ class PackManifest
      */
     public static function pagesOf(array $book): array
     {
-        $pages = $book['pages'] ?? null;
+        return self::listOf($book, 'pages');
+    }
 
-        if (! is_array($pages)) {
+    /**
+     * The sticker sets a `sticker_set` pack carries (BL-37) — the payload array
+     * `books[]` is for a book pack. Same shape of entry, same self-describing
+     * per-set JSON inside the install tree.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function stickerSets(): array
+    {
+        return self::listOf($this->data, 'sticker_sets');
+    }
+
+    /**
+     * @param  array<string, mixed>  $set
+     * @return array<int, array<string, mixed>>
+     */
+    public static function stickersOf(array $set): array
+    {
+        return self::listOf($set, 'stickers');
+    }
+
+    /**
+     * The `$key` member of `$from` as a list of objects, ignoring anything that
+     * is not one. One reader for `books[]`, `pages[]`, `sticker_sets[]` and
+     * `stickers[]`, because four copies of the same three lines is four places
+     * to disagree about what a malformed entry means.
+     *
+     * @param  array<string, mixed>  $from
+     * @return array<int, array<string, mixed>>
+     */
+    private static function listOf(array $from, string $key): array
+    {
+        $items = $from[$key] ?? null;
+
+        if (! is_array($items)) {
             return [];
         }
 
         $out = [];
 
-        foreach ($pages as $page) {
-            if (is_array($page)) {
-                /** @var array<string, mixed> $page */
-                $out[] = $page;
+        foreach ($items as $item) {
+            if (is_array($item)) {
+                /** @var array<string, mixed> $item */
+                $out[] = $item;
             }
         }
 
@@ -217,6 +272,10 @@ class PackManifest
         $data = $this->data;
 
         $data['manifest_version'] = (int) config('coloringbook.packs.manifest_version');
+        // Written out explicitly even when it is the default, so a published
+        // manifest always says what it carries and an installed client never has
+        // to know that an absent key means `book` (BL-37).
+        $data['kind'] = $this->kind();
         $data['pack_slug'] = $slug;
         $data['pack_version'] = $version;
         $data['min_client_version'] = $minClientVersion;

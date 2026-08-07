@@ -9,6 +9,7 @@ use App\Exceptions\PackPublishException;
 use App\Services\PackManifest;
 use App\Services\PackManifestValidator;
 use App\Services\PackValidation;
+use App\Services\StickerValidation;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -40,6 +41,7 @@ class SubmitPackVersion
     public function __construct(
         private readonly PackManifestValidator $structural,
         private readonly PackValidation $pixels,
+        private readonly StickerValidation $stickers,
         private readonly PublishPackDirectory $publisher,
     ) {}
 
@@ -72,7 +74,15 @@ class SubmitPackVersion
         $warnings = [];
 
         if ($errors === []) {
-            $result = $this->pixels->validate($manifest, $directory);
+            // BL-37: the second layer is kind-specific, because "the pixels
+            // agree with the JSON" is a question about a PAGE. A sticker has no
+            // regions and no ID map, so its pixel half is image checks only —
+            // which is the whole of §10.3's "no headless-Godot mapping step;
+            // validation is image checks, so the publish path is strictly
+            // simpler than a book's".
+            $result = $manifest->isStickerSet()
+                ? $this->stickers->validate($manifest, $directory)
+                : $this->pixels->validate($manifest, $directory);
             $errors = $result->errors;
             $warnings = $result->warnings;
         }

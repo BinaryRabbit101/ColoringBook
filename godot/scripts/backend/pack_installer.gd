@@ -66,6 +66,19 @@ extends RefCounted
 ## The delta is an OPTIMISATION, and an optimisation that can introduce a failure
 ## mode is not one. [constant KEY_MODE] on the result says which route ran.
 ##
+## [b]A pack is not necessarily a book[/b] (BL-37). Since sticker sets became
+## catalog content, an installed pack carries either [code]books/[/code] or
+## [code]stickers/[/code] and its manifest says which in [code]kind[/code]. This
+## class needed nothing for that and gained one accessor
+## ([method installed_kind]) — every step above is about BYTES: the manifest's
+## file map, the digests, the swap and the delta all work the same on any payload,
+## which is exactly what DLC_SERVER.md 7.2 predicted when it said delta updates
+## "never cared what the files are". The only rule worth writing down is the one
+## that was already true and is now load-bearing: [b]nothing in here reads the
+## payload[/b]. [BookDef] and [StickerSetDef] each scan the installed tree for
+## their own descriptor and ignore what they do not recognise, so a pack of a kind
+## this build has never heard of installs cleanly and is simply not offered.
+##
 ## Plain [RefCounted] -- it borrows an [ApiClient] and never touches the tree.
 
 ## Suffix a download in flight unpacks into.
@@ -98,6 +111,10 @@ const KEY_FETCHED_BYTES := "fetched_bytes"
 const KEY_FETCHED_PATHS := "fetched_paths"
 ## How many files a delta took from the previous install instead of the network.
 const KEY_COPIED_FILES := "copied_files"
+
+## Manifest content kinds (BL-37, server: [code]Pack::KINDS[/code]).
+const KIND_BOOK := "book"
+const KIND_STICKER_SET := "sticker_set"
 
 ## [constant KEY_MODE]: the whole published [code]pack.zip[/code].
 const MODE_ARCHIVE := "archive"
@@ -199,6 +216,16 @@ func installed_version(slug: String) -> int:
 ## [code]min_client_version[/code] an installed pack declares, or "".
 func installed_min_client_version(slug: String) -> String:
 	return String(installed_manifest(slug).get("min_client_version", ""))
+
+
+## What an installed pack CARRIES (BL-37): [constant KIND_BOOK] or
+## [constant KIND_STICKER_SET]. An absent key means books — every pack published
+## before BL-37 has no [code]kind[/code] and every one of them is a book — and an
+## unrecognised value comes back verbatim rather than being flattened, so a caller
+## can tell "a kind I do not know" from "a book".
+func installed_kind(slug: String) -> String:
+	var kind := String(installed_manifest(slug).get("kind", KIND_BOOK)).strip_edges()
+	return kind if kind != "" else KIND_BOOK
 
 
 ## Removes an installed pack. Used by dev harnesses and by an explicit

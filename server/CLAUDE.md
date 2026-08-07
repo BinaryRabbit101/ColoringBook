@@ -74,6 +74,7 @@ routes/api/sync.php      WP2 (progress) + WP4 (paint)
 routes/api/catalog.php   WP3 — packs, manifest, download, entitlements
 routes/api/admin.php     WP5 — assets, pack versions, preview, publish
                          WP14 — books/pages authoring, one-button publish
+                         BL-37 — sticker-set/sticker authoring, same publish
 ```
 
 Each file is owned by exactly one work package so parallel agents never edit
@@ -96,7 +97,8 @@ ULID in a `creating` hook and sets `getRouteKeyName()` to `ulid` — follow that
 shape for new models.
 
 `book_uid` is the exception: it is *authored* (e.g. `coyote-2026`), stable
-forever, never derived from a filename or a `res://` path (design §6.1).
+forever, never derived from a filename or a `res://` path (design §6.1). BL-37
+adds one more of the same kind, `set_uid`, for sticker sets.
 
 Resources (`App\Http\Resources\*`) are unwrapped — `JsonResource::withoutWrapping()`
 is set in `AppServiceProvider`, because §11's shapes are hand-written
@@ -948,6 +950,125 @@ no ID map yet).
   (The 16×16 page fixtures need `min_area` 4 and `dilate` 0 — the shipped
   defaults would drop 7×7 quadrants as specks. Per-page tuning is what the
   overrides are for.)
+
+## BL-37 — sticker packs: a second content kind
+
+Design §5 (the tables), §7.2 (the manifest's `kind` and the sticker layout), §10.4
+(authoring), §11 (the routes). Routes live beside WP14's in `routes/api/admin.php`
+and `routes/admin.php`.
+
+**The claim the whole entry rests on: a sticker pack is the same pack.** Same zip,
+same manifest, same `PublishPackDirectory`, same entitlements, same signed
+downloads, same delta updates. What is new is one column, one payload array and
+one validator.
+
+### `packs.kind`, and back-compat
+
+`book` (the default) or `sticker_set`. An **absent** `kind` in a manifest means
+books — every manifest written before BL-37 has none and every one of them is
+books — and the column defaults the same way, so no existing row, client or delta
+moved. `PackManifest::published()` writes it out explicitly, so a *published*
+manifest always says what it carries.
+
+The kind decides exactly two things and nothing else: which payload array
+`PackManifestValidator` requires, and which catalog tables `rebuildCatalog()`
+rebuilds. An unknown kind is an error, not a book.
+
+### The tables, and the same two-table split WP14 drew
+
+```
+sticker_sets      id, ulid, pack_id, set_uid (unique), title, cover_asset_id, sort_order
+stickers          id, sticker_set_id, sticker_index, sticker_id, title,
+                  image_asset_id, image_w, image_h
+                  UNIQUE(set, index)   UNIQUE(set, sticker_id)
+
+authored_sticker_sets  id, ulid, set_uid (unique), pack_id, title, blurb, sort_order
+authored_stickers      id, ulid, authored_sticker_set_id, sticker_index, sticker_id,
+                       title, image_asset_id, image_w, image_h,
+                       validation_errors json, validation_warnings json
+```
+
+- `sticker_sets`/`stickers` are a **projection of the newest release**, dropped and
+  rebuilt on every publish, exactly like `books`/`pages`. The `authored_*` pair is
+  the workspace.
+- `set_uid` is the sticker half of `book_uid` (§6.1): authored, globally unique,
+  stable forever, and named by every sticker placement in a child's save (BL-36).
+  Checked three ways on creation — `authored_sticker_sets`, `sticker_sets`, and
+  `packs.slug`, which is one namespace shared with books.
+- `sticker_id` is unique **within its set**. Two sets may both offer a `star`; a
+  saved placement names the pair.
+- There is no ID map, no regions JSON, no `region_count` and no `mapping_status`.
+
+### `StickerValidation` — and the absence of a pipeline
+
+`App\Services\StickerValidation` is `PackValidation`'s much smaller sibling and
+runs **inline on upload**, not in a queued job, because a sticker has no regions
+and therefore no pipeline to run. Per image: it decodes; it is between
+`coloringbook.admin.sticker_min_px` (64) and `sticker_max_px` (1024) on both
+sides; something is drawn (a fully transparent image is an *error*). "No
+transparent pixels at all" is a **warning** — a deliberately square sticker is
+legal, it will just paste a box over a child's drawing, and the operator is
+looking at a preview.
+
+`SubmitPackVersion` branches on the kind for its second layer: `PackValidation`
+for a book pack, `StickerValidation` for a sticker one. The structural layer
+(`PackManifestValidator`) is shared and runs first, unchanged.
+
+### Publish is still one code path
+
+`App\Actions\Authoring\PublishAuthoredStickerSet` refuses with the whole list, then
+writes the §7.2 sticker directory and hands it to `SubmitPackVersion` →
+`PublishPackDirectory` (draft) → `PublishPackVersion`. **No second publisher.**
+
+Two details worth knowing before touching it:
+
+- **Files are named after the stable `sticker_id`, never the index.** An index
+  moves when the set is reordered, and a delta would then re-fetch every file after
+  the one that moved.
+- **`stickers/<set_uid>/sticker_set.json` is synthesised** into the release, added
+  to the `files` map so it carries a digest — §7.2's self-describing tree, and
+  exactly what the client's `StickerSetDef.discover()` reads. It never opens the
+  manifest.
+
+### Deleting a set: the WP14 rule, with more teeth
+
+Never published → deleted outright. Published → the pack is **retired** and only
+the workspace goes. For a book that keeps a shelf intact; for a sticker set it also
+keeps stickers on pages that are already coloured, which would otherwise empty.
+
+### Testing
+
+`Tests\Concerns\AuthorsStickerSets` — `stickerUpload()`, `tinyStickerUpload()` (a
+sticker under the floor, for the refusal paths) and `authorStickerSet()`. There is
+**no `fakeMapping()` counterpart, and that absence is the point**: nothing in this
+path shells out, so the tests are real from the upload to the zip.
+
+- `tests/Fixtures/packs/sticker-sheet` — a third pack beside WP3's
+  `forest-friends` and WP5's `meadow-mates`: 64×64 discs on transparent
+  backgrounds, i.e. a shape *and* clear space around it, which is what
+  `StickerValidation` actually looks at. ~8 KB.
+- `tests/Feature/Api/AdminStickerSetAuthoringTest.php` — the flow through the
+  token door (19).
+- `tests/Feature/StickerPackDeliveryTest.php` — the *existing* machinery carrying
+  it: `PublishPackDirectory` imports the fixture, the shop shows the kind, a free
+  sticker pack auto-grants, the delta route serves one sticker, and a manifest with
+  no `kind` still publishes as a book (12).
+- `tests/Feature/Admin/StickerSetsTest.php` — the Inertia half (8).
+- `tests/Unit/StickerValidationTest.php` — each case asserts the right problem was
+  found *and* that nothing else was (7).
+
+`StickerSetsTest` pulls in `PaintsPages` for `useSessionGuard()` alone: it authors
+through the API and then publishes through the browser, and `auth:sanctum` rewrites
+the default guard for the rest of the process.
+
+### Admin UI
+
+`resources/js/pages/admin/{StickerSets,StickerSet}.vue`, plus a `Sticker` entry in
+`AppSidebar.vue`. There is deliberately **no per-sticker editor screen** the way a
+page has one: a sticker is an id and a picture, and the set screen shows every one
+of them at once, which is how a sticker sheet is actually reviewed. The grid puts a
+checkerboard behind each image so a sticker with no transparency reads as the
+mistake it is.
 
 ## WP8 — Dusk browser tests
 

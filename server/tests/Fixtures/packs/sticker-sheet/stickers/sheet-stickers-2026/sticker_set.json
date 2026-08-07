@@ -1,0 +1,26 @@
+{
+    "set_uid": "sheet-stickers-2026",
+    "title": "Sheet Stickers",
+    "sort_order": 20,
+    "cover": "stickers/sheet-stickers-2026/star.png",
+    "stickers": [
+        {
+            "sticker_index": 0,
+            "sticker_id": "star",
+            "title": "Star",
+            "image": "stickers/sheet-stickers-2026/star.png"
+        },
+        {
+            "sticker_index": 1,
+            "sticker_id": "heart",
+            "title": "Heart",
+            "image": "stickers/sheet-stickers-2026/heart.png"
+        },
+        {
+            "sticker_index": 2,
+            "sticker_id": "moon",
+            "title": "Moon",
+            "image": "stickers/sheet-stickers-2026/moon.png"
+        }
+    ]
+}

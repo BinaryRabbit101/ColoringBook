@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Link, usePage } from '@inertiajs/vue3';
-import { BookOpen, FolderGit2, Gift, LayoutGrid, Package } from '@lucide/vue';
+import { BookOpen, FolderGit2, Gift, LayoutGrid, Package, Sticker } from '@lucide/vue';
 import { computed } from 'vue';
 import AppLogo from '@/components/AppLogo.vue';
 import NavFooter from '@/components/NavFooter.vue';
@@ -37,6 +37,11 @@ const mainNavItems = computed<NavItem[]>(() => {
     if (page.props.auth?.user?.is_admin) {
         items.push(
             { title: 'Books', href: '/admin/books', icon: BookOpen },
+            {
+                title: 'Sticker sets',
+                href: '/admin/sticker-sets',
+                icon: Sticker,
+            },
             { title: 'Packs', href: '/admin/packs', icon: Package },
             { title: 'Entitlements', href: '/admin/entitlements', icon: Gift },
         );

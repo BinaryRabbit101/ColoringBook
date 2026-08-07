@@ -36,9 +36,11 @@ class Asset extends Model
 
     /**
      * The artifact roles a page (or a pack) is made of. `mask` is stored but
-     * never shipped, and is optional per page (BL-9 / §7.2).
+     * never shipped, and is optional per page (BL-9 / §7.2). `sticker` is
+     * BL-37's one addition: a sticker pack's payload is images and nothing else,
+     * so it needs one role and no derived artifacts at all.
      */
-    public const KINDS = ['display', 'mask', 'idmap', 'regions', 'cover'];
+    public const KINDS = ['display', 'mask', 'idmap', 'regions', 'cover', 'sticker'];
 
     /**
      * Where these bytes live on the `assets` disk, for a given digest.

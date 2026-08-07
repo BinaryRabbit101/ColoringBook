@@ -3,6 +3,8 @@
 namespace App\Services;
 
 use App\Models\Book;
+use App\Models\Pack;
+use App\Models\StickerSet;
 
 /**
  * Structural validation of a built pack directory (DLC_SERVER.md §7.2).
@@ -29,7 +31,17 @@ class PackManifestValidator
 
         $this->checkHeader($manifest, $errors);
         $files = $this->checkFileMap($manifest, $errors);
-        $this->checkBooks($manifest, $files, $errors);
+        $this->checkCover($manifest, $files, $errors);
+
+        // BL-37: the KIND decides which payload array has to be there. Nothing
+        // else about a pack changes with it — the header, the file map, the
+        // digests on disk and the delta route are identical for both.
+        if ($manifest->isStickerSet()) {
+            $this->checkStickerSets($manifest, $files, $errors);
+        } else {
+            $this->checkBooks($manifest, $files, $errors);
+        }
+
         $this->checkFilesOnDisk($files, $directory, $errors);
 
         return $errors;
@@ -66,6 +78,14 @@ class PackManifestValidator
 
         if ($declared !== null && $declared < 1) {
             $errors[] = 'pack_version must be a positive integer.';
+        }
+
+        if (! in_array($manifest->kind(), Pack::KINDS, true)) {
+            $errors[] = sprintf(
+                'kind "%s" is not content this server serves (%s).',
+                $manifest->kind(),
+                implode(', ', Pack::KINDS),
+            );
         }
     }
 
@@ -114,14 +134,128 @@ class PackManifestValidator
      * @param  array<string, array{bytes: int, sha256: string}>  $files
      * @param  array<int, string>  $errors
      */
-    private function checkBooks(PackManifest $manifest, array $files, array &$errors): void
+    private function checkCover(PackManifest $manifest, array $files, array &$errors): void
     {
         $cover = $manifest->cover();
 
         if ($cover !== null && ! array_key_exists($cover, $files)) {
             $errors[] = sprintf('cover "%s" is not listed in files.', $cover);
         }
+    }
 
+    /**
+     * A `sticker_set` pack (BL-37). Strictly simpler than a book's payload,
+     * because a sticker has no regions: an id, a title and one image that the
+     * file map actually lists. The pixel half is `StickerValidation`, which
+     * looks at the images the way §10.1's `PackValidation` looks at pages.
+     *
+     * @param  array<string, array{bytes: int, sha256: string}>  $files
+     * @param  array<int, string>  $errors
+     */
+    private function checkStickerSets(PackManifest $manifest, array $files, array &$errors): void
+    {
+        $sets = $manifest->stickerSets();
+
+        if ($sets === []) {
+            $errors[] = 'sticker_sets must be a non-empty array for a sticker_set pack.';
+
+            return;
+        }
+
+        $seenUids = [];
+
+        foreach ($sets as $index => $set) {
+            $uid = is_string($set['set_uid'] ?? null) ? trim($set['set_uid']) : '';
+            $label = $uid !== '' ? sprintf('sticker set "%s"', $uid) : sprintf('sticker_sets[%d]', $index);
+
+            if ($uid === '') {
+                $errors[] = sprintf(
+                    'sticker_sets[%d].set_uid is missing or empty — it is what a saved sticker placement names.',
+                    $index,
+                );
+            } elseif (preg_match('/^[a-z0-9][a-z0-9._-]{1,63}$/i', $uid) !== 1) {
+                $errors[] = sprintf('%s has a set_uid that is not a plain slug.', $label);
+            } elseif (in_array($uid, $seenUids, true)) {
+                $errors[] = sprintf('set_uid "%s" appears twice in this pack.', $uid);
+            } else {
+                $seenUids[] = $uid;
+
+                $clash = StickerSet::query()
+                    ->where('set_uid', $uid)
+                    ->whereHas('pack', fn ($query) => $query->where('slug', '!=', $manifest->slug()))
+                    ->exists();
+
+                if ($clash) {
+                    $errors[] = sprintf(
+                        'set_uid "%s" already belongs to a different pack — uids are never reused (§6.1).',
+                        $uid,
+                    );
+                }
+            }
+
+            if (! is_string($set['title'] ?? null) || trim((string) $set['title']) === '') {
+                $errors[] = sprintf('%s has no title.', $label);
+            }
+
+            $setCover = $set['cover'] ?? null;
+
+            if (is_string($setCover) && ! array_key_exists($setCover, $files)) {
+                $errors[] = sprintf('%s cover "%s" is not listed in files.', $label, $setCover);
+            }
+
+            $this->checkStickers($set, $label, $files, $errors);
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $set
+     * @param  array<string, array{bytes: int, sha256: string}>  $files
+     * @param  array<int, string>  $errors
+     */
+    private function checkStickers(array $set, string $label, array $files, array &$errors): void
+    {
+        $stickers = PackManifest::stickersOf($set);
+
+        if ($stickers === []) {
+            $errors[] = sprintf('%s has no stickers.', $label);
+
+            return;
+        }
+
+        $seenIds = [];
+
+        foreach ($stickers as $position => $sticker) {
+            $stickerLabel = sprintf('%s sticker %d', $label, $position);
+            $id = is_string($sticker['sticker_id'] ?? null) ? trim($sticker['sticker_id']) : '';
+
+            if ($id === '') {
+                $errors[] = sprintf('%s has no sticker_id.', $stickerLabel);
+            } elseif (preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/i', $id) !== 1) {
+                $errors[] = sprintf('%s has a sticker_id that is not a plain slug ("%s").', $stickerLabel, $id);
+            } elseif (in_array($id, $seenIds, true)) {
+                // Within the set only: two SETS may both offer a `star`, and a
+                // saved placement names the pair (§7.2).
+                $errors[] = sprintf('%s repeats sticker_id "%s".', $label, $id);
+            } else {
+                $seenIds[] = $id;
+            }
+
+            $image = $sticker['image'] ?? null;
+
+            if (! is_string($image) || $image === '') {
+                $errors[] = sprintf('%s has no image.', $stickerLabel);
+            } elseif (! array_key_exists($image, $files)) {
+                $errors[] = sprintf('%s image "%s" is not listed in files.', $stickerLabel, $image);
+            }
+        }
+    }
+
+    /**
+     * @param  array<string, array{bytes: int, sha256: string}>  $files
+     * @param  array<int, string>  $errors
+     */
+    private function checkBooks(PackManifest $manifest, array $files, array &$errors): void
+    {
         $books = $manifest->books();
 
         if ($books === []) {

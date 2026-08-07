@@ -24,6 +24,7 @@ use Illuminate\Support\Str;
  * @property int $id
  * @property string $ulid
  * @property string $slug
+ * @property string $kind
  * @property string $title
  * @property string|null $blurb
  * @property string|null $cover_path
@@ -37,13 +38,29 @@ use Illuminate\Support\Str;
  * @property CarbonImmutable|null $updated_at
  * @property-read Collection<int, PackVersion> $versions
  * @property-read Collection<int, Book> $books
+ * @property-read Collection<int, StickerSet> $stickerSets
  * @property-read Collection<int, Entitlement> $entitlements
  */
-#[Fillable(['slug', 'title', 'blurb', 'cover_path', 'status', 'is_free', 'sort_order'])]
+#[Fillable(['slug', 'kind', 'title', 'blurb', 'cover_path', 'status', 'is_free', 'sort_order'])]
 class Pack extends Model
 {
     /** @use HasFactory<PackFactory> */
     use HasFactory;
+
+    /**
+     * What the pack CARRIES (BL-37, §7.2). `book` is the default and the only
+     * thing that existed before BL-37, so an old manifest with no `kind` and
+     * every row written before the column existed both mean "colouring books".
+     *
+     * The kind decides which payload array the manifest has and which catalog
+     * rows a publish rebuilds — and nothing else. Entitlements, downloads,
+     * signed URLs and delta updates are identical for both, deliberately.
+     */
+    public const KIND_BOOK = 'book';
+
+    public const KIND_STICKER_SET = 'sticker_set';
+
+    public const KINDS = [self::KIND_BOOK, self::KIND_STICKER_SET];
 
     public const STATUS_DRAFT = 'draft';
 
@@ -57,6 +74,7 @@ class Pack extends Model
      * @var array<string, mixed>
      */
     protected $attributes = [
+        'kind' => self::KIND_BOOK,
         'status' => self::STATUS_DRAFT,
         'is_free' => false,
         'sort_order' => 0,
@@ -105,6 +123,19 @@ class Pack extends Model
     public function books(): HasMany
     {
         return $this->hasMany(Book::class)->orderBy('sort_order')->orderBy('id');
+    }
+
+    /**
+     * @return HasMany<StickerSet, $this>
+     */
+    public function stickerSets(): HasMany
+    {
+        return $this->hasMany(StickerSet::class)->orderBy('sort_order')->orderBy('id');
+    }
+
+    public function isStickerSet(): bool
+    {
+        return $this->kind === self::KIND_STICKER_SET;
     }
 
     /**

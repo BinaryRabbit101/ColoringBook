@@ -33,7 +33,7 @@ class PackCatalog
         /** @var Collection<int, Pack> $packs */
         $packs = Pack::query()
             ->listable()
-            ->with(['versions' => fn ($query) => $query->published(), 'books.pages'])
+            ->with(['versions' => fn ($query) => $query->published(), 'books.pages', 'stickerSets.stickers'])
             ->orderBy('sort_order')
             ->orderBy('title')
             ->get();

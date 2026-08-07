@@ -59,6 +59,9 @@ const COYOTE_UID := "coyote-2026"
 ## A books root that is not there, which is what a shipped build's PCK looks like
 ## since BL-25 excluded [code]resources/books/*[/code] from every export preset.
 const MISSING_BOOKS_ROOT := "res://resources/books_excluded_from_this_build"
+## ...and the same for the sticker fixtures (BL-37: `resources/stickers/*` is
+## excluded from every export preset exactly like `resources/books/*`).
+const MISSING_STICKERS_ROOT := "res://resources/stickers_excluded_from_this_build"
 
 ## Everything this run writes.
 const TEST_ROOT := "user://dlc_smoke"
@@ -78,6 +81,18 @@ const LATE_PACK_SLUG := "dlc-smoke-late"
 const LATE_BOOK_UID := "dlc-late-2026"
 ## A download in flight: WP10 unpacks into `<slug>.incoming/` and only then swaps.
 const INCOMING_PACK_SLUG := "dlc-smoke-pack.incoming"
+
+## BL-37: a sticker pack, and a sticker pack still downloading. Same install
+## tree, same ignored-suffix rule, a different descriptor inside.
+const STICKER_PACK_SLUG := "dlc-smoke-stickers"
+const STICKER_SET_UID := "dlc-smoke-stickers-2026"
+const STICKER_INCOMING_SLUG := "dlc-smoke-stickers.incoming"
+const STICKER_IDS: PackedStringArray = ["blob", "square", "dot"]
+const STICKER_COLORS: Array[Color] = [
+	Color(1.0, 0.803922, 0.223529),
+	Color(0.929412, 0.294118, 0.372549),
+	Color(0.396078, 0.658824, 0.929412),
+]
 
 ## Region of test_book page 1 the clip comparison locks, and a point in the region
 ## the stroke deliberately wanders into (the same pair paint_smoke uses).
@@ -143,6 +158,7 @@ func _run() -> void:
 	await _check_masked_runtime_page()
 	_check_save_migration()
 	_check_shared_uid()
+	_check_sticker_packs()
 
 	print("\n   worker decode covered %d main-thread frames; take() cost %.1f ms prefetched"
 		% [_worker_frames, _prefetched_take_ms]
@@ -210,7 +226,66 @@ func _seed_packs() -> void:
 	_write_pack(TEST_DLC_ROOT, INCOMING_PACK_SLUG, "dlc-incoming-2026", "Half A Book",
 		[_pack_page(test_page, 1, 0, "Not finished downloading")], [test_page], [1])
 
-	print("   seeded %s, %s and %s" % [PACK_SLUG, DUPE_PACK_SLUG, INCOMING_PACK_SLUG])
+	# BL-37: a STICKER pack. Same install tree, same ignored-suffix rule, a
+	# different descriptor — which is the whole claim the server half rests on.
+	_write_sticker_pack(TEST_DLC_ROOT, STICKER_PACK_SLUG, STICKER_SET_UID, "Pack Stickers")
+	_write_sticker_pack(
+		TEST_DLC_ROOT, STICKER_INCOMING_SLUG, "dlc-incoming-stickers-2026", "Half A Sheet"
+	)
+
+	print("   seeded %s, %s, %s, %s and %s"
+		% [PACK_SLUG, DUPE_PACK_SLUG, INCOMING_PACK_SLUG, STICKER_PACK_SLUG,
+			STICKER_INCOMING_SLUG])
+
+
+## One sticker pack: the §7.2 sticker layout, with the images generated here so
+## the harness needs no art of its own.
+##
+##   <pack_slug>/manifest.json                          kind "sticker_set"
+##   <pack_slug>/stickers/<set_uid>/sticker_set.json
+##   <pack_slug>/stickers/<set_uid>/<sticker_id>.png
+func _write_sticker_pack(
+	dlc_root: String, pack_slug: String, set_uid: String, title: String
+) -> void:
+	var pack_root := dlc_root.path_join(pack_slug)
+	var set_dir := pack_root.path_join(StickerSetDef.PACK_STICKERS_DIR).path_join(set_uid)
+	DirAccess.make_dir_recursive_absolute(set_dir)
+
+	var entries: Array = []
+	for i in STICKER_IDS.size():
+		var sticker_id := STICKER_IDS[i]
+		var image := Image.create(96, 96, false, Image.FORMAT_RGBA8)
+		image.fill(Color(0.0, 0.0, 0.0, 0.0))
+		# A blob with clear space around it: a sticker is a cut-out, and the shape
+		# is what the placement checks measure against.
+		for y in range(20, 76):
+			for x in range(20, 76):
+				image.set_pixel(x, y, STICKER_COLORS[i % STICKER_COLORS.size()])
+		image.save_png(set_dir.path_join("%s.png" % sticker_id))
+		entries.append({
+			"sticker_index": i,
+			"sticker_id": sticker_id,
+			"title": sticker_id.capitalize(),
+			"image": "%s/%s/%s.png" % [StickerSetDef.PACK_STICKERS_DIR, set_uid, sticker_id],
+		})
+
+	var set_json := {
+		"set_uid": set_uid,
+		"title": title,
+		"sort_order": 50,
+		"cover": String(entries[0]["image"]),
+		"stickers": entries,
+	}
+	_write_text(set_dir.path_join(StickerSetDef.SET_JSON_NAME), JSON.stringify(set_json, "\t"))
+	# Written for fidelity only: the client reads sticker_set.json, never this.
+	_write_text(pack_root.path_join("manifest.json"), JSON.stringify({
+		"manifest_version": 1,
+		"kind": "sticker_set",
+		"pack_slug": pack_slug,
+		"pack_version": 1,
+		"title": title,
+		"sticker_sets": [set_json],
+	}, "\t"))
 
 
 ## One [code]pages[][/code] entry, plus the file copies it needs, for a page built
@@ -737,6 +812,88 @@ func _check_shared_uid() -> void:
 		"...and the coyote the player already coloured is still the coyote they coloured")
 	_expect(BookDef.discover(MISSING_BOOKS_ROOT, "").is_empty(),
 		"nothing installed and nothing built in is an EMPTY shelf, not an error")
+
+
+# ================================= g: sticker packs install the same way (BL-37) ==
+# The claim BL-37's server half rests on: a sticker pack is the SAME pack. Same
+# install tree, same half-download rule, same de-dupe, same "hide, never delete"
+# — the only thing that differs is the descriptor inside, and each discovery
+# ignores what it does not recognise.
+
+func _check_sticker_packs() -> void:
+	print("\n-- check g: sticker packs (BL-37) --")
+
+	var fixtures := StickerSetDef.discover(StickerSetDef.SETS_ROOT, "")
+	_expect(fixtures.size() == 1,
+		"discover() with no DLC root is the res:// fixture scan (%d set(s))" % fixtures.size())
+
+	var installed := StickerSetDef.discover_runtime(TEST_DLC_ROOT)
+	_expect(installed.size() == 1,
+		"the seeded sticker pack is discovered, and the half-downloaded one is NOT (%d)"
+		% installed.size())
+	if installed.is_empty():
+		return
+	var set_def := installed[0]
+	_expect(set_def.set_uid == STICKER_SET_UID and set_def.is_runtime
+			and set_def.pack_slug == STICKER_PACK_SLUG,
+		"...as a runtime set from pack '%s' ('%s')" % [set_def.pack_slug, set_def.set_uid])
+	_expect(set_def.sticker_count() == STICKER_IDS.size(),
+		"...with all %d stickers (%d)" % [STICKER_IDS.size(), set_def.sticker_count()])
+	_expect(set_def.validate().is_empty(),
+		"...and it validates, images and all (%s)" % [set_def.validate()])
+	var resolved := set_def.find_sticker(STICKER_IDS[1])
+	_expect(resolved != null and resolved.is_runtime
+			and resolved.image_path.begins_with(TEST_DLC_ROOT),
+		"a saved placement resolves by id to a user:// image ('%s')"
+		% [resolved.image_path if resolved != null else "<none>"])
+	_expect(resolved != null and resolved.load_texture() != null,
+		"...which decodes at runtime, never through the importer")
+	_expect(set_def.find_sticker("nope") == null,
+		"...and an id the installed set no longer offers resolves to null, not to a crash")
+
+	# The books and the stickers are in the SAME dlc root and neither reads the
+	# other's tree: a book pack contributes no sticker sets and vice versa.
+	var books_here := BookDef.discover_runtime(TEST_DLC_ROOT)
+	var sticker_pack_books := 0
+	for book in books_here:
+		if book.pack_slug == STICKER_PACK_SLUG:
+			sticker_pack_books += 1
+	_expect(sticker_pack_books == 0,
+		"the shelf ignores a sticker pack entirely -- a pack it cannot read is not half a book")
+	var book_pack_sets := 0
+	for candidate in installed:
+		if candidate.pack_slug == PACK_SLUG:
+			book_pack_sets += 1
+	_expect(book_pack_sets == 0, "...and the strip ignores a book pack, symmetrically")
+
+	# The installer's one new accessor, over the manifests actually on disk.
+	var installer := PackInstaller.new(null, TEST_DLC_ROOT)
+	_expect(installer.installed_kind(STICKER_PACK_SLUG) == PackInstaller.KIND_STICKER_SET,
+		"the installer reads the pack's kind off its manifest ('%s')"
+		% installer.installed_kind(STICKER_PACK_SLUG))
+	_expect(installer.installed_kind(PACK_SLUG) == PackInstaller.KIND_BOOK,
+		"...and a manifest with no kind is a BOOK, which is every pack before BL-37")
+	_expect(installer.installed_slugs().has(STICKER_PACK_SLUG)
+			and not installer.installed_slugs().has(STICKER_INCOMING_SLUG),
+		"...and a sticker pack is an installed pack like any other (%s)"
+		% [installer.installed_slugs()])
+
+	# The release-shaped strip, the BL-25 rule one content kind over: a shipped
+	# build excludes resources/stickers/*, so every set comes from a pack.
+	var shipped_sets := StickerSetDef.discover(MISSING_STICKERS_ROOT, TEST_DLC_ROOT)
+	_expect(shipped_sets.size() == installed.size() and shipped_sets.size() > 0,
+		"with no fixture sets the strip is exactly the installed packs (%d)" % shipped_sets.size())
+	_expect(StickerSetDef.discover(MISSING_STICKERS_ROOT, "").is_empty(),
+		"nothing installed and nothing built in is an EMPTY ring, not an error")
+
+	# ...and the ring the palette actually builds, through the entitlement filter.
+	var visible := Backend.discover_visible_sticker_sets(StickerSetDef.SETS_ROOT, TEST_DLC_ROOT)
+	_expect(visible.size() == fixtures.size() + installed.size(),
+		"the palette's ring is the fixtures plus the installed packs (%d)" % visible.size())
+	var ordered := true
+	for i in range(1, visible.size()):
+		ordered = ordered and visible[i - 1].sort_order <= visible[i].sort_order
+	_expect(ordered, "...in authored sort_order, so the ring is stable between runs")
 
 
 # =================================================================== helpers ==

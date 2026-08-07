@@ -911,9 +911,18 @@ func select_sticker(index: int) -> void:
 ## discovers once per visit, when [method set_palette] builds the strip, because a
 ## pack cannot install itself while a page is open (DLC_SERVER.md §7.3).
 func reload_sticker_sets() -> void:
-	_sticker_sets = StickerSetDef.discover()
+	_sticker_sets = _discover_sticker_sets()
 	_sticker_index = clampi(_sticker_index, 0, maxi(_sticker_sets.size() - 1, 0))
 	_refresh_tools()
+
+
+## The sets this device may OFFER: everything installed, minus any whose pack the
+## server has positively revoked (BL-37). The shelf filters books the same way and
+## for the same reasons, so the two go through the same rule rather than two
+## copies of it; a build with the backend switched off, or with nothing cached,
+## gets everything, because unsure is never a reason to take content away.
+func _discover_sticker_sets() -> Array[StickerSetDef]:
+	return Backend.discover_visible_sticker_sets()
 
 
 ## The colours crayon stage [param index] would put on the strip. Only ever asked
@@ -978,7 +987,7 @@ func set_palette(def: PaletteDef) -> void:
 	_mode = MODE_CRAYONS
 	_sticker_index = 0
 	_sticker_pick = 0
-	_sticker_sets = StickerSetDef.discover()
+	_sticker_sets = _discover_sticker_sets()
 	_clear_row()
 	if _flash != null:
 		_flash.hide_now()

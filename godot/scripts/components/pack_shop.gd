@@ -52,6 +52,15 @@ const KEY_BYTES := "bytes"
 const KEY_LATEST_VERSION := "latest_version"
 const KEY_MIN_CLIENT_VERSION := "min_client_version"
 const KEY_PAGE_COUNT := "page_count"
+## What the pack CARRIES (BL-37): [constant KIND_BOOK] or
+## [constant KIND_STICKER_SET]. Absent means books, which is every pack published
+## before BL-37 and every manifest written before it.
+const KEY_KIND := "kind"
+const KEY_STICKER_COUNT := "sticker_count"
+
+## Pack kinds the shop knows how to describe.
+const KIND_BOOK := "book"
+const KIND_STICKER_SET := "sticker_set"
 
 ## Shown when the catalogue lists but nobody is signed in, and again if a Get is
 ## pressed in that state (BL-25). One string, so the shop says the same thing twice
@@ -297,7 +306,12 @@ class PackRow extends PanelContainer:
 		row.add_child(text)
 
 		_title = Label.new()
-		_title.text = String(_data.get(KEY_TITLE, _data.get(KEY_SLUG, "?")))
+		# BL-37: the kind reads in the title as well as in the detail line,
+		# because the title is the only part a scanning eye actually lands on.
+		_title.text = "%s%s" % [
+			String(_data.get(KEY_TITLE, _data.get(KEY_SLUG, "?"))),
+			"  ★" if is_sticker_set() else "",
+		]
 		_title.add_theme_font_size_override("font_size", 24)
 		_title.add_theme_color_override("font_color", Color(0.976471, 0.960784, 0.933333))
 		text.add_child(_title)
@@ -443,12 +457,31 @@ class PackRow extends PanelContainer:
 			return Color(0.929412, 0.352941, 0.278431)
 		return crayons[absi(get_slug().hash()) % crayons.size()]
 
-	## Blurb, page count and size, in the row's resting state.
+	## What KIND of pack this row is (BL-37). The server's word, verbatim; an
+	## absent key means books, because every pack published before BL-37 is one.
+	func get_kind() -> String:
+		var kind := String(_data.get(KEY_KIND, KIND_BOOK)).strip_edges()
+		return kind if kind != "" else KIND_BOOK
+
+	func is_sticker_set() -> bool:
+		return get_kind() == KIND_STICKER_SET
+
+	## Blurb, what is in it, and size, in the row's resting state.
+	##
+	## [b]The kind is on the card[/b] (BL-37): "8 stickers" and "12 pages" are
+	## different products, and a child pointing at one should get the one they
+	## pointed at.
 	func _describe() -> String:
 		var parts := PackedStringArray()
 		var blurb := String(_data.get(KEY_BLURB, "")).strip_edges()
 		if blurb != "":
 			parts.append(blurb)
+		if is_sticker_set():
+			var stickers := int(_data.get(KEY_STICKER_COUNT, 0))
+			parts.append(
+				"%d sticker%s" % [stickers, "" if stickers == 1 else "s"] if stickers > 0
+				else "Stickers"
+			)
 		var pages := int(_data.get(KEY_PAGE_COUNT, 0))
 		if pages > 0:
 			parts.append("%d page%s" % [pages, "" if pages == 1 else "s"])

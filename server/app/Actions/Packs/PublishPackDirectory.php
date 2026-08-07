@@ -8,6 +8,8 @@ use App\Models\Book;
 use App\Models\Pack;
 use App\Models\PackVersion;
 use App\Models\Page;
+use App\Models\Sticker;
+use App\Models\StickerSet;
 use App\Services\PackManifest;
 use App\Services\PackManifestValidator;
 use Illuminate\Contracts\Filesystem\Filesystem;
@@ -169,6 +171,7 @@ class PublishPackDirectory
         $pack = Pack::query()->firstOrNew(['slug' => $slug]);
 
         $pack->title = $manifest->title();
+        $pack->kind = $manifest->kind();
         $pack->blurb = $manifest->blurb();
         $pack->cover_path = $manifest->cover();
 
@@ -227,6 +230,26 @@ class PublishPackDirectory
                     }
 
                     $roles[$path.':'.$role] = [$path, $role];
+                }
+            }
+        }
+
+        // BL-37: a sticker pack's payload is images and nothing else. One role,
+        // `sticker`, in the same content-addressed store — a sticker that also
+        // serves as the set's cover is one blob wearing two `assets.kind` hats,
+        // exactly like page one of a one-book pack.
+        foreach ($manifest->stickerSets() as $set) {
+            $setCover = $set['cover'] ?? null;
+
+            if (is_string($setCover) && $setCover !== '') {
+                $roles[$setCover.':cover'] = [$setCover, 'cover'];
+            }
+
+            foreach (PackManifest::stickersOf($set) as $sticker) {
+                $path = $sticker['image'] ?? null;
+
+                if (is_string($path) && $path !== '') {
+                    $roles[$path.':sticker'] = [$path, 'sticker'];
                 }
             }
         }
@@ -299,6 +322,19 @@ class PublishPackDirectory
             Book::query()->whereIn('id', $bookIds)->delete();
         }
 
+        /** @var array<int, int> $setIds */
+        $setIds = $pack->stickerSets()->pluck('id')->all();
+
+        if ($setIds !== []) {
+            Sticker::query()->whereIn('sticker_set_id', $setIds)->delete();
+            StickerSet::query()->whereIn('id', $setIds)->delete();
+        }
+
+        // Both payloads are rebuilt unconditionally, so a pack that changed kind
+        // between releases (a mistake, but a possible one) cannot leave the other
+        // kind's rows behind claiming a uid.
+        $this->rebuildStickerSets($pack, $manifest, $assets);
+
         foreach ($manifest->books() as $order => $bookData) {
             $bookCover = $bookData['cover'] ?? null;
 
@@ -338,8 +374,53 @@ class PublishPackDirectory
     }
 
     /**
-     * `books/<book_uid>/book.json` for every book that didn't ship one, added
-     * to the file map so it is covered by a digest like everything else.
+     * The sticker half of the catalog rebuild (BL-37).
+     *
+     * @param  array<string, Asset>  $assets
+     */
+    private function rebuildStickerSets(Pack $pack, PackManifest $manifest, array $assets): void
+    {
+        foreach ($manifest->stickerSets() as $order => $setData) {
+            $setCover = $setData['cover'] ?? null;
+            $sortOrder = $setData['sort_order'] ?? null;
+
+            /** @var StickerSet $set */
+            $set = $pack->stickerSets()->create([
+                'set_uid' => trim((string) $setData['set_uid']),
+                'title' => trim((string) $setData['title']),
+                'cover_asset_id' => is_string($setCover)
+                    ? ($assets[$setCover.':cover']->id ?? null)
+                    : null,
+                'sort_order' => is_int($sortOrder) ? $sortOrder : $order,
+            ]);
+
+            foreach (PackManifest::stickersOf($setData) as $position => $stickerData) {
+                $asset = $assets[$stickerData['image'].':sticker'];
+                $title = $stickerData['title'] ?? null;
+
+                $set->stickers()->create([
+                    'sticker_index' => is_int($stickerData['sticker_index'] ?? null)
+                        ? $stickerData['sticker_index']
+                        : $position,
+                    'sticker_id' => trim((string) $stickerData['sticker_id']),
+                    'title' => is_string($title) ? $title : null,
+                    'image_asset_id' => $asset->id,
+                    'image_w' => $asset->width,
+                    'image_h' => $asset->height,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * `books/<book_uid>/book.json` for every book that didn't ship one, and
+     * `stickers/<set_uid>/sticker_set.json` for every sticker set (BL-37) —
+     * added to the file map so each is covered by a digest like everything else.
+     *
+     * This is §7.2's "the installed tree is self-describing" promise, and it is
+     * exactly what the client's `StickerSetDef.discover()` reads: it scans
+     * `user://dlc/<pack>/stickers/<set>/sticker_set.json` and never opens the
+     * manifest, the same way `BookDef` reads only `book.json`.
      *
      * @param  array<string, array{bytes: int, sha256: string}>  $files
      * @return array<string, string> path → literal contents
@@ -350,21 +431,35 @@ class PublishPackDirectory
 
         foreach ($manifest->books() as $book) {
             $path = 'books/'.trim((string) $book['book_uid']).'/book.json';
+            $this->synthesise($path, $book, $files, $synthesised);
+        }
 
-            if (array_key_exists($path, $files)) {
-                continue;
-            }
-
-            $contents = (string) json_encode(
-                $book,
-                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
-            );
-
-            $synthesised[$path] = $contents;
-            $files[$path] = ['bytes' => strlen($contents), 'sha256' => hash('sha256', $contents)];
+        foreach ($manifest->stickerSets() as $set) {
+            $path = 'stickers/'.trim((string) $set['set_uid']).'/sticker_set.json';
+            $this->synthesise($path, $set, $files, $synthesised);
         }
 
         return $synthesised;
+    }
+
+    /**
+     * @param  array<string, mixed>  $entry
+     * @param  array<string, array{bytes: int, sha256: string}>  $files
+     * @param  array<string, string>  $synthesised
+     */
+    private function synthesise(string $path, array $entry, array &$files, array &$synthesised): void
+    {
+        if (array_key_exists($path, $files)) {
+            return;
+        }
+
+        $contents = (string) json_encode(
+            $entry,
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
+        );
+
+        $synthesised[$path] = $contents;
+        $files[$path] = ['bytes' => strlen($contents), 'sha256' => hash('sha256', $contents)];
     }
 
     /**

@@ -5,6 +5,8 @@ use App\Http\Controllers\Api\V1\Admin\BookController;
 use App\Http\Controllers\Api\V1\Admin\BookPageController;
 use App\Http\Controllers\Api\V1\Admin\EntitlementController;
 use App\Http\Controllers\Api\V1\Admin\PackController;
+use App\Http\Controllers\Api\V1\Admin\StickerController;
+use App\Http\Controllers\Api\V1\Admin\StickerSetController;
 use App\Http\Middleware\EnsureAdmin;
 use Illuminate\Support\Facades\Route;
 
@@ -125,6 +127,39 @@ Route::middleware(['auth:sanctum', 'abilities:'.config('coloringbook.admin.abili
                         Route::delete('/', [BookPageController::class, 'destroy'])->name('destroy');
                         Route::get('status', [BookPageController::class, 'status'])->name('status');
                         Route::get('preview', [BookPageController::class, 'preview'])->name('preview');
+                    });
+            });
+
+        // ------------------------------------------ sticker sets (BL-37) ---
+        // The same authoring surface, one content kind over. `{set}` is a
+        // `set_uid` — authored, slug-shaped, stable forever, and named by every
+        // sticker a child has already stuck on a page (BL-36's save shape).
+        // There is deliberately no `status` route and no polling: a sticker has
+        // no regions, so there is no mapping job to wait for.
+        Route::get('sticker-sets', [StickerSetController::class, 'index'])->name('sticker-sets.index');
+        Route::post('sticker-sets', [StickerSetController::class, 'store'])->name('sticker-sets.store');
+
+        Route::prefix('sticker-sets/{set}')
+            ->name('sticker-sets.')
+            ->where(['set' => '[a-z0-9][a-z0-9._-]*'])
+            ->group(function (): void {
+                Route::get('/', [StickerSetController::class, 'show'])->name('show');
+                Route::patch('/', [StickerSetController::class, 'update'])->name('update');
+                Route::delete('/', [StickerSetController::class, 'destroy'])->name('destroy');
+
+                Route::post('publish', [StickerSetController::class, 'publish'])->name('publish');
+
+                Route::get('stickers', [StickerController::class, 'index'])->name('stickers.index');
+                Route::post('stickers', [StickerController::class, 'store'])->name('stickers.store');
+
+                Route::prefix('stickers/{index}')
+                    ->name('stickers.')
+                    ->whereNumber('index')
+                    ->group(function (): void {
+                        Route::get('/', [StickerController::class, 'show'])->name('show');
+                        Route::patch('/', [StickerController::class, 'update'])->name('update');
+                        Route::delete('/', [StickerController::class, 'destroy'])->name('destroy');
+                        Route::get('image', [StickerController::class, 'image'])->name('image');
                     });
             });
     });

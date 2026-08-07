@@ -4,6 +4,8 @@ use App\Http\Controllers\Admin\BookController;
 use App\Http\Controllers\Admin\BookPageController;
 use App\Http\Controllers\Admin\EntitlementController;
 use App\Http\Controllers\Admin\PackController;
+use App\Http\Controllers\Admin\StickerController;
+use App\Http\Controllers\Admin\StickerSetController;
 use App\Http\Middleware\EnsureAdmin;
 use Illuminate\Support\Facades\Route;
 
@@ -83,6 +85,38 @@ Route::middleware(['auth', EnsureAdmin::class])
                         Route::delete('/', [BookPageController::class, 'destroy'])->name('destroy');
                         Route::get('status', [BookPageController::class, 'status'])->name('status');
                         Route::get('preview', [BookPageController::class, 'preview'])->name('preview');
+                    });
+            });
+
+        /*
+        | Sticker sets (BL-37). The same authoring surface one content kind
+        | over, mirroring the token door route for route. There is no per-sticker
+        | editor screen: a sticker is an id and a picture, and the set screen
+        | shows every one of them at once, which is how a sticker sheet is
+        | actually reviewed.
+        */
+        Route::get('sticker-sets', [StickerSetController::class, 'index'])->name('sticker-sets.index');
+        Route::post('sticker-sets', [StickerSetController::class, 'store'])->name('sticker-sets.store');
+
+        Route::prefix('sticker-sets/{set}')
+            ->name('sticker-sets.')
+            ->where(['set' => '[a-z0-9][a-z0-9._-]*'])
+            ->group(function (): void {
+                Route::get('/', [StickerSetController::class, 'show'])->name('show');
+                Route::patch('/', [StickerSetController::class, 'update'])->name('update');
+                Route::delete('/', [StickerSetController::class, 'destroy'])->name('destroy');
+
+                Route::post('publish', [StickerSetController::class, 'publish'])->name('publish');
+
+                Route::post('stickers', [StickerController::class, 'store'])->name('stickers.store');
+
+                Route::prefix('stickers/{index}')
+                    ->name('stickers.')
+                    ->whereNumber('index')
+                    ->group(function (): void {
+                        Route::patch('/', [StickerController::class, 'update'])->name('update');
+                        Route::delete('/', [StickerController::class, 'destroy'])->name('destroy');
+                        Route::get('image', [StickerController::class, 'image'])->name('image');
                     });
             });
     });

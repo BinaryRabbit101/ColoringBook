@@ -51,7 +51,7 @@ class PackController extends Controller
         $user = $this->user($request);
 
         $pack = $this->catalog->findListable($slug);
-        $pack->load('books.pages');
+        $pack->load(['books.pages', 'stickerSets.stickers']);
 
         return response()->json([
             'pack' => new PackResource(

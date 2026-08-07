@@ -5,6 +5,7 @@ namespace App\Http\Resources;
 use App\Models\Book;
 use App\Models\Pack;
 use App\Models\PackVersion;
+use App\Models\StickerSet;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -40,6 +41,10 @@ class PackResource extends JsonResource
     {
         $payload = [
             'slug' => $this->slug,
+            // BL-37: what this pack CARRIES — `book` or `sticker_set`. The shop
+            // shows it on the card, because "8 stickers" and "3 books" are
+            // different products and a child pointing at one should get it.
+            'kind' => $this->kind,
             'title' => $this->title,
             'blurb' => $this->blurb,
             // Pack-relative, like every other path in a manifest: entitled
@@ -60,6 +65,8 @@ class PackResource extends JsonResource
             'published_at' => $this->version?->published_at?->toIso8601String(),
             'book_count' => $this->books->count(),
             'page_count' => $this->books->sum(fn (Book $book): int => $book->pages->count()),
+            'sticker_set_count' => $this->stickerSets->count(),
+            'sticker_count' => $this->stickerSets->sum(fn (StickerSet $set): int => $set->stickers->count()),
         ];
 
         if ($this->detailed) {
@@ -67,6 +74,12 @@ class PackResource extends JsonResource
                 'book_uid' => $book->book_uid,
                 'title' => $book->title,
                 'page_count' => $book->pages->count(),
+            ])->all();
+
+            $payload['sticker_sets'] = $this->stickerSets->map(fn (StickerSet $set): array => [
+                'set_uid' => $set->set_uid,
+                'title' => $set->title,
+                'sticker_count' => $set->stickers->count(),
             ])->all();
         }
 

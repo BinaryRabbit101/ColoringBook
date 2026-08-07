@@ -180,7 +180,8 @@ personal_access_tokens   (Sanctum's own table; token→device via tokenable + na
 ### Catalog & content
 
 ```
-packs                 id, ulid, slug (unique), title, blurb, cover_path,
+packs                 id, ulid, slug (unique), kind ('book'|'sticker_set'),
+                      title, blurb, cover_path,
                       status ('draft'|'published'|'retired'), is_free,
                       sku_google, sku_apple, sku_stripe, sort_order, timestamps
 pack_versions         id, pack_id →packs, version (int, monotonic per pack),
@@ -194,9 +195,28 @@ pages                 id, book_id →books, page_index, title,
                       idmap_asset_id    →assets
                       regions_asset_id  →assets
                       image_w, image_h, region_count, timestamps
-assets                id, ulid, kind ('display'|'mask'|'idmap'|'regions'|'cover'),
+sticker_sets          id, ulid, pack_id →packs, set_uid (unique, stable forever),
+                      title, cover_asset_id →assets, sort_order, timestamps
+stickers              id, sticker_set_id →sticker_sets, sticker_index,
+                      sticker_id, title, image_asset_id →assets,
+                      image_w, image_h, timestamps
+                      UNIQUE(sticker_set_id, sticker_index)
+                      UNIQUE(sticker_set_id, sticker_id)
+assets                id, ulid, kind ('display'|'mask'|'idmap'|'regions'|'cover'|'sticker'),
                       storage_path, bytes, sha256, mime, width, height, timestamps
 ```
+
+`packs.kind` (BL-37) says which of the two payload tables a release rebuilds: a `book`
+pack's `books`/`pages`, or a `sticker_set` pack's `sticker_sets`/`stickers`. Both are
+projections of the newest published release and are dropped and recreated on every
+publish, so neither holds draft state (see §10.3's `authored_*` tables and their BL-37
+twins, `authored_sticker_sets` / `authored_stickers`).
+
+`set_uid` is the sticker half of `book_uid`: authored once, globally unique, stable
+forever, and named by every sticker placement in a child's save (BL-36). `sticker_id` is
+unique **within** its set — a placement names the pair — and there is deliberately no ID
+map, regions JSON or `region_count` here: a sticker has no regions, so §10.1's mapping
+pipeline does not apply to it and its publish gate is image validation only.
 
 `book_uid` is the load-bearing identifier: authored once (e.g. `coyote-2026`), never reused,
 never derived from a filename or a `res://` path. Built-in books get one too (§6.1).
@@ -395,11 +415,43 @@ print-size original (`assets.kind = 'mask'`) so a pack can be regenerated. The m
 when no mask is supplied the display image itself is the mapping-pipeline source and no
 mask file appears in the pack.
 
+**A pack carries ONE KIND of content** (BL-37, 2026-08-07). Until then every pack was
+books and the manifest said so by having a `books[]` array; sticker sets are catalog
+content delivered by the exact same machinery, so the one thing that had to become
+explicit is which payload the manifest is carrying:
+
+```
+pack.zip                                   manifest kind: "sticker_set"
+  manifest.json
+  stickers/starter-stickers-2026/sticker_set.json
+  stickers/starter-stickers-2026/star.png
+  stickers/starter-stickers-2026/heart.png
+  ...
+```
+
+- `kind` is `book` or `sticker_set`. **Absent means `book`** — every manifest written
+  before BL-37 has no such key and every one of them is books — and `packs.kind` defaults
+  the same way, so nothing about an existing pack, an installed client or a delta moved.
+- Sticker files are named after the sticker's **stable `sticker_id`**, never its index: an
+  index moves when a set is reordered, and a delta update would then re-download every
+  file after the one that moved.
+- `sticker_set.json` per set is the same shape as one entry of the manifest's
+  `sticker_sets[]` array — exactly what `book.json` is for a book — so the installed tree
+  is self-describing and `StickerSetDef.discover()` never opens the manifest.
+- `set_uid` is load-bearing the way `book_uid` is (§6.1): a saved sticker placement in a
+  child's save names `(set_uid, sticker_id)`, so both are authored once and never reused.
+  `sticker_id` is unique **within its set**, not globally — two sets may both offer a
+  `star`.
+- **Delta updates (§7.4, BL-26) are untouched.** They diff the manifest's per-file sha256
+  map and have never cared what the files are; a sticker pack updates through the same
+  code path, verbatim.
+
 `manifest.json`:
 
 ```json
 {
   "manifest_version": 1,
+  "kind": "book",
   "pack_slug": "forest-friends",
   "pack_version": 3,
   "title": "Forest Friends",
@@ -704,6 +756,35 @@ hand-tuned pages), but a book can now be built end-to-end in the browser.
   sees the version bump through the existing entitlement/update check and downloads
   the delta. Edits after publishing accumulate as draft state until the next press.
 
+### 10.4 Web authoring — sticker sets (2026-08-07, BL-37)
+
+The same authoring surface, one content kind over — and **strictly simpler**, which is the
+whole point of the entry:
+
+- **Sets.** The operator creates and deletes sticker sets in the browser. A set gets its
+  own **one-set pack** (`packs.slug` = the set's uid, `packs.kind = 'sticker_set'`,
+  `is_free` chosen at creation), for the reason a web-authored book gets a one-book pack:
+  packs stay the delivery and entitlement unit and the game client's download path did not
+  move an inch. Deleting a never-published set removes it outright; deleting a published
+  one **retires** its pack (§7.3) — which matters more here than for books, because the
+  stickers a child has already stuck on a page name that set and would otherwise vanish
+  from drawings that are already finished.
+- **Stickers.** Per set: add, remove, reorder, retitle, replace the image. Each sticker is
+  a stable `sticker_id` and one PNG. Uploads are content-addressed `assets` rows
+  (`kind = 'sticker'`), the same store §10.2 uses.
+- **There is no mapping step.** A sticker has no regions, so there is no headless Godot,
+  no queue, no `mapping_status` and nothing to poll: `StickerValidation` reads the image
+  **inline on upload** and stores the verdict on the row. It checks that the file decodes,
+  that it is between `admin.sticker_min_px` and `admin.sticker_max_px` on both sides, and
+  that something is actually drawn; "no transparent pixels at all" is a *warning*, because
+  a deliberately square sticker is legal but will paste a box over a child's colouring.
+- **Publish** is the same one button. It refuses while the set is empty or any sticker is
+  failing — with the whole list, in the operator's language — then builds the §7.2 sticker
+  directory and hands it to `SubmitPackVersion` → `PublishPackDirectory` →
+  `PublishPackVersion`. There is still **no second publisher**.
+- `sticker_id` stops being editable the moment a version exists, for the same reason
+  `book_uid` never was.
+
 Operational note: this puts a headless Godot binary on the mini-pc after all. §10.1's
 cost arguments stand but are now paid on purpose: pin the binary path and version in
 `config/coloringbook.php` (`godot_binary`), give the queue worker a real memory limit
@@ -777,6 +858,28 @@ Web authoring (§10.3, BL-24) adds book/page CRUD alongside the pack routes:
 | `PATCH`/`DELETE` | `/admin/books/{book_uid}/pages/{index}` | title, reorder, replace detail/mask / remove |
 | `GET` | `/admin/books/{book_uid}/pages/{index}/status` | mapping-job state, validation verdict, preview URL |
 | `POST` | `/admin/books/{book_uid}/publish` | build + validate + publish a new pack version (§10.3) |
+
+Sticker-set authoring (§10.4, BL-37) mirrors it route for route, minus the mapping half:
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET`/`POST` | `/admin/sticker-sets` | list / create a set `{set_uid, title, is_free, sort_order}` — creates its one-set draft pack |
+| `PATCH`/`DELETE` | `/admin/sticker-sets/{set_uid}` | retitle, re-sort / delete (retires the pack once published) |
+| `GET`/`POST` | `/admin/sticker-sets/{set_uid}/stickers` | list / add a sticker (multipart image, or an asset ulid) |
+| `PATCH`/`DELETE` | `/admin/sticker-sets/{set_uid}/stickers/{index}` | title, reorder, replace the image / remove |
+| `GET` | `/admin/sticker-sets/{set_uid}/stickers/{index}/image` | the sticker's own PNG (the editor's preview) |
+| `POST` | `/admin/sticker-sets/{set_uid}/publish` | build + validate + publish a new pack version |
+
+There is deliberately **no `status` route**: validation runs inline on upload, so there is
+nothing to poll. Codes this adds: `STICKER_SET_NOT_PUBLISHABLE` (422, `details.errors`
+carrying every reason), `STICKER_ID_FROZEN` (422, renaming a sticker in a published set),
+`STICKER_IMAGE_NOT_FOUND` (404).
+
+`GET /packs` and `GET /packs/{slug}` gained `kind`, `sticker_set_count` and
+`sticker_count` beside `book_count`/`page_count`, so the shop can put the kind on the card
+(BL-37). Everything else about catalog, entitlement and delivery is byte-for-byte what it
+was — a free sticker pack rides the same free-entitlement path, and a delta update diffs
+it with the same code.
 
 Error shape everywhere: `{"error": {"code": "ENTITLEMENT_REQUIRED", "message": "..."}}` with a
 stable machine-readable `code` — the client branches on `code`, never on prose.

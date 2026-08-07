@@ -1,0 +1,57 @@
+{
+    "manifest_version": 1,
+    "kind": "sticker_set",
+    "pack_slug": "sticker-sheet",
+    "pack_version": 1,
+    "title": "Sticker Sheet",
+    "blurb": "Three little stickers.",
+    "cover": "stickers/sheet-stickers-2026/star.png",
+    "min_client_version": "0.1.0",
+    "is_free": true,
+    "sticker_sets": [
+        {
+            "set_uid": "sheet-stickers-2026",
+            "title": "Sheet Stickers",
+            "sort_order": 20,
+            "cover": "stickers/sheet-stickers-2026/star.png",
+            "stickers": [
+                {
+                    "sticker_index": 0,
+                    "sticker_id": "star",
+                    "title": "Star",
+                    "image": "stickers/sheet-stickers-2026/star.png"
+                },
+                {
+                    "sticker_index": 1,
+                    "sticker_id": "heart",
+                    "title": "Heart",
+                    "image": "stickers/sheet-stickers-2026/heart.png"
+                },
+                {
+                    "sticker_index": 2,
+                    "sticker_id": "moon",
+                    "title": "Moon",
+                    "image": "stickers/sheet-stickers-2026/moon.png"
+                }
+            ]
+        }
+    ],
+    "files": {
+        "stickers/sheet-stickers-2026/heart.png": {
+            "bytes": 346,
+            "sha256": "5942d9b62ce5788f46bc8abba5eee06000bc36906a999b6baf832d1d16e63b67"
+        },
+        "stickers/sheet-stickers-2026/moon.png": {
+            "bytes": 344,
+            "sha256": "8c8505e1911b2227a461674cfdcbb316fbf18122cc7d25984298cab5d3b6995b"
+        },
+        "stickers/sheet-stickers-2026/star.png": {
+            "bytes": 342,
+            "sha256": "e6986647aaac0f09705726e17ca813fdf25cd21502611bd97c8039a376291e72"
+        },
+        "stickers/sheet-stickers-2026/sticker_set.json": {
+            "bytes": 706,
+            "sha256": "cc4174c326f796e3798b8a232ab0e30206baa652fe693797e7e701f2ad23e603"
+        }
+    }
+}

@@ -479,6 +479,53 @@ func discover_visible_books(root: String = BookDef.BOOKS_ROOT, dlc_root: String 
 	return filter_books(BookDef.discover(root, installed_root))
 
 
+# ------------------------------------------------------- sticker sets (BL-37) --
+# The same filter, one content kind over. A sticker set from a pack the server has
+# POSITIVELY revoked stops being offered on the strip; every other reason to be
+# unsure -- signed out, offline, token expired, empty cache -- leaves it there,
+# exactly as it leaves a book on the shelf.
+#
+# Hiding, never deleting (DLC_SERVER.md 7.3), matters more here than it does for
+# books: the stickers a child already stuck on a page name the set, and deleting
+# it would empty drawings that are already finished.
+
+## Whether one installed sticker set may be offered.
+func is_sticker_set_visible(set_def: StickerSetDef) -> bool:
+	if set_def == null:
+		return false
+	if not set_def.is_runtime or set_def.pack_slug == "":
+		return true
+	if _entitlements != null and _entitlements.should_hide_book(set_def.pack_slug):
+		return false
+	if _installer != null:
+		var required := _installer.installed_min_client_version(set_def.pack_slug)
+		if not BackendConfig.satisfies_min_version(required):
+			return false
+	return true
+
+
+func filter_sticker_sets(sets: Array[StickerSetDef]) -> Array[StickerSetDef]:
+	var visible: Array[StickerSetDef] = []
+	for set_def in sets:
+		if set_def == null:
+			continue
+		if set_def.is_runtime and not is_sticker_set_visible(set_def):
+			continue
+		visible.append(set_def)
+	return visible
+
+
+## Every sticker set the player has, entitlement-filtered. What the palette's
+## cycle ring is built from (BL-36).
+func discover_visible_sticker_sets(
+	root: String = StickerSetDef.SETS_ROOT, dlc_root: String = ""
+) -> Array[StickerSetDef]:
+	var installed_root := dlc_root
+	if installed_root == "":
+		installed_root = _installer.get_dlc_root() if _installer != null else StickerSetDef.DLC_ROOT
+	return filter_sticker_sets(StickerSetDef.discover(root, installed_root))
+
+
 # ================================================================== the store ==
 
 ## [code]GET /packs[/code], filtered server-side by this build's version. Returns

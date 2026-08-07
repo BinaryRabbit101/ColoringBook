@@ -34,9 +34,24 @@ extends SceneTree
 ## §7.3 makes the SERVER assign `pack_version`, so `--version` here is advisory
 ## and exists only so the manifest is complete and self-describing.
 ##
+## [b]BL-37: it builds STICKER packs too.[/b] `--sticker-set <dir>` walks a
+## [StickerSetDef] instead of a book and writes the §7.2 sticker layout:
+##
+##   <out>/manifest.json                              kind "sticker_set"
+##   <out>/stickers/<set_uid>/sticker_set.json        the manifest's sticker_sets[] entry
+##   <out>/stickers/<set_uid>/<sticker_id>.png
+##
+## Files are named after the stable `sticker_id`, never the index: an index moves
+## when a set is reordered, and a delta update (BL-26) would then re-download
+## every file after the one that moved. A pack is one kind or the other —
+## `--book` and `--sticker-set` in the same run is a usage error, because the
+## manifest's `kind` is one value and the client branches on it.
+##
 ## Flags:
 ##   --book <dir>            a book directory (res:// or project-relative).
 ##                           Repeatable: a pack may hold several books.
+##   --sticker-set <dir>     a sticker-set directory (BL-37). Repeatable.
+##                           Mutually exclusive with --book.
 ##   --book-uid <uid>        the AUTHORED, forever-stable uid (§6.1) for the
 ##                           most recent --book. Optional when the BookDef
 ##                           carries a `book_uid` property; required otherwise.
@@ -56,6 +71,12 @@ extends SceneTree
 const MANIFEST_VERSION := 1
 ## Where a bare `--book coyote` is looked up.
 const BOOKS_ROOT := "res://resources/books"
+## ...and where a bare `--sticker-set starter` is (BL-37).
+const STICKERS_ROOT := "res://resources/stickers"
+## Manifest `kind` values (server: `Pack::KINDS`). Absent means `book`, which is
+## every manifest written before BL-37.
+const KIND_BOOK := "book"
+const KIND_STICKER_SET := "sticker_set"
 ## Artifact suffixes appended to `page_NN`, by manifest role.
 const ARTIFACT_SUFFIX := {
 	"display": ".png",
@@ -67,6 +88,7 @@ const ARTIFACT_SUFFIX := {
 # ------------------------------------------------------------ CLI state ------
 var _book_dirs: Array[String] = []
 var _book_uids: Array[String] = []
+var _sticker_set_dirs: Array[String] = []
 var _out_dir := ""
 var _slug := ""
 var _title := ""
@@ -121,6 +143,8 @@ func _parse_flags(args: PackedStringArray) -> bool:
 					printerr("--book-uid must follow a --book.")
 					return false
 				_book_uids[_book_uids.size() - 1] = value.strip_edges()
+			"--sticker-set":
+				_sticker_set_dirs.append(_normalise_dir(value, STICKERS_ROOT))
 			"--out":
 				_out_dir = value.replace("\\", "/").rstrip("/")
 			"--slug":
@@ -145,8 +169,13 @@ func _parse_flags(args: PackedStringArray) -> bool:
 				return false
 		i += 2 if needs_value else 1
 
-	if _book_dirs.is_empty():
-		printerr("At least one --book is required.")
+	if _book_dirs.is_empty() and _sticker_set_dirs.is_empty():
+		printerr("At least one --book or --sticker-set is required.")
+		return false
+	if not _book_dirs.is_empty() and not _sticker_set_dirs.is_empty():
+		# A pack's `kind` is ONE value and the client branches on it (BL-37): a
+		# bundle that is half books and half stickers has no honest manifest.
+		printerr("--book and --sticker-set cannot be mixed: a pack is one kind of content.")
 		return false
 	if _out_dir == "":
 		printerr("--out is required.")
@@ -171,11 +200,15 @@ func _parse_flags(args: PackedStringArray) -> bool:
 ## `coyote`, `resources/books/coyote` and `res://resources/books/coyote` all
 ## name the same book — the artist types the short one.
 func _normalise_book_dir(raw: String) -> String:
+	return _normalise_dir(raw, BOOKS_ROOT)
+
+
+func _normalise_dir(raw: String, root: String) -> String:
 	var value := raw.strip_edges().replace("\\", "/").rstrip("/")
 	if value.begins_with("res://"):
 		return value
 	if value.find("/") == -1:
-		return BOOKS_ROOT.path_join(value)
+		return root.path_join(value)
 	return "res://" + value.lstrip("/")
 
 
@@ -198,19 +231,31 @@ func _build() -> int:
 	if not _prepare_out_dir():
 		return 1
 
+	var sticker_pack := not _sticker_set_dirs.is_empty()
 	var books: Array[Dictionary] = []
-	for i in _book_dirs.size():
-		var entry := _build_book(_book_dirs[i], _book_uids[i])
-		if entry.is_empty():
-			return _fail()
-		books.append(entry)
+	var sticker_sets: Array[Dictionary] = []
+	if sticker_pack:
+		for dir in _sticker_set_dirs:
+			var set_entry := _build_sticker_set(dir)
+			if set_entry.is_empty():
+				return _fail()
+			sticker_sets.append(set_entry)
+	else:
+		for i in _book_dirs.size():
+			var entry := _build_book(_book_dirs[i], _book_uids[i])
+			if entry.is_empty():
+				return _fail()
+			books.append(entry)
 
-	var cover := _resolve_cover(books)
+	var cover := _resolve_cover(sticker_sets if sticker_pack else books)
 	if _errors.size() > 0:
 		return _fail()
 
 	var manifest := {
 		"manifest_version": MANIFEST_VERSION,
+		# BL-37: written out always, even for a book pack, so a published
+		# manifest says what it carries rather than relying on an absent key.
+		"kind": KIND_STICKER_SET if sticker_pack else KIND_BOOK,
 		"pack_slug": _slug,
 		"pack_version": _pack_version,
 		"title": _title,
@@ -222,7 +267,10 @@ func _build() -> int:
 	manifest["min_client_version"] = _min_client_version
 	if _is_free != null:
 		manifest["is_free"] = _is_free
-	manifest["books"] = books
+	if sticker_pack:
+		manifest["sticker_sets"] = sticker_sets
+	else:
+		manifest["books"] = books
 
 	# Sorted so two builds of the same art produce byte-identical manifests.
 	var paths := _files.keys()
@@ -236,8 +284,70 @@ func _build() -> int:
 	if not _write_text(manifest_path, JSON.stringify(manifest, "    ", false) + "\n"):
 		return _fail()
 
-	_report(books, manifest_path)
+	_report(sticker_sets if sticker_pack else books, manifest_path)
 	return 0
+
+
+# ======================================================= sticker sets (BL-37) ==
+
+## One [StickerSetDef] -> the pack's `sticker_sets[]` entry, with every image
+## copied in. Deliberately the same shape as [method _build_book]: read the
+## authored resource, validate it here (where the artist is) and write the §7.2
+## layout plus the self-describing per-set JSON.
+func _build_sticker_set(set_dir: String) -> Dictionary:
+	var set_def: StickerSetDef = StickerSetDef.load_from_directory(set_dir)
+	if set_def == null:
+		_errors.append("No sticker_set.tres/.res in '%s'." % set_dir)
+		return {}
+
+	for problem in set_def.validate():
+		_errors.append("%s: %s" % [set_dir, problem])
+	if _errors.size() > 0:
+		return {}
+
+	var uid := set_def.set_uid.strip_edges()
+	if uid == "":
+		_errors.append("%s: no set_uid. It is what every saved sticker placement names." % set_dir)
+		return {}
+
+	var set_root := "stickers/" + uid
+	if DirAccess.make_dir_recursive_absolute(_out_dir.path_join(set_root)) != OK:
+		_errors.append("Could not create '%s'." % _out_dir.path_join(set_root))
+		return {}
+
+	var stickers: Array[Dictionary] = []
+	for index in set_def.sticker_count():
+		var sticker := set_def.get_sticker(index)
+		# Named after the STABLE id, never the index: reordering a set must not
+		# make a delta update re-fetch every file after the one that moved.
+		var target := "%s/%s.png" % [set_root, sticker.sticker_id]
+		if not _copy(sticker.image_path, target):
+			return {}
+		stickers.append({
+			"sticker_index": index,
+			"sticker_id": sticker.sticker_id,
+			"title": sticker.display_name,
+			"image": target,
+		})
+
+	var entry := {
+		"set_uid": uid,
+		"title": set_def.display_name,
+		"sort_order": set_def.sort_order,
+	}
+	if not stickers.is_empty():
+		entry["cover"] = String(stickers[0]["image"])
+	entry["stickers"] = stickers
+
+	# sticker_set.json IS the manifest's sticker_sets[] entry (§7.2), so the
+	# installed tree is self-describing and StickerSetDef.discover() never has
+	# to open the manifest.
+	var set_json := set_root + "/sticker_set.json"
+	if not _write_text(_out_dir.path_join(set_json), JSON.stringify(entry, "    ", false) + "\n"):
+		return {}
+	_record(set_json)
+
+	return entry
 
 
 func _prepare_out_dir() -> int:
@@ -500,6 +610,13 @@ func _report(books: Array[Dictionary], manifest_path: String) -> void:
 		total += int(meta["bytes"])
 	print("")
 	for book in books:
+		if book.has("set_uid"):
+			var stickers: Array = book["stickers"]
+			print("  sticker set %s \"%s\": %d sticker(s)"
+				% [book["set_uid"], book["title"], stickers.size()])
+			for sticker: Dictionary in stickers:
+				print("    %d  %-14s %s" % [sticker["sticker_index"], sticker["sticker_id"], sticker["image"]])
+			continue
 		var pages: Array = book["pages"]
 		var masked := 0
 		for page: Dictionary in pages:

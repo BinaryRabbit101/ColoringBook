@@ -91,6 +91,44 @@ export type AuthoredBook = {
     pages?: AuthoredPage[];
 };
 
+/**
+ * BL-37 — sticker sets. Deliberately shorter than a page: a sticker has no
+ * regions, so there is no mapping status, no tuning and no derived artifacts.
+ */
+export type AuthoredSticker = {
+    ulid: string;
+    sticker_index: number;
+    sticker_id: string;
+    title: string | null;
+    file_name: string;
+    image: AuthoredAsset | null;
+    image_size: [number, number] | null;
+    validation_errors: string[];
+    validation_warnings: string[];
+    publishable: boolean;
+    blockers: string[];
+    image_url: string;
+};
+
+export type AuthoredStickerSet = {
+    set_uid: string;
+    title: string;
+    blurb: string | null;
+    sort_order: number;
+    pack_slug: string;
+    pack_kind: 'book' | 'sticker_set';
+    pack_status: 'draft' | 'published' | 'retired';
+    is_free: boolean;
+    sticker_count: number;
+    unpublishable_sticker_count: number;
+    latest_published_version: number | null;
+    publishable: boolean;
+    blockers: string[];
+    created_at: string | null;
+    updated_at: string | null;
+    stickers?: AuthoredSticker[];
+};
+
 export type AdminEntitlement = {
     email: string;
     pack_slug: string;
