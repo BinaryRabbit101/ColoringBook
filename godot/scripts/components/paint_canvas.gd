@@ -25,7 +25,11 @@ var _material: ShaderMaterial
 var _page_size := Vector2.ZERO
 
 ## Array of { points: PackedVector2Array, radius: float, color: Color,
-##            id_color: Vector3, hardness: float }.
+##            id_color: Vector3, hardness: float, effect: Dictionary }.
+##
+## [code]effect[/code] is the BL-35 finish, as [BrushFinish] resolved it plus the
+## stroke's seed: { mode, quad_scale, strength, seed }. It is per-batch like every
+## other uniform, so two finishes never merge into one draw.
 var _batches: Array[Dictionary] = []
 
 
@@ -57,12 +61,15 @@ func configure(brush_shader: Shader, id_map: Texture2D, page_size: Vector2) -> v
 
 ## Queues brush dabs centred on [param points] (page pixel coordinates).
 ## [param id_color] is the locked region's id_color as raw 0..1 texel values.
+## [param effect] is the BL-35 finish's shader parameters ({ mode, quad_scale,
+## strength, seed }); an empty dictionary paints classic wax.
 func queue_stamps(
 	points: PackedVector2Array,
 	radius: float,
 	color: Color,
 	id_color: Vector3,
-	hardness: float
+	hardness: float,
+	effect: Dictionary = {}
 ) -> void:
 	if points.is_empty() or _material == null:
 		return
@@ -73,6 +80,7 @@ func queue_stamps(
 			and last["color"] == color
 			and last["id_color"] == id_color
 			and is_equal_approx(last["hardness"], hardness)
+			and last["effect"] == effect
 		):
 			# Packed arrays are value types: mutate a copy, then store it back.
 			var merged: PackedVector2Array = last["points"]
@@ -85,6 +93,7 @@ func queue_stamps(
 		"color": color,
 		"id_color": id_color,
 		"hardness": hardness,
+		"effect": effect.duplicate(),
 	})
 
 
@@ -111,9 +120,21 @@ func _draw() -> void:
 	var batch: Dictionary = _batches.pop_front()
 	_material.set_shader_parameter("locked_id_color", batch["id_color"])
 	_material.set_shader_parameter("hardness", batch["hardness"])
+	# BL-35: the finish. A batch with no effect is classic wax, which is the
+	# shader's default path -- so a page painted before finishes existed replays
+	# through exactly the arithmetic it was painted with.
+	var effect: Dictionary = batch.get("effect", {})
+	var quad_scale := float(effect.get("quad_scale", 1.0))
+	_material.set_shader_parameter("effect_mode", int(effect.get("mode", BrushFinish.MODE_CLASSIC)))
+	_material.set_shader_parameter("quad_scale", quad_scale)
+	_material.set_shader_parameter("effect_strength", float(effect.get("strength", 1.0)))
+	_material.set_shader_parameter("effect_seed", float(effect.get("seed", 0.0)))
 	var radius: float = batch["radius"]
-	var size := Vector2(radius * 2.0, radius * 2.0)
-	var offset := Vector2(radius, radius)
+	# The QUAD is what grows for a finish that spills past the dab (the glow halo);
+	# the shader divides quad_scale back out, so the dab itself is unchanged.
+	var half := radius * quad_scale
+	var size := Vector2(half * 2.0, half * 2.0)
+	var offset := Vector2(half, half)
 	var color: Color = batch["color"]
 	var points: PackedVector2Array = batch["points"]
 	for point in points:

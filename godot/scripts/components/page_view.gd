@@ -40,6 +40,14 @@ extends Control
 ## how deep, and when they are thrown away is the parent's business (see
 ## [ColoringPage]) -- this component only records and replays.
 ##
+## [b]BL-35 added one more brush property[/b], [member brush_effect]: the FINISH the
+## crayon box in hand paints with. It is the same kind of thing as
+## [member brush_color] -- set by the parent from a palette signal, read at stamp
+## time, baked into the SubViewport by the brush shader and therefore into the saved
+## PNG. It reaches the shader as batch uniforms and reaches a rebuild in the recipe,
+## and it changes nothing about the mechanic: the lock, the clip and the lifecycle
+## are byte-identical for every finish.
+##
 ## [b]The "base" image is the page's DISPLAY art[/b] ([member PageDef.display_image_path]):
 ## the drawing the player sees, with paint appearing beneath its line work. A page
 ## may also have been MAPPED from a separate masking image (BL-9), and since BL-12
@@ -143,6 +151,18 @@ class PaintRestoreQuad extends Node2D:
 ## 0 = fully feathered dab, 1 = hard dab. Never affects the region clip, which is
 ## always hard-edged.
 @export_range(0.0, 1.0, 0.01) var brush_hardness: float = 0.85
+## The FINISH the next stroke paints with (BL-35): a [BrushFinish] id -- classic
+## wax, neon glow, textured wax, glitter.
+##
+## Set by the parent from the palette's [code]brush_effect_picked[/code], exactly
+## like [member brush_color] follows [code]color_picked[/code]. It changes what a
+## stamp LOOKS like and nothing else: the stroke lifecycle, the region lock and the
+## ID-map clip are identical for every finish, and a glow halo is discarded outside
+## the locked region fragment by fragment like any other paint. An unknown id
+## resolves to [constant BrushFinish.CLASSIC] rather than painting nothing.
+@export var brush_effect: StringName = BrushFinish.CLASSIC:
+	set(value):
+		brush_effect = BrushFinish.resolve(value)
 ## When false, a press starts NO stroke: [method begin_stroke] refuses and emits
 ## [signal paint_blocked] instead. Nothing else changes -- pan, zoom, the
 ## two-finger gestures, and every pixel already on the page are untouched, because
@@ -223,6 +243,10 @@ var _last_pointer_position := Vector2.ZERO
 var _recipe_points := PackedVector2Array()
 ## The recipe of the stroke that just ended, until the parent takes it.
 var _last_recipe: Dictionary = {}
+## BL-35. The finish seed of the stroke in progress, chosen at press from the press
+## point and carried in the recipe: the grain angle and the glitter layout are
+## functions of it, so a replay that re-uses it re-stamps the same pixels.
+var _effect_seed := 0.0
 ## True while [method rebuild_paint] is re-laying a page. Nothing else in the
 ## component reacts to it; it exists so the parent can refuse to read the paint
 ## layer (or start another rebuild) half way through one.
@@ -564,8 +588,10 @@ func begin_stroke(page_position: Vector2) -> bool:
 	_last_stamp_position = page_position
 	_last_pointer_position = page_position
 	# BL-17: a new stroke, so a new recipe. Recording starts before the first dab
-	# because the press itself lays one.
+	# because the press itself lays one. BL-35: and a new finish seed, from the
+	# press point alone so it is decided before any dab needs it.
 	_recipe_points = PackedVector2Array()
+	_effect_seed = BrushFinish.seed_for(page_position)
 	_stamp(PackedVector2Array([page_position]))
 	region_locked.emit(region_id)
 	return true
@@ -639,8 +665,18 @@ func _stamp(points: PackedVector2Array) -> void:
 	# continue_stroke() and would drift from it the day either one changes.
 	_recipe_points.append_array(points)
 	_paint_canvas.queue_stamps(
-		points, _brush_radius(), brush_color, _locked_id_color, brush_hardness
+		points, _brush_radius(), brush_color, _locked_id_color, brush_hardness,
+		_effect_params(brush_effect, _effect_seed)
 	)
+
+
+## The shader parameters for finish [param effect] at [param seed] (BL-35). One
+## place, so a live stamp and a replayed one cannot describe the same finish
+## differently.
+static func _effect_params(effect: StringName, seed_value: float) -> Dictionary:
+	var params := BrushFinish.params_for(effect)
+	params["seed"] = seed_value
+	return params
 
 
 # ========================================================= stroke recipes (BL-17) ==
@@ -670,6 +706,11 @@ func _close_recipe(region_id: int) -> void:
 		"color": brush_color,
 		"diameter": brush_size,
 		"hardness": brush_hardness,
+		# BL-35: the FINISH is part of the brush, so it travels with the recipe like
+		# the colour does -- with its seed, because the grain and the glitter are
+		# functions of it and a rebuild that re-rolled one would not be pixel-exact.
+		"effect": brush_effect,
+		"effect_seed": _effect_seed,
 		"points": _recipe_points,
 	}
 	_recipe_points = PackedVector2Array()
@@ -690,7 +731,12 @@ func stamp_recipe(recipe: Dictionary) -> bool:
 		maxf(float(recipe.get("diameter", brush_size)) * 0.5, 0.5),
 		recipe.get("color", brush_color),
 		recipe.get("id_color", Vector3.ZERO),
-		float(recipe.get("hardness", brush_hardness))
+		float(recipe.get("hardness", brush_hardness)),
+		# A recipe with no finish (one recorded before BL-35, or by a test that only
+		# cares about geometry) is classic wax at seed 0 -- the shader's default path.
+		_effect_params(
+			recipe.get("effect", BrushFinish.CLASSIC), float(recipe.get("effect_seed", 0.0))
+		)
 	)
 	return true
 
