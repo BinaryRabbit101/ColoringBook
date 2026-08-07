@@ -77,8 +77,9 @@ extends Control
 ##    pages the player had already reached; BL-10 removed that gate entirely.)
 ## 2. [b]Portrait[/b]. The toolbar drops its centred page title below
 ##    [constant NARROW_TOOLBAR_WIDTH] so five controls still fit across a 720 px
-##    phone; the palette component already scrolls horizontally. Nothing else
-##    needed changing -- the screen was already one vertical box.
+##    phone; the palette component sizes its own crayons to whatever strip it is
+##    given (BL-33) and never scrolls. Nothing else needed changing -- the screen
+##    was already one vertical box.
 ##
 ## [b]Backlog additions (BL-4, BL-6, BL-7)[/b]:
 ##

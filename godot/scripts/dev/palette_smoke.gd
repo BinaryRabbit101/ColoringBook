@@ -26,6 +26,17 @@ extends Control
 ## Exit code is 0 only if every check passes.
 
 const PALETTE := "res://resources/palettes/child_palette.tres"
+const PALETTE_SCENE := "res://scenes/components/palette_child.tscn"
+
+## The smallest LOGICAL canvas the game can be handed in landscape. Stretch mode
+## canvas_items + aspect expand keeps the base 1152x648 as a floor on both axes, so
+## a landscape screen is at least this and its SHORT axis is what BL-33's fit has
+## to survive (DESIGN.md 3.5).
+const SMALLEST_LANDSCAPE := Vector2(1152.0, 648.0)
+## What the coloring screen's toolbar takes off the top before the palette gets its
+## share (coloring_page.tscn: a 72 px PanelContainer plus its 8/10 px content
+## margins). Rounded up, because the fit has to hold at the worst case.
+const COLORING_TOOLBAR := 96.0
 
 const BASE_IMAGE := "res://assets/books/test_book/page_01.png"
 const ID_MAP := "res://assets/books/test_book/page_01_idmap.png"
@@ -49,6 +60,10 @@ const REMOVED_FILES: PackedStringArray = [
 	"res://scenes/screens/mode_select.tscn",
 	"res://scripts/screens/mode_select.gd",
 ]
+
+## The forward-only crayon-box tile BL-34 replaced with the two end bars. Asserted
+## gone, so "just add the tile back" is a decision someone has to take on purpose.
+const REPLACED_BY_ARROWS := "res://scripts/components/crayon_box_button.gd"
 
 ## Minimum perceptual separation between two crayons, as an RGB distance
 ## (0..sqrt(3)). Kids must never confuse two crayons.
@@ -108,6 +123,7 @@ func _run() -> void:
 	await _check_landscape_dock()
 	await _check_intensity()
 	await _check_crayon_sets()
+	await _check_no_scroll_fit()
 	await _check_page_view_integration()
 	await _check_selection_feedback()
 	_check_game_state()
@@ -222,25 +238,44 @@ func _check_touch_targets() -> void:
 	await _settle()
 
 
+## Touch targets and the BL-33 fit, measured against the strip's real rect.
+##
+## The old shape of this block ("two 88 px tiles share the strip's SHORT axis and
+## a third would overflow it silently") was rewritten by BL-34 rather than kept:
+## the tools are now a cycle bar at each END of the long axis with the intensity
+## tile beside the first, which is a different geometry with a different failure
+## mode. What replaces it is the harder claim -- that every crayon AND every tool
+## is inside the strip with nothing scrolled out of sight (BL-33).
 func _measure_targets(label: String) -> void:
-	var smallest := _smallest_target(_palette.get_color_buttons())
+	var crayons := _palette.get_color_buttons()
+	var smallest := _smallest_target(crayons)
 	_expect(smallest >= PaletteChild.MIN_TOUCH_TARGET,
 		"[%s] every crayon target >= %.0f px (smallest %.1f px)"
 		% [label, PaletteChild.MIN_TOUCH_TARGET, smallest])
-	# The BL-22/BL-23 tool tiles share the strip's short axis with its margins, so
-	# growing one of them is exactly how they would start hanging out of it.
 	var tools := _palette.get_tool_buttons()
 	var tool_smallest := _smallest_target(tools)
-	_expect(tools.size() >= 2 and tool_smallest >= PaletteChild.MIN_TOUCH_TARGET,
-		"[%s] the %d tool tiles are >= %.0f px too (smallest %.1f px)"
-		% [label, tools.size(), PaletteChild.MIN_TOUCH_TARGET, tool_smallest])
-	var strip := _palette.get_global_rect()
+	_expect(tools.size() == 3 and tool_smallest >= PaletteChild.MIN_TOUCH_TARGET,
+		"[%s] both cycle bars and the intensity tile are >= %.0f px too (%d tools, smallest %.1f px)"
+		% [label, PaletteChild.MIN_TOUCH_TARGET, tools.size(), tool_smallest])
+	var strip := _palette.get_global_rect().grow(1.0)
 	var overflowing := 0
 	for tool in tools:
 		if not strip.encloses(tool.get_global_rect()):
 			overflowing += 1
 	_expect(overflowing == 0,
 		"[%s] ...and all of them fit inside the strip (%d hanging out)" % [label, overflowing])
+	# BL-33: the crayons are the ones that used to be allowed out of the strip,
+	# because the strip scrolled. They are not any more.
+	var clipped := 0
+	for crayon in crayons:
+		if not strip.encloses(crayon.get_global_rect()):
+			clipped += 1
+	_expect(clipped == 0,
+		"[%s] every one of the %d crayons is inside the strip (%d clipped)"
+		% [label, crayons.size(), clipped])
+	_expect(_palette.fits_without_scrolling() and not _scrollbars_visible(),
+		"[%s] ...visible at once, in %d rank(s), with no scrollbar (BL-33)"
+		% [label, _palette.get_rank_count()])
 
 
 ## (d cont.) BL-21: the same scene, docked as a COLUMN beside the canvas.
@@ -264,18 +299,24 @@ func _check_landscape_dock() -> void:
 	_palette.set_layout(PaletteChild.LAYOUT_COLUMN)
 	await _settle()
 	_expect(_palette.is_column(), "set_layout(COLUMN) docks it on the side")
-	_expect(is_equal_approx(_palette.custom_minimum_size.x, PaletteChild.STRIP_THICKNESS)
+	# BL-33 gave the column its own thickness: two ranks of crayons need more width
+	# than the row needs height, and a landscape canvas is exactly where that width
+	# is going spare.
+	_expect(is_equal_approx(_palette.custom_minimum_size.x, PaletteChild.COLUMN_THICKNESS)
 			and is_equal_approx(_palette.custom_minimum_size.y, 0.0),
-		"...the strip's thickness moved to its WIDTH (%s)" % _palette.custom_minimum_size)
+		"...the strip's thickness moved to its WIDTH, at the column's own %.0f px (%s)"
+		% [PaletteChild.COLUMN_THICKNESS, _palette.custom_minimum_size])
 	_expect(_palette.size_flags_vertical == Control.SIZE_EXPAND_FILL
 			and _palette.size_flags_horizontal == Control.SIZE_FILL,
 		"...and it expands ALONG the canvas, not into it")
 
+	# BL-33 reversed BL-21's known trade: the docked column does not scroll any more,
+	# it sizes and ranks its crayons until they all fit.
 	var scroll := _palette.get_scroll()
 	_expect(scroll != null
-			and scroll.vertical_scroll_mode != ScrollContainer.SCROLL_MODE_DISABLED
+			and scroll.vertical_scroll_mode == ScrollContainer.SCROLL_MODE_DISABLED
 			and scroll.horizontal_scroll_mode == ScrollContainer.SCROLL_MODE_DISABLED,
-		"the strip now scrolls VERTICALLY and clips across its width")
+		"the docked strip does not scroll in either direction (BL-33)")
 
 	var crayons := _palette.get_color_buttons()
 	var sideways := true
@@ -286,11 +327,11 @@ func _check_landscape_dock() -> void:
 		sideways = sideways and crayon.orientation == CrayonButton.ORIENT_LEFT \
 			and crayon.size.x > crayon.size.y
 		smallest = minf(smallest, minf(crayon.size.x, crayon.size.y))
-		if i > 0:
+		if i > 0 and crayon.get_parent() == crayons[i - 1].get_parent():
 			stacked = stacked \
 				and crayon.global_position.y >= crayons[i - 1].get_global_rect().end.y - 1.0
 	_expect(sideways, "every crayon is drawn lying on its side, long axis horizontal")
-	_expect(stacked, "...stacked top to bottom, not squeezed side by side")
+	_expect(stacked, "...stacked top to bottom within its rank, not squeezed side by side")
 	_expect(smallest >= PaletteChild.MIN_TOUCH_TARGET,
 		"...and each one still holds its %.0f px touch target (%.1f)"
 		% [PaletteChild.MIN_TOUCH_TARGET, smallest])
@@ -301,11 +342,15 @@ func _check_landscape_dock() -> void:
 	_expect(selected.lift_direction() == Vector2.LEFT,
 		"the selected crayon lifts LEFT -- into the canvas, not out of the screen (%s)"
 		% selected.lift_direction())
-	_expect(selected.current_lift() > CrayonButton.LIFT_PX,
-		"...springing past its resting lift, as in the row (%.0f px)" % selected.current_lift())
-	_expect(CrayonButton.box_for(CrayonButton.ORIENT_LEFT).x
-			>= CrayonButton.LIFT_HEADROOM + CrayonButton.LIFT_PX,
-		"...into headroom the sideways box reserves too, so the bounce peak is not clipped")
+	_expect(selected.current_lift() > selected.resting_lift(),
+		"...springing past its resting lift, as in the row (%.0f of %.0f px)"
+		% [selected.current_lift(), selected.resting_lift()])
+	# BL-33 made the crayon resizable, so the headroom is a RATIO now, not a
+	# constant: whatever size the fit chose, the box still reserves the bounce peak.
+	_expect(selected.lift_headroom()
+			>= selected.resting_lift() * CrayonButton.SELECT_BOUNCE_SCALE - 0.01,
+		"...into headroom the sideways box reserves at whatever size it was given (%.1f px of lift, %.1f px reserved)"
+		% [selected.resting_lift(), selected.lift_headroom()])
 	await _wait(CrayonButton.SELECT_BOUNCE_SECONDS + 0.2)
 
 	# The bubble: the hand now comes in from the RIGHT, so it parks to the LEFT.
@@ -539,26 +584,56 @@ func _check_crayon_sets() -> void:
 		"box 0 IS the palette's own crayons ('%s')" % _def.get_crayon_set_name(0))
 	_expect(_def.wrap_crayon_set(_def.crayon_set_count()) == 0,
 		"the cycle wraps back to the default box")
+	# BL-34: the carousel has a back end now, so the wrap has to hold on the other
+	# side of zero as well.
+	_expect(_def.wrap_crayon_set(-1) == _def.crayon_set_count() - 1
+			and _def.wrap_crayon_set(-_def.crayon_set_count()) == 0,
+		"...and wraps NEGATIVE indices round to the last box (-1 -> %d)"
+		% _def.wrap_crayon_set(-1))
 
-	# --- cycling it, the way the button does ---------------------------------
-	var box := _palette.get_crayon_box_button()
-	_expect(box != null, "the strip carries a crayon-box control")
-	if box == null:
+	# --- cycling it, the way the two end bars do (BL-34) ----------------------
+	var arrows := _palette.get_cycle_buttons()
+	_expect(arrows.size() == 2 and arrows[0] != null and arrows[1] != null,
+		"the strip carries a cycle control at EACH end (%d)" % arrows.size())
+	if arrows.size() < 2 or arrows[0] == null or arrows[1] == null:
 		return
-	_expect(minf(box.size.x, box.size.y) >= PaletteChild.MIN_TOUCH_TARGET,
-		"...at least %.0f px to aim at (%.0fx%.0f)"
-		% [PaletteChild.MIN_TOUCH_TARGET, box.size.x, box.size.y])
-	_expect(box.visible and box.set_count == _def.crayon_set_count(),
-		"...showing all %d boxes as pips (%d)" % [_def.crayon_set_count(), box.set_count])
+	var back: CrayonCycleButton = arrows[0]
+	var forward: CrayonCycleButton = arrows[1]
+	_expect(back.direction == CrayonCycleButton.DIR_PREV
+			and forward.direction == CrayonCycleButton.DIR_NEXT
+			and back.point_direction() == -forward.point_direction(),
+		"...one back, one forward, pointing opposite ways (%s / %s)"
+		% [back.point_direction(), forward.point_direction()])
+	_expect(minf(back.size.x, back.size.y) >= PaletteChild.MIN_TOUCH_TARGET
+			and minf(forward.size.x, forward.size.y) >= PaletteChild.MIN_TOUCH_TARGET,
+		"...both at least %.0f px to aim at (%.0fx%.0f, %.0fx%.0f)"
+		% [PaletteChild.MIN_TOUCH_TARGET, back.size.x, back.size.y,
+			forward.size.x, forward.size.y])
+	# The BL-2/BL-23 rule, and the reason the arrows are not just two more items on
+	# the strip: a slide-to-select gesture must never be able to land on a tool.
+	var scroller := _palette.get_scroll()
+	_expect(not scroller.is_ancestor_of(back) and not scroller.is_ancestor_of(forward),
+		"...both OUTSIDE the crayon scroller, so a slide can never land on one")
+	_expect(_at_ends_of_strip(back, forward),
+		"...and parked at the two OUTER ENDS of the strip, beyond every crayon")
+	_expect(back.set_count == _def.crayon_set_count()
+			and forward.set_count == _def.crayon_set_count(),
+		"...showing all %d boxes as pips (%d)" % [_def.crayon_set_count(), forward.set_count])
+	_expect(forward.preview_colors == _def.get_crayon_set_colors(1)
+			and back.preview_colors == _def.get_crayon_set_colors(-1),
+		"each bar previews the colours of the box IT would fetch, not the one in hand")
+	_expect(not ResourceLoader.exists(REPLACED_BY_ARROWS)
+			and not FileAccess.file_exists(REPLACED_BY_ARROWS),
+		"...and the forward-only carton tile they replaced is gone (%s)" % REPLACED_BY_ARROWS)
 	_expect(_palette.get_crayon_set_index() == 0,
 		"the strip starts on the default box ('%s')" % _palette.get_crayon_set_name())
 
 	var brush_before := _palette.get_selected_brush_size()
 	var emitted_before := _colors.size()
-	box.pressed.emit()
+	forward.pressed.emit()
 	await _settle()
 	_expect(_palette.get_crayon_set_index() == 1,
-		"pressing it fetches the next box ('%s')" % _palette.get_crayon_set_name())
+		"pressing the forward bar fetches the next box ('%s')" % _palette.get_crayon_set_name())
 	var next_colors := _def.get_crayon_set_colors(1)
 	var strip := _palette.get_color_buttons()
 	var swapped := strip.size() == next_colors.size()
@@ -574,6 +649,52 @@ func _check_crayon_sets() -> void:
 	_expect(_palette.get_selected_intensity() == PaletteDef.INTENSITY_BASE_STEP
 			and not _palette.is_showing_shades(),
 		"...and the new box opens on its own colours, not halfway up a ladder")
+
+	# --- the box says its name as it lands (BL-34) ---------------------------
+	# The carton tile that used to draw "which box is out" is gone, so the identity
+	# has to arrive some other way. It does, twice: the pips above, and this.
+	var flash := _palette.get_box_flash()
+	_expect(flash != null and flash.is_showing(),
+		"cycling pops up a banner over the strip")
+	_expect(flash != null and flash.get_title().begins_with(_palette.get_crayon_set_name()),
+		"...naming the box that just landed ('%s')" % [flash.get_title() if flash else ""])
+	_expect(flash != null and flash.mouse_filter == Control.MOUSE_FILTER_IGNORE
+			and not flash.z_as_relative and flash.z_index > 0,
+		"...floating over the crayons and impossible to hit-test")
+	# Transient, like the BL-11 celebration: it takes itself away and blocks nothing.
+	await _wait(CrayonBoxFlash.POP_SECONDS + CrayonBoxFlash.HOLD_SECONDS
+		+ CrayonBoxFlash.FADE_OUT_SECONDS + 0.2)
+	_expect(flash != null and not flash.is_showing(),
+		"...and it fades itself out with nothing dismissing it")
+
+	# --- the same cycle, backwards (BL-34) -----------------------------------
+	# The whole point of a second arrow: overshooting the box you wanted no longer
+	# costs a full lap of the carousel.
+	var before_back := _palette.get_crayon_set_index()
+	var emitted_before_back := _colors.size()
+	var brush_before_back := _palette.get_selected_brush_size()
+	back.pressed.emit()
+	await _settle()
+	_expect(_palette.get_crayon_set_index() == before_back - 1,
+		"the back bar fetches the box BEFORE this one (%d -> %d)"
+		% [before_back, _palette.get_crayon_set_index()])
+	_expect(_colors.size() == emitted_before_back + 1
+			and _colors[-1] == _def.get_crayon_set_colors(before_back - 1)[0],
+		"...as one resolved pick, exactly like going forwards (#%s)"
+		% _colors[-1].to_html(false))
+	_expect(is_equal_approx(_palette.get_selected_brush_size(), brush_before_back)
+			and _sizes.size() == 1,
+		"...and the brush still never moved (%.0f px)" % _palette.get_selected_brush_size())
+	# ...and off the front of the cycle, which is where wrapping a negative index
+	# stops being a lookup detail and becomes the feature.
+	_palette.set_crayon_set(0)
+	_palette.prev_crayon_set()
+	await _settle()
+	_expect(_palette.get_crayon_set_index() == _def.crayon_set_count() - 1,
+		"cycling BACK off the first box wraps round to the last one ('%s')"
+		% _palette.get_crayon_set_name())
+	_palette.set_crayon_set(1)
+	await _settle()
 
 	# --- intensity on a set, for free ----------------------------------------
 	var swap := _palette.get_intensity_button()
@@ -596,7 +717,7 @@ func _check_crayon_sets() -> void:
 
 	# --- all the way round ----------------------------------------------------
 	for i in range(_palette.get_crayon_set_index(), _def.crayon_set_count()):
-		box.pressed.emit()
+		forward.pressed.emit()
 	await _settle()
 	_expect(_palette.get_crayon_set_index() == 0,
 		"cycling past the last box comes back to the default one ('%s')"
@@ -605,6 +726,94 @@ func _check_crayon_sets() -> void:
 		"...with its %d crayons back on the strip (%d)"
 		% [CRAYON_COUNT, _palette.get_color_buttons().size()])
 	_palette.select_color(0)
+
+
+## (d cont.) BL-33: every crayon visible at once, at the SMALLEST canvas the game
+## can be given.
+##
+## The dev harness's own palette is stretched across a 1152 px window, which is the
+## easy case. This check builds the hard one instead: a strip exactly the size the
+## docked column gets on the shortest supported landscape canvas -- logical 1152 x
+## 648 (DESIGN.md 3.5: canvas_items/expand never lets it get narrower than 1152, so
+## the landscape SHORT axis is the constraint), minus the coloring toolbar. Then the
+## same again for the portrait row at 1152 wide. Nothing may scroll, nothing may be
+## clipped, and no crayon may go under the touch floor.
+func _check_no_scroll_fit() -> void:
+	print("\n-- check 5e: every crayon visible, no scrolling (BL-33) --")
+	var host := Control.new()
+	host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(host)
+
+	var column_body := SMALLEST_LANDSCAPE.y - COLORING_TOOLBAR
+	await _fit_case(host, PaletteChild.LAYOUT_COLUMN,
+		Vector2(PaletteChild.COLUMN_THICKNESS, column_body),
+		"docked column, smallest landscape canvas (%.0fx%.0f)"
+		% [SMALLEST_LANDSCAPE.x, SMALLEST_LANDSCAPE.y])
+	await _fit_case(host, PaletteChild.LAYOUT_ROW,
+		Vector2(SMALLEST_LANDSCAPE.x, PaletteChild.STRIP_THICKNESS),
+		"bottom row, narrowest logical canvas (%.0f px)" % SMALLEST_LANDSCAPE.x)
+	# A taller portrait canvas keeps the same 1152 logical width, so the row's fit is
+	# the same fit -- what changes is that the column has more length to play with.
+	await _fit_case(host, PaletteChild.LAYOUT_COLUMN,
+		Vector2(PaletteChild.COLUMN_THICKNESS, 1152.0 - COLORING_TOOLBAR),
+		"docked column, tall landscape canvas")
+
+	host.queue_free()
+	await get_tree().process_frame
+
+
+## Builds a throwaway palette in a strip of exactly [param strip] pixels, docked as
+## [param layout], and holds it to the BL-33 promise.
+func _fit_case(host: Control, layout: int, strip: Vector2, label: String) -> void:
+	var palette: PaletteChild = load(PALETTE_SCENE).instantiate()
+	var frame := Control.new()
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.custom_minimum_size = strip
+	frame.size = strip
+	host.add_child(frame)
+	frame.add_child(palette)
+	palette.set_anchors_preset(Control.PRESET_FULL_RECT)
+	palette.set_layout(layout)
+	palette.set_palette(_def)
+	await _settle()
+	await _settle()
+
+	var crayons := palette.get_color_buttons()
+	var rect := palette.get_global_rect().grow(1.0)
+	var clipped := 0
+	var smallest := INF
+	for crayon in crayons:
+		if not rect.encloses(crayon.get_global_rect()):
+			clipped += 1
+		smallest = minf(smallest, minf(crayon.size.x, crayon.size.y))
+	_expect(crayons.size() == CRAYON_COUNT,
+		"[%s] all %d crayons are built (%d)" % [label, CRAYON_COUNT, crayons.size()])
+	_expect(clipped == 0,
+		"[%s] ...every one of them inside the strip (%d clipped)" % [label, clipped])
+	_expect(smallest >= CrayonButton.MIN_TOUCH_TARGET,
+		"[%s] ...none below the %.0f px floor (%.1f px, %d rank(s))"
+		% [label, CrayonButton.MIN_TOUCH_TARGET, smallest, palette.get_rank_count()])
+	var scroll := palette.get_scroll()
+	_expect(scroll.horizontal_scroll_mode == ScrollContainer.SCROLL_MODE_DISABLED
+			and scroll.vertical_scroll_mode == ScrollContainer.SCROLL_MODE_DISABLED
+			and not scroll.get_h_scroll_bar().visible
+			and not scroll.get_v_scroll_bar().visible,
+		"[%s] ...and nothing scrolls, in either direction" % label)
+	var tools := palette.get_tool_buttons()
+	var tools_out := 0
+	for tool in tools:
+		if not rect.encloses(tool.get_global_rect()):
+			tools_out += 1
+	_expect(tools.size() == 3 and tools_out == 0
+			and _smallest_target(tools) >= CrayonButton.MIN_TOUCH_TARGET,
+		"[%s] both cycle bars and the intensity tile fit beside them (%d tools, %d hanging out)"
+		% [label, tools.size(), tools_out])
+	var arrows := palette.get_cycle_buttons()
+	_expect(_ends_of(palette, arrows[0], arrows[1]),
+		"[%s] ...with the bars still capping the two ends of the strip" % label)
+
+	frame.queue_free()
+	await get_tree().process_frame
 
 
 ## (e) Palette -> PageView: wiring the two signals is all the coloring screen has
@@ -936,6 +1145,40 @@ static func _send_drag(palette: Control, from_position: Vector2, to_position: Ve
 	event.position = to_position
 	event.relative = to_position - from_position
 	palette._input(event)
+
+
+## True when neither of the crayon scroller's bars is on screen.
+func _scrollbars_visible() -> bool:
+	var scroll := _palette.get_scroll()
+	if scroll == null:
+		return false
+	return scroll.get_h_scroll_bar().visible or scroll.get_v_scroll_bar().visible
+
+
+## True when the two cycle bars really are at the OUTER ENDS of the palette's long
+## axis: nothing on the strip -- crayon or tool -- starts before the back one or
+## ends after the forward one.
+func _at_ends_of_strip(back: Control, forward: Control) -> bool:
+	return _ends_of(_palette, back, forward)
+
+
+static func _ends_of(palette: PaletteChild, back: Control, forward: Control) -> bool:
+	if back == null or forward == null:
+		return false
+	var column := palette.is_column()
+	var back_rect := back.get_global_rect()
+	var forward_rect := forward.get_global_rect()
+	var start: float = back_rect.position.y if column else back_rect.position.x
+	var end: float = forward_rect.end.y if column else forward_rect.end.x
+	var others: Array[Control] = palette.get_color_buttons()
+	others.append(palette.get_intensity_button())
+	for control in others:
+		var rect := control.get_global_rect()
+		var control_start: float = rect.position.y if column else rect.position.x
+		var control_end: float = rect.end.y if column else rect.end.x
+		if control_start < start - 1.0 or control_end > end + 1.0:
+			return false
+	return true
 
 
 func _smallest_target(controls: Array[Control]) -> float:
