@@ -20,7 +20,13 @@ extends Control
 ## [b]Brush size[/b] (BACKLOG BL-3): one [BrushSizeSlider] whose stops are the
 ## palette's authored diameters, replacing the row of dot buttons. It reports an
 ## index, which goes through [method select_brush_size] like every other pick, so
-## nothing downstream changed.
+## nothing downstream changed. BL-14 widened the shipped range to five stops
+## (8..96 px) without touching a line of that chain.
+##
+## [b]Pick preview[/b] (BACKLOG BL-15): one [PickPreview] bubble serves both halves
+## of this palette -- the swatch grid feeds it through [PaletteSlideInput]'s
+## candidate hook, the slider through its own [signal BrushSizeSlider.preview_changed],
+## and it shows a colour chip or a candidate-diameter dot accordingly.
 
 ## The player picked a colour. Also emitted once by [method set_palette].
 signal color_picked(color: Color)
@@ -43,6 +49,8 @@ var _scroll: ScrollContainer
 var _size_row: HBoxContainer
 ## Drag half of slide-to-select; the swatches themselves make the first pick.
 var _slide := PaletteSlideInput.new()
+## BL-15's floating candidate bubble, shared by the grid and the slider.
+var _preview: PickPreview
 
 
 func _ready() -> void:
@@ -56,9 +64,17 @@ func _resolve_nodes() -> void:
 		_grid = get_node("Margin/Body/Scroll/SwatchGrid") as HBoxContainer
 	if _size_row == null:
 		_size_row = get_node("Margin/Body/SizeRow") as HBoxContainer
+	if _preview == null:
+		# Parented to the palette ROOT, not the scroller or the size row: the bubble
+		# floats clear of both, and the root is a plain Control so nothing lays it
+		# out. `_clear()` only empties those two containers, so it survives rebuilds.
+		_preview = PickPreview.new()
+		_preview.name = "PickPreview"
+		add_child(_preview)
 	# The swatch scroller only: a gesture that starts on the brush-size slider
 	# belongs to the slider.
 	_slide.configure(self, _scroll)
+	_slide.set_candidate_hook(_on_slide_candidate, _on_slide_released)
 
 
 ## Slide-to-select runs BEFORE the GUI phase, like [PageView]'s painting, so one
@@ -67,6 +83,17 @@ func _resolve_nodes() -> void:
 func _input(event: InputEvent) -> void:
 	if _slide.handle_input(event):
 		get_viewport().set_input_as_handled()
+		return
+	# BL-16's dismiss audit -- see [PaletteChild._input] for the reasoning. This
+	# palette has a second way to strand a bubble: [BrushSizeSlider] hears its
+	# release through [method Control._gui_input], which only arrives if the pointer
+	# is still over the bar. A finger that slid off the end and lifted there was
+	# never told to stop, so it also kept [member BrushSizeSlider._dragging] true.
+	# Ending the slider's preview from here fixes both, and is idempotent.
+	if _slide.is_release_event(event):
+		if is_instance_valid(_slider):
+			_slider.end_preview()
+		_on_slide_released()
 
 
 # ================================================== shared palette contract ==
@@ -156,6 +183,48 @@ func get_brush_size_slider() -> BrushSizeSlider:
 	return _slider
 
 
+## The floating pick-preview bubble (BL-15). Never null after [method _ready].
+func get_pick_preview() -> PickPreview:
+	_resolve_nodes()
+	return _preview
+
+
+# ================================================================ pick preview ==
+
+## The finger is over swatch [param index] ([code]-1[/code] between swatches).
+func _on_slide_candidate(index: int, viewport_position: Vector2) -> void:
+	if _preview == null or _palette == null:
+		return
+	if index < 0:
+		_preview.move_to(viewport_position)
+		return
+	_preview.show_color(_palette.get_color(index), viewport_position)
+
+
+func _on_slide_released() -> void:
+	if _preview != null:
+		_preview.dismiss()
+
+
+## The finger is over brush-size stop [param index]. The bubble shows the CANDIDATE
+## diameter as a dot in the colour that is actually loaded, so the preview answers
+## "how big a mark will this make" rather than showing an abstract circle.
+func _on_slider_preview(index: int, viewport_position: Vector2) -> void:
+	if _preview == null or _palette == null:
+		return
+	_preview.show_brush(
+		get_selected_color(),
+		_palette.get_brush_size(index),
+		_palette.get_brush_size(_palette.brush_size_count() - 1),
+		viewport_position
+	)
+
+
+func _on_slider_preview_ended() -> void:
+	if _preview != null:
+		_preview.dismiss()
+
+
 ## Number of shade-family columns currently drawn.
 func get_family_column_count() -> int:
 	return _grid.get_child_count() if _grid != null else 0
@@ -202,6 +271,10 @@ func _build_size_row(def: PaletteDef) -> void:
 		int(round(def.get_brush_size(def.brush_size_count() - 1))),
 	]
 	_slider.size_selected.connect(select_brush_size)
+	# BL-15: the slider is outside the slide helper's hit area, so it reports its
+	# own candidate -- into the same one bubble.
+	_slider.preview_changed.connect(_on_slider_preview)
+	_slider.preview_ended.connect(_on_slider_preview_ended)
 	_size_row.add_child(_slider)
 
 
@@ -212,6 +285,8 @@ func _on_swatch_pressed(index: int) -> void:
 func _clear() -> void:
 	_swatches.clear()
 	_slider = null
+	if _preview != null:
+		_preview.hide_now()
 	var no_targets: Array[Control] = []
 	_slide.set_targets(no_targets, Callable())
 	for container in [_grid, _size_row]:

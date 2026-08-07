@@ -33,6 +33,10 @@ centered = false
 [node name="PaintSprite" type="Sprite2D" parent="PageRoot"]
 centered = false
 
+[node name="MaskSprite" type="Sprite2D" parent="PageRoot"]
+visible = false
+centered = false
+
 [node name="LineArtSprite" type="Sprite2D" parent="PageRoot"]
 centered = false
 

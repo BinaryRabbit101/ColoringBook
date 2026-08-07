@@ -12,10 +12,12 @@ extends Control
 ## ModeSelect.mode_chosen        -> GameState.mode = m -> BookSelect
 ## BookSelect.book_chosen        -> ColoringPage.load_book(book, resume_index)
 ## ColoringPage.back_requested   -> BookSelect
-## ColoringPage.book_completed   -> BookComplete
-## BookComplete.again_requested  -> erase that book -> ColoringPage (page 1)
-## BookComplete.books_requested  -> BookSelect
 ## [/codeblock]
+##
+## [b]There is no completion screen[/b] (BL-11, DESIGN.md 2). Finishing a page --
+## including the last one -- is celebrated on the coloring page itself and takes
+## the player nowhere; [signal ColoringPage.back_requested] is the only exit from
+## a book, so the flow above is the whole flow.
 ##
 ## [b]Ordering rule inherited from M4[/b]: [code]GameState.mode[/code] is set
 ## BEFORE [ColoringPage] is instantiated, because the palette scene and the
@@ -26,6 +28,18 @@ extends Control
 ## node shows while the shelf is the current screen. The settings panel and (when
 ## a book is open) the mode picker are overlays for the same reason -- changing
 ## mode must not throw the player out of the book they are colouring.
+##
+## [b]WP10 added three more overlays and one more shelf button[/b], on exactly that
+## pattern, so [code]book_select.tscn[/code] is STILL frozen:
+## [codeblock]
+## Settings -> "Account" -> AdultGate -> AccountPanel   sign in / register / out
+## shelf    -> "More books"           -> PackShop       the DLC catalogue
+## [/codeblock]
+## The "More books" button appears only while the shelf is up AND a grown-up is
+## signed in; the gate stands in front of every account screen (DLC_SERVER.md 4.1).
+## [b]No kid-facing screen shows network state at all[/b] (DLC_SERVER.md 8.2) --
+## the shelf is built from local discovery every time and merely re-filtered when
+## an entitlement answer lands.
 ##
 ## [b]Save points[/b]: leaving a book, finishing a page and the BL-6 interval
 ## autosave are handled inside [ColoringPage] (only it can reach the paint layer).
@@ -65,14 +79,17 @@ const SCREEN_TITLE := "title"
 const SCREEN_MODE_SELECT := "mode_select"
 const SCREEN_BOOK_SELECT := "book_select"
 const SCREEN_COLORING := "coloring"
-const SCREEN_BOOK_COMPLETE := "book_complete"
 
 const TITLE_SCENE: PackedScene = preload("res://scenes/screens/title_screen.tscn")
 const MODE_SELECT_SCENE: PackedScene = preload("res://scenes/screens/mode_select.tscn")
 const BOOK_SELECT_SCENE: PackedScene = preload("res://scenes/screens/book_select.tscn")
 const COLORING_PAGE_SCENE: PackedScene = preload("res://scenes/screens/coloring_page.tscn")
-const BOOK_COMPLETE_SCENE: PackedScene = preload("res://scenes/screens/book_complete.tscn")
 const SETTINGS_PANEL_SCENE: PackedScene = preload("res://scenes/components/settings_panel.tscn")
+## WP10 overlays. All three are grown-up territory and all three live here for the
+## same reason the gear does -- see the class doc's "Overlays" note.
+const ADULT_GATE_SCENE: PackedScene = preload("res://scenes/components/adult_gate.tscn")
+const ACCOUNT_PANEL_SCENE: PackedScene = preload("res://scenes/components/account_panel.tscn")
+const PACK_SHOP_SCENE: PackedScene = preload("res://scenes/components/pack_shop.tscn")
 
 ## Screen transition: fade the old screen out, swap, fade the new one in. Short
 ## on purpose -- long enough to hide the swap, short enough that a child tapping
@@ -148,10 +165,16 @@ var quit_on_close_request := true:
 			get_tree().auto_accept_quit = not value
 
 var _gear: GearButton
+## WP10: the shelf's DLC entry point. An overlay button, not part of the shelf
+## scene, and visible only when the shelf is up AND somebody is signed in.
+var _more_books: Button
 var _current_screen: Control
 var _current_id := ""
 var _settings: SettingsPanel
 var _mode_overlay: ModeSelect
+var _adult_gate: AdultGate
+var _account_panel: AccountPanel
+var _pack_shop: PackShop
 var _transitioning := false
 ## Guards against a second close request arriving while the first is draining.
 var _closing := false
@@ -161,6 +184,13 @@ func _ready() -> void:
 	# Main quits the game itself, so it can flush and drain first (class doc).
 	get_tree().auto_accept_quit = not quit_on_close_request
 	_build_gear()
+	_build_more_books()
+	# The shelf re-filters and rescans when the account or the installed packs
+	# change. Nothing here awaits anything (DLC_SERVER.md 8.2) -- these are
+	# notifications that arrive, not requests this node makes.
+	Backend.auth_changed.connect(_on_backend_auth_changed)
+	Backend.entitlements_changed.connect(_on_backend_shelf_changed)
+	Backend.installed_packs_changed.connect(_on_backend_shelf_changed)
 	# Start under the fade so the first screen arrives the same way every other
 	# screen does, instead of popping in.
 	_fade.visible = true
@@ -235,8 +265,20 @@ func show_mode_select(from_settings: bool = false) -> Control:
 func show_book_select() -> Control:
 	GameState.clear_book()
 	return await _show_screen(BOOK_SELECT_SCENE, SCREEN_BOOK_SELECT, func(screen: Control) -> void:
-		(screen as BookSelect).load_books()
+		_populate_shelf(screen as BookSelect)
 	)
+
+
+## Fills the shelf: discover everything installed, then drop the DLC books this
+## account may not see (WP10). [method Backend.discover_visible_books] is a purely
+## LOCAL call -- filesystem plus the cached entitlement list -- so the shelf never
+## waits for a server and never empties itself when there isn't one
+## (DLC_SERVER.md 8.2, 9). With no account it returns exactly what
+## [method BookDef.discover] returns.
+func _populate_shelf(shelf: BookSelect) -> int:
+	if shelf == null:
+		return 0
+	return shelf.set_books(Backend.discover_visible_books())
 
 
 ## Opens [param book] at its saved page with its saved paint. A finished book
@@ -248,12 +290,6 @@ func open_book(book: BookDef) -> Control:
 	var start_index := GameState.get_resume_index(book)
 	return await _show_screen(COLORING_PAGE_SCENE, SCREEN_COLORING, func(screen: Control) -> void:
 		(screen as ColoringPage).load_book(book, start_index)
-	)
-
-
-func show_book_complete(book: BookDef) -> Control:
-	return await _show_screen(BOOK_COMPLETE_SCENE, SCREEN_BOOK_COMPLETE, func(screen: Control) -> void:
-		(screen as BookComplete).set_book(book)
 	)
 
 
@@ -269,6 +305,7 @@ func _show_screen(scene: PackedScene, id: String, setup: Callable = Callable()) 
 	_transitioning = true
 	_close_overlays()
 	_gear.visible = false
+	_more_books.visible = false
 	await _fade_to(1.0, FADE_OUT_SECONDS)
 
 	for child in _host.get_children():
@@ -290,6 +327,10 @@ func _show_screen(scene: PackedScene, id: String, setup: Callable = Callable()) 
 	# frozen while still growing a settings entry point.
 	_gear.visible = id == SCREEN_BOOK_SELECT
 	_transitioning = false
+	# After the flag drops: _refresh_more_books() refuses to show anything mid-swap,
+	# which is what keeps a sign-in landing during a transition from painting a
+	# button onto the wrong screen.
+	_refresh_more_books()
 	screen_changed.emit(id)
 	return screen
 
@@ -305,13 +346,7 @@ func _connect_screen(screen: Control, id: String) -> void:
 		SCREEN_BOOK_SELECT:
 			(screen as BookSelect).book_chosen.connect(_on_book_chosen)
 		SCREEN_COLORING:
-			var coloring := screen as ColoringPage
-			coloring.back_requested.connect(_on_coloring_back)
-			coloring.book_completed.connect(_on_book_completed)
-		SCREEN_BOOK_COMPLETE:
-			var complete := screen as BookComplete
-			complete.again_requested.connect(_on_again_requested)
-			complete.books_requested.connect(_on_books_requested)
+			(screen as ColoringPage).back_requested.connect(_on_coloring_back)
 
 
 func _fade_to(target_alpha: float, seconds: float) -> void:
@@ -354,21 +389,6 @@ func _on_coloring_back() -> void:
 	await show_book_select()
 
 
-func _on_book_completed(book: BookDef) -> void:
-	await show_book_complete(book)
-
-
-## "Color again": the book starts over with nothing saved -- no stale paint layer,
-## no stale page statuses.
-func _on_again_requested(book: BookDef) -> void:
-	GameState.erase_book_progress(book)
-	await open_book(book)
-
-
-func _on_books_requested() -> void:
-	await show_book_select()
-
-
 # ================================================================== overlays ==
 
 func _build_gear() -> void:
@@ -395,6 +415,7 @@ func open_settings() -> SettingsPanel:
 	_settings.closed.connect(close_settings)
 	_settings.mode_change_requested.connect(_on_settings_mode_change)
 	_settings.erase_all_confirmed.connect(_on_settings_erase_all)
+	_settings.account_requested.connect(_on_settings_account)
 	_overlays.add_child(_settings)
 	settings_toggled.emit(true)
 	return _settings
@@ -424,7 +445,150 @@ func _on_settings_mode_change() -> void:
 func _on_settings_erase_all() -> void:
 	GameState.erase_all_progress()
 	if _current_id == SCREEN_BOOK_SELECT and _current_screen is BookSelect:
-		(_current_screen as BookSelect).load_books()
+		_populate_shelf(_current_screen as BookSelect)
+
+
+# ============================================================ WP10: the account ==
+# DLC_SERVER.md 4.1: "Adult gate in the client before any account UI ... Reuse the
+# existing settings-gear overlay placement from main.gd." That is what this block
+# is, and the ORDER is the point -- the gate is not a mode of the account panel, it
+# is a separate overlay that must be passed before the account panel is ever built.
+
+## "Account" in settings. Closes settings and puts the [AdultGate] up; the account
+## panel only exists once the gate is passed.
+func _on_settings_account() -> void:
+	close_settings()
+	open_adult_gate(open_account_panel)
+
+
+## Shows the arithmetic gate and runs [param on_passed] if it is answered
+## correctly. Public because every future grown-up screen should come through here
+## rather than growing a second gate.
+func open_adult_gate(on_passed: Callable) -> AdultGate:
+	_close_adult_gate()
+	_adult_gate = ADULT_GATE_SCENE.instantiate() as AdultGate
+	_adult_gate.name = "AdultGate"
+	_adult_gate.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_overlays.add_child(_adult_gate)
+	_adult_gate.cancelled.connect(_close_adult_gate)
+	_adult_gate.passed.connect(func() -> void:
+		_close_adult_gate()
+		if on_passed.is_valid():
+			on_passed.call()
+	)
+	return _adult_gate
+
+
+func _close_adult_gate() -> void:
+	if not is_instance_valid(_adult_gate):
+		return
+	_overlays.remove_child(_adult_gate)
+	_adult_gate.queue_free()
+	_adult_gate = null
+
+
+## The account overlay itself. Reachable ONLY through [method open_adult_gate] in
+## the real flow; the harnesses call it directly, which is the same reason
+## [method GameState.set_save_root] exists.
+func open_account_panel() -> AccountPanel:
+	if is_instance_valid(_account_panel):
+		_account_panel.refresh()
+		return _account_panel
+	_account_panel = ACCOUNT_PANEL_SCENE.instantiate() as AccountPanel
+	_account_panel.name = "AccountPanel"
+	_account_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_account_panel.closed.connect(close_account_panel)
+	_account_panel.account_changed.connect(func(_signed_in: bool) -> void:
+		_refresh_more_books()
+	)
+	_overlays.add_child(_account_panel)
+	return _account_panel
+
+
+func close_account_panel() -> void:
+	if not is_instance_valid(_account_panel):
+		return
+	_overlays.remove_child(_account_panel)
+	_account_panel.queue_free()
+	_account_panel = null
+
+
+# ============================================================ WP10: more books ==
+
+## The shelf's DLC affordance, built from primitives like the gear so the shell
+## still ships no icon assets. Top LEFT, opposite the gear, out of the way of both.
+func _build_more_books() -> void:
+	_more_books = Button.new()
+	_more_books.name = "MoreBooksButton"
+	_more_books.visible = false
+	_more_books.focus_mode = Control.FOCUS_NONE
+	# DESIGN.md 3.5's 48 px floor, matched to the gear's 72 px height.
+	_more_books.custom_minimum_size = Vector2(190.0, 72.0)
+	_more_books.text = "More books"
+	_more_books.add_theme_font_size_override("font_size", 22)
+	_more_books.add_theme_color_override("font_color", Color(0.972549, 0.94902, 0.905882))
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.156863, 0.141176, 0.129412, 0.92)
+	style.border_color = Color(0.415686, 0.360784, 0.301961)
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(36)
+	for state in ["normal", "hover", "pressed"]:
+		_more_books.add_theme_stylebox_override(state, style)
+	_more_books.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_more_books.offset_left = 20.0
+	_more_books.offset_top = 20.0
+	_more_books.offset_right = 20.0 + 190.0
+	_more_books.offset_bottom = 20.0 + 72.0
+	_more_books.pressed.connect(open_pack_shop)
+	_overlays.add_child(_more_books)
+
+
+## Shown only on the shelf, only when a grown-up is signed in (DLC_SERVER.md 4.1:
+## children never touch an account, and a shop they cannot use is just confusing).
+func _refresh_more_books() -> void:
+	if not is_instance_valid(_more_books):
+		return
+	_more_books.visible = _current_id == SCREEN_BOOK_SELECT \
+		and not _transitioning and Backend.is_signed_in()
+
+
+func open_pack_shop() -> PackShop:
+	if is_instance_valid(_pack_shop):
+		return _pack_shop
+	_pack_shop = PACK_SHOP_SCENE.instantiate() as PackShop
+	_pack_shop.name = "PackShop"
+	_pack_shop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_pack_shop.closed.connect(close_pack_shop)
+	_pack_shop.pack_installed.connect(func(_slug: String) -> void: _rescan_shelf())
+	_overlays.add_child(_pack_shop)
+	return _pack_shop
+
+
+func close_pack_shop() -> void:
+	if not is_instance_valid(_pack_shop):
+		return
+	_overlays.remove_child(_pack_shop)
+	_pack_shop.queue_free()
+	_pack_shop = null
+
+
+func _on_backend_auth_changed(_signed_in: bool) -> void:
+	_refresh_more_books()
+	_rescan_shelf()
+	if is_instance_valid(_settings):
+		_settings.refresh()
+
+
+func _on_backend_shelf_changed() -> void:
+	_rescan_shelf()
+
+
+## Rebuilds the shelf in place if it is the current screen. A fresh
+## [method BookDef.discover] every time, so an install that just landed appears and
+## a revoked pack disappears without any cached list of books anywhere.
+func _rescan_shelf() -> void:
+	if _current_id == SCREEN_BOOK_SELECT and _current_screen is BookSelect:
+		_populate_shelf(_current_screen as BookSelect)
 
 
 func _open_mode_overlay() -> ModeSelect:
@@ -458,6 +622,9 @@ func _close_mode_overlay() -> void:
 func _close_overlays() -> void:
 	close_settings()
 	_close_mode_overlay()
+	_close_adult_gate()
+	close_account_panel()
+	close_pack_shop()
 
 
 # ==================================================================== access ==
@@ -485,6 +652,24 @@ func get_mode_select_overlay() -> ModeSelect:
 
 func get_gear_button() -> Button:
 	return _gear
+
+
+## WP10 access, for the harnesses and for anything that needs to know whether the
+## grown-up overlays are up.
+func get_more_books_button() -> Button:
+	return _more_books
+
+
+func get_adult_gate() -> AdultGate:
+	return _adult_gate if is_instance_valid(_adult_gate) else null
+
+
+func get_account_panel() -> AccountPanel:
+	return _account_panel if is_instance_valid(_account_panel) else null
+
+
+func get_pack_shop() -> PackShop:
+	return _pack_shop if is_instance_valid(_pack_shop) else null
 
 
 ## The notch-safe wrapper both the screen host and the overlays live inside

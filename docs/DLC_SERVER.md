@@ -218,6 +218,13 @@ One row **per book**, not one blob per account. That single choice removes most 
 two devices colouring different books never contend. `revision` is a per-row integer for
 optimistic concurrency.
 
+*As built (2026-08-06):* the literal `UNIQUE(user_id, child_profile_id, book_uid)` would not
+constrain the account-level shelf — SQL treats two NULLs as distinct — so the implemented
+key is `UNIQUE(user_id, profile_key, book_uid)` over a stored generated column
+`profile_key = coalesce(child_profile_id, 0)`. Losing paint versions live in a sidecar
+`retained_paint_layers` table rather than extra `paint_layers` rows, keeping
+`UNIQUE(book_progress_id, page_index)` meaning "the current picture".
+
 ### Storage layout on disk
 
 ```
@@ -225,8 +232,13 @@ storage/app/private/
   packs/<pack_slug>/v<version>/pack.zip        # the shipped bundle
   packs/<pack_slug>/v<version>/files/...       # unpacked, for per-file delta downloads
   assets/<sha256[0:2]>/<sha256>                # content-addressed originals (incl. masks)
-  paint/<user_ulid>/<book_uid>/page_NN.png
+  paint/<user_ulid>/<book_uid>/page_NN.png             # account shelf
+  paint/<user_ulid>/<profile_ulid>/<book_uid>/page_NN.png   # a child's shelf (as built)
 ```
+
+The `<profile_ulid>` segment postdates this section: two children painting the same book on
+one account must not share a file. Unambiguous because `book_uid` is a lower-case slug and
+ULIDs are upper-case base32.
 
 Content-addressing the assets means re-uploading identical art is free and a checksum
 mismatch is detectable without a database round trip.
@@ -243,8 +255,12 @@ Today (`game_state.gd`, `save_v1.json`):
 { "version": 1, "mode": "child",
   "books": { "res://resources/books/coyote/book.tres":
              { "slug": "coyote_1a2b3c4d", "current_page_index": 1,
-               "pages": ["complete", "in_progress"] } } }
+               "pages": [ { "status": "complete",    "locked": true },
+                          { "status": "in_progress", "locked": false } ] } } }
 ```
+
+(A page entry was a bare status string until BL-10 added the coloring lock; the
+reader still accepts that form, so v1 files from before it load unchanged.)
 
 Paint lives beside it at `user://paint/<book_slug>/page_NN.png`.
 
@@ -350,17 +366,21 @@ pack.zip
   cover.png
   books/coyote-2026/book.json
   books/coyote-2026/page_01.png            # the DISPLAY image (BL-9)
+  books/coyote-2026/page_01_mask.png       # only when the page has a mask (BL-12)
   books/coyote-2026/page_01_idmap.png
   books/coyote-2026/page_01_regions.json
   books/coyote-2026/page_02.png
   ...
 ```
 
-The **outline mask is not shipped**. Per BL-9 it exists only to generate the ID map and is
-hidden at runtime; the server keeps it (`assets.kind = 'mask'`) so a pack can be regenerated,
-but shipping it would waste ~200 KB per page on bytes the player never sees. The mask is
-also **optional per page** (clarified 2026-08-06): every page has a detail (display) image,
-and when no mask is supplied the display image itself is the mapping-pipeline source.
+The mask a pack ships is the **display-resolution artifact**, not the artist's original
+(BL-12, 2026-08-06, which reversed BL-9's "never shipped" rule): since BL-12 the mask is
+rendered at runtime as a layer under the display image, so when a page has one, the
+pipeline's resampled `page_NN_mask.png` goes in the pack. The server still keeps the
+print-size original (`assets.kind = 'mask'`) so a pack can be regenerated. The mask remains
+**optional per page** (clarified 2026-08-06): every page has a detail (display) image, and
+when no mask is supplied the display image itself is the mapping-pipeline source and no
+mask file appears in the pack.
 
 `manifest.json`:
 
@@ -448,15 +468,16 @@ v4 to fix one page downloads that one page, not 8 MB.
    places. Books from a pack the user is no longer entitled to are filtered out by the caller,
    not by `discover()`.
 3. **`PageDef` gains an optional texture source.** The display/mask split itself is **done**
-   (BL-9, 2026-08-06): `PageDef` carries `display_image_path` (visible, required) plus an
-   optional `mask_image_path` that only `tools/generate_region_map.gd --display` ever reads,
+   (BL-9, 2026-08-06, amended by BL-12): `PageDef` carries `display_image_path` (visible,
+   required) plus an optional `mask_image_path` — since BL-12 that path names the shipped
+   display-resolution mask artifact, which is rendered as a layer under the display image —
    and a page with no mask uses its display image as the mapping source. What is left for DLC
    is that these may be `user://` files that must be loaded as `Image` rather than
    `load()`ed as resources. Concretely: `PageDef` grows `is_runtime` + resolved absolute
    paths, and `PageView` grows `load_page_textures(base: Texture2D, idmap: Texture2D,
-   regions: Dictionary)` as the primitive, with today's `load_page(paths…)` becoming a thin
-   wrapper over it. `_id_image` handling, the shader, and the whole stroke lifecycle are
-   untouched.
+   regions: Dictionary, mask: Texture2D = null)` as the primitive, with today's
+   `load_page(paths…)` becoming a thin wrapper over it. `_id_image` handling, the shader,
+   and the whole stroke lifecycle are untouched.
 4. **A `Backend` layer.** DESIGN.md §3.4 and the godot-practices skill both say "one
    autoload", and this proposes a second. The justification: an auth token, a sync queue and
    an in-flight download genuinely outlive every screen, and threading them through
@@ -673,6 +694,16 @@ stable machine-readable `code` — the client branches on `code`, never on prose
 ## 12. Phased rollout
 
 Each phase is independently shippable and leaves the game working.
+
+> **Implementation status (2026-08-06):** Phases **0–5** are built — the server
+> at `server/` in this repo, the client work (Phase 0 plus the §8 Backend
+> autoload, DLC install, and progress/paint sync) in `godot/`. See
+> `docs/SERVER_BUILD_PLAN.md` for the decisions that supersede this document
+> (SQLite not MySQL, Inertia+Vue not Blade+Livewire, profiles in v1, no
+> `age_band`) and `server/CLAUDE.md` for the as-built conventions. Phase 6
+> (payments) remains open, as does deploying the Laravel app to the mini-pc
+> (the game's web build ships to port 91; see BL-18 for a sync/erase design
+> question found during client integration).
 
 | Phase | Scope | Server needed? |
 |---|---|---|

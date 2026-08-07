@@ -6,6 +6,6 @@
 script = ExtResource("1_page_def")
 display_name = "Coyote"
 display_image_path = "res://assets/books/coyote/page_01.png"
-mask_image_path = "res://assets/books/coyote/source/coyote_outline_source.png"
+mask_image_path = "res://assets/books/coyote/page_01_mask.png"
 id_map_path = "res://assets/books/coyote/page_01_idmap.png"
 regions_json_path = "res://assets/books/coyote/page_01_regions.json"

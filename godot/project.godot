@@ -14,11 +14,29 @@ config/name="ColoringBook"
 config/version="0.6.0"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.5", "Mobile")
-config/icon="res://icon.svg"
+config/icon="res://assets/icon/app_icon.svg"
+boot_splash/bg_color=Color(0.121569, 0.109804, 0.101961, 1)
+boot_splash/image="res://assets/splash/boot_splash.png"
 
 [autoload]
 
 GameState="*res://autoload/game_state.gd"
+Backend="*res://autoload/backend.gd"
+
+[coloringbook]
+
+; WP10 (docs/DLC_SERVER.md §8.1). The DLC/sync API root, INCLUDING the /v1 prefix.
+; This is a build fact, not player data, so it lives here rather than in user://;
+; user://backend.json overrides it for a dev run against another machine
+; (see scripts/backend/backend_config.gd).
+;
+; The default is the local `php artisan serve --port=8123` dev server. For the WEB
+; export this must be same-origin -- DLC_SERVER.md §7.4 puts the API on a path of
+; the game's own vhost ("https://<game-host>/api/v1") precisely so that neither the
+; JSON calls nor the signed pack download needs CORS.
+backend/base_url="http://127.0.0.1:8123/api/v1"
+; false makes the whole Backend autoload inert, token or not.
+backend/enabled=true
 
 [display]
 

@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0">
+		<title>$GODOT_PROJECT_NAME</title>
+		<!--
+			ColoringBook's web loading screen (BL-13).
+
+			Rules this file lives by:
+			  * SELF-CONTAINED. No external requests at all: no CDN, no web font, no
+			    remote image. Everything here is inline CSS/SVG, and the only files
+			    fetched are the ones the export itself writes next to this page.
+			  * NO JS MODALS. alert()/confirm() do not belong in a game a four-year-old
+			    is holding; failures are reported in a panel on the page, the same way
+			    the in-game confirms are (BL-7).
+			  * ONE BACKGROUND COLOUR. $GODOT_SPLASH_COLOR is the project's
+			    application/boot_splash/bg_color, which is also the background of the
+			    splash artwork and of main.tscn's own backdrop. Browser shell -> engine
+			    splash -> first frame of the game are therefore one continuous colour
+			    with nothing flashing between the stages.
+			  * THE GODOT LOGO STAYS. It is presented, attribution-style, on the splash
+			    artwork this page displays ("made with Godot" beneath the crayons) --
+			    the same image the engine's own boot splash then shows, so the credit
+			    is on screen for the whole load and is never duplicated or restyled.
+
+			The progress indicator is a crayon drawing a wax stroke across the page
+			rather than a <progress> bar: same information, and it belongs to this app.
+		-->
+		<style>
+html, body, #canvas {
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+
+body {
+	background-color: $GODOT_SPLASH_COLOR;
+	color: #d6cec4;
+	overflow: hidden;
+	touch-action: none;
+	font-family: "Segoe UI", "Noto Sans", "Droid Sans", system-ui, sans-serif;
+}
+
+#canvas {
+	display: block;
+}
+
+#canvas:focus {
+	outline: none;
+}
+
+/* The loading stage. Removed from the DOM once the game is running. */
+#status {
+	position: absolute;
+	inset: 0;
+	background-color: $GODOT_SPLASH_COLOR;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+	gap: clamp(18px, 4vh, 46px);
+	visibility: hidden;
+}
+
+#status-splash {
+	display: block;
+	max-width: min(84vw, 520px);
+	max-height: 58vh;
+	object-fit: contain;
+	user-select: none;
+	-webkit-user-drag: none;
+}
+
+#status-splash.show-image--false {
+	display: none;
+}
+
+#status-splash.use-filter--false {
+	image-rendering: pixelated;
+}
+
+/* --- the crayon stroke ---------------------------------------------------- */
+
+#status-progress {
+	display: none;
+	width: min(84vw, 460px);
+}
+
+#status-progress svg {
+	display: block;
+	width: 100%;
+	height: auto;
+	overflow: visible;
+}
+
+.stroke-track {
+	fill: none;
+	stroke: rgba(214, 206, 196, 0.16);
+	stroke-width: 13;
+	stroke-linecap: round;
+}
+
+.stroke-wax {
+	fill: none;
+	stroke: url(#crayon-colors);
+	stroke-width: 13;
+	stroke-linecap: round;
+	/* dasharray/dashoffset are set from JS once the path length is known. */
+}
+
+/* No byte counts yet: sweep the stroke instead of pretending to know a total. */
+#status-progress.indeterminate .stroke-wax {
+	animation: crayon-sweep 1.5s ease-in-out infinite;
+}
+
+@keyframes crayon-sweep {
+	0%   { stroke-dasharray: 30 1000; stroke-dashoffset: 0; }
+	50%  { stroke-dasharray: 190 1000; stroke-dashoffset: -80; }
+	100% { stroke-dasharray: 30 1000; stroke-dashoffset: -420; }
+}
+
+#status-progress.indeterminate .crayon {
+	display: none;
+}
+
+/* --- failures ------------------------------------------------------------- */
+
+#status-notice {
+	display: none;
+	background-color: #2f2320;
+	border: 2px solid #6b4a41;
+	border-radius: 16px;
+	color: #f0e2dc;
+	line-height: 1.35;
+	margin: 0 1.5rem;
+	max-width: 34rem;
+	padding: 1.1rem 1.3rem;
+	text-align: center;
+}
+
+/* --- "there is a secure link" banner (dual-URL, see the JS below) --------- */
+
+#secure-link-banner {
+	position: fixed;
+	top: 0;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 10;
+	box-sizing: border-box;
+	max-width: min(94vw, 38rem);
+	margin: 0.6rem 0 0;
+	padding: 0.7rem 0.9rem;
+	background-color: #2f2320;
+	border: 2px solid #6b4a41;
+	border-radius: 14px;
+	color: #f0e2dc;
+	font-size: 0.95rem;
+	line-height: 1.35;
+	display: flex;
+	align-items: center;
+	gap: 0.8rem;
+}
+
+#secure-link-banner a {
+	color: #ffd23f;
+	word-break: break-all;
+}
+
+#secure-link-banner button {
+	flex: none;
+	background-color: #6b4a41;
+	border: 0;
+	border-radius: 10px;
+	color: #f0e2dc;
+	cursor: pointer;
+	font: inherit;
+	padding: 0.45rem 0.9rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	#status-progress.indeterminate .stroke-wax {
+		animation-duration: 4s;
+	}
+}
+		</style>
+$GODOT_HEAD_INCLUDE
+	</head>
+	<body>
+		<canvas id="canvas">
+			Your browser does not support the canvas tag.
+		</canvas>
+
+		<noscript>
+			This game needs JavaScript. Please turn it on and reload the page.
+		</noscript>
+
+		<div id="status">
+			<img id="status-splash" class="$GODOT_SPLASH_CLASSES" src="$GODOT_SPLASH" alt="$GODOT_PROJECT_NAME — made with Godot">
+
+			<div id="status-progress" class="indeterminate">
+				<svg viewBox="0 0 460 64" role="progressbar" aria-label="Loading">
+					<defs>
+						<!-- The child palette, so the stroke fills in crayon order. -->
+						<linearGradient id="crayon-colors" x1="0" y1="0" x2="1" y2="0">
+							<stop offset="0.00" stop-color="#e8362d"/>
+							<stop offset="0.16" stop-color="#f57c1f"/>
+							<stop offset="0.32" stop-color="#ffd23f"/>
+							<stop offset="0.48" stop-color="#3fbf4f"/>
+							<stop offset="0.64" stop-color="#00bcd4"/>
+							<stop offset="0.78" stop-color="#2f6fe0"/>
+							<stop offset="0.90" stop-color="#8b4bd8"/>
+							<stop offset="1.00" stop-color="#ff6fb5"/>
+						</linearGradient>
+					</defs>
+					<path id="stroke-track" class="stroke-track"
+						d="M18,36 C 92,18 148,50 224,32 S 372,16 442,34"/>
+					<path id="stroke-wax" class="stroke-wax"
+						d="M18,36 C 92,18 148,50 224,32 S 372,16 442,34"/>
+					<g id="crayon" class="crayon">
+						<rect x="-9" y="-30" width="18" height="24" rx="4" fill="#f8f2e6"/>
+						<rect x="-9" y="-24" width="18" height="11" fill="#f57c1f"/>
+						<polygon points="-9,-6 9,-6 0,6" fill="#c9601a"/>
+					</g>
+				</svg>
+			</div>
+
+			<div id="status-notice"></div>
+		</div>
+
+		<script src="$GODOT_URL"></script>
+		<script>
+const GODOT_CONFIG = $GODOT_CONFIG;
+const GODOT_THREADS_ENABLED = $GODOT_THREADS_ENABLED;
+const engine = new Engine(GODOT_CONFIG);
+
+(function () {
+	const statusOverlay = document.getElementById('status');
+	const statusProgress = document.getElementById('status-progress');
+	const statusNotice = document.getElementById('status-notice');
+	const strokeWax = document.getElementById('stroke-wax');
+	const strokeTrack = document.getElementById('stroke-track');
+	const crayon = document.getElementById('crayon');
+	const strokeLength = strokeTrack.getTotalLength();
+
+	let initializing = true;
+	let statusMode = '';
+
+	// Start with nothing drawn: the stroke IS the progress.
+	strokeWax.style.strokeDasharray = strokeLength + ' ' + strokeLength;
+	strokeWax.style.strokeDashoffset = strokeLength;
+
+	/** Draws the wax stroke up to `ratio` (0..1) and parks the crayon at its tip. */
+	function drawProgress(ratio) {
+		const clamped = Math.max(0, Math.min(1, ratio));
+		statusProgress.classList.remove('indeterminate');
+		strokeWax.style.strokeDasharray = strokeLength + ' ' + strokeLength;
+		strokeWax.style.strokeDashoffset = strokeLength * (1 - clamped);
+		const tip = strokeTrack.getPointAtLength(strokeLength * clamped);
+		// A point just behind the tip gives the angle to lean the crayon at.
+		const back = strokeTrack.getPointAtLength(Math.max(0, strokeLength * clamped - 6));
+		const angle = Math.atan2(tip.y - back.y, tip.x - back.x) * 180 / Math.PI;
+		crayon.setAttribute('transform', 'translate(' + tip.x + ',' + tip.y + ') rotate(' + angle + ')');
+	}
+
+	function sweepProgress() {
+		statusProgress.classList.add('indeterminate');
+		strokeWax.style.strokeDasharray = '';
+		strokeWax.style.strokeDashoffset = '';
+	}
+
+	function setStatusMode(mode) {
+		if (statusMode === mode || !initializing) {
+			return;
+		}
+		if (mode === 'hidden') {
+			statusOverlay.remove();
+			initializing = false;
+			return;
+		}
+		statusOverlay.style.visibility = 'visible';
+		statusProgress.style.display = mode === 'progress' ? 'block' : 'none';
+		statusNotice.style.display = mode === 'notice' ? 'block' : 'none';
+		statusMode = mode;
+	}
+
+	function setStatusNotice(text) {
+		while (statusNotice.lastChild) {
+			statusNotice.removeChild(statusNotice.lastChild);
+		}
+		text.split('\n').forEach(function (line) {
+			statusNotice.appendChild(document.createTextNode(line));
+			statusNotice.appendChild(document.createElement('br'));
+		});
+	}
+
+	function displayFailureNotice(err) {
+		console.error(err);
+		if (err instanceof Error) {
+			setStatusNotice(err.message);
+		} else if (typeof err === 'string') {
+			setStatusNotice(err);
+		} else {
+			setStatusNotice('Something went wrong while loading.');
+		}
+		setStatusMode('notice');
+		initializing = false;
+	}
+
+	const missing = Engine.getMissingFeatures({
+		threads: GODOT_THREADS_ENABLED,
+	}).filter(function (feature) {
+		// Godot's stock shell treats "Secure Context" as fatal unconditionally,
+		// because a THREADED build needs SharedArrayBuffer and that needs both
+		// cross-origin isolation and a secure context. This build exports with
+		// thread support OFF, and nothing else the game uses is gated on a
+		// secure context: WebGL2, fetch and IndexedDB (`user://`) all work over
+		// plain HTTP. AudioWorklet does not, but the engine already falls back
+		// to a dummy audio driver for exactly that case.
+		//
+		// The mini-pc test site is plain HTTP on a LAN IP
+		// (http://192.168.0.164:91/ — see the minipc-coloringbook skill), and a
+		// private IP is not a "potentially trustworthy" origin in any browser.
+		// So without this filter the page would ALWAYS stop at the notice and
+		// the build could never be touch-tested on a phone, which is the whole
+		// reason the site exists. Warn, don't block.
+		if (GODOT_THREADS_ENABLED || !feature.startsWith('Secure Context')) {
+			return true;
+		}
+		console.warn('Insecure context (plain HTTP): ' + feature
+			+ ' — continuing anyway, this build does not use threads.');
+		return false;
+	});
+
+	let booted = false;
+
+	function boot() {
+		// The dual-URL gate below has several exits; make sure only one of them
+		// can ever actually start the engine.
+		if (booted) {
+			return;
+		}
+		booted = true;
+		if (missing.length !== 0) {
+			if (GODOT_CONFIG['serviceWorker'] && GODOT_CONFIG['ensureCrossOriginIsolationHeaders'] && 'serviceWorker' in navigator) {
+				let serviceWorkerRegistrationPromise;
+				try {
+					serviceWorkerRegistrationPromise = navigator.serviceWorker.getRegistration();
+				} catch (err) {
+					serviceWorkerRegistrationPromise = Promise.reject(new Error('Service worker registration failed.'));
+				}
+				// Installing the service worker may be exactly what fixes this.
+				Promise.race([
+					serviceWorkerRegistrationPromise.then((registration) => {
+						if (registration != null) {
+							return Promise.reject(new Error('Service worker already exists.'));
+						}
+						return registration;
+					}).then(() => engine.installServiceWorker()),
+					// getRegistration() can stall; do not hang the page on it.
+					new Promise((resolve) => {
+						setTimeout(() => resolve(), 2000);
+					}),
+				]).then(() => {
+					window.location.reload();
+				}).catch((err) => {
+					console.error('Error while registering service worker:', err);
+				});
+			} else {
+				const missingMsg = 'This browser cannot run the game yet.\nMissing:\n';
+				displayFailureNotice(missingMsg + missing.join('\n'));
+			}
+		} else {
+			setStatusMode('progress');
+			sweepProgress();
+			// `AudioContext.audioWorklet` is exposed only in a secure context, and
+			// the engine's audio driver calls `audioWorklet.addModule()` without
+			// checking — over plain HTTP that throws "Cannot read properties of
+			// undefined (reading 'addModule')" and takes the whole boot with it.
+			// The game ships no audio at all (no AudioStreamPlayer, no streams, no
+			// bus layout), so asking for the Dummy driver on an insecure origin
+			// costs nothing and is what keeps the LAN test site bootable.
+			const startArgs = Engine.isAudioWorkletAvailable()
+				? []
+				: ['--audio-driver', 'Dummy'];
+			if (startArgs.length !== 0) {
+				console.warn('AudioWorklet unavailable (insecure context) — starting with the Dummy audio driver.');
+			}
+
+			engine.startGame({
+				'args': startArgs,
+				'onProgress': function (current, total) {
+					if (current > 0 && total > 0) {
+						drawProgress(current / total);
+					} else {
+						sweepProgress();
+					}
+				},
+			}).then(() => {
+				drawProgress(1);
+				setStatusMode('hidden');
+			}, displayFailureNotice);
+		}
+	}
+
+	// --- dual-URL: favour the secure tailnet address ------------------------
+	//
+	// This build is served from ONE nginx vhost under TWO addresses:
+	//   * http://192.168.0.164:91/                         LAN, plain HTTP
+	//   * https://minipc.jackal-hippocampus.ts.net:453/    Tailscale HTTPS proxy
+	//
+	// :453 is strictly better — it is a secure context, so AudioWorklet works,
+	// SharedArrayBuffer stays available if this ever exports with threads, and
+	// none of the two insecure-context workarounds above have to fire. So when
+	// somebody lands on :91 and their device can also reach the tailnet, send
+	// them to :453.
+	//
+	// WHY WE DO NOT ALWAYS REDIRECT: `user://` is IndexedDB in a web build, and
+	// IndexedDB is scoped per ORIGIN. http://192.168.0.164:91 and
+	// https://minipc.…:453 are different origins, so a page full of colouring
+	// saved on :91 is INVISIBLE from :453. Redirecting a returning painter would
+	// silently strand their book. Until cloud sync ships (the DLC/backend server,
+	// BL-8), a device that already has a save on this origin only gets an offer,
+	// never a redirect. Fresh visitors have nothing to lose, so they are moved.
+	//
+	// WHY THERE IS A /ping ENDPOINT: this page is served with
+	// `Cross-Origin-Embedder-Policy: require-corp`, which makes the browser drop
+	// any cross-origin subresource that does not opt in. A plain probe of
+	// :453/ would be blocked before it ever reached the network. The vhost
+	// therefore serves `location = /ping` as a 204 carrying
+	// `Cross-Origin-Resource-Policy: cross-origin` + `Access-Control-Allow-Origin: *`
+	// (see the minipc-coloringbook skill) so this one request is allowed through.
+	const SECURE_URL = 'https://minipc.jackal-hippocampus.ts.net:453/';
+	const SECURE_PROBE_URL = SECURE_URL + 'ping';
+	const SECURE_PROBE_TIMEOUT_MS = 1500;
+	const SECURE_BANNER_DISMISSED_KEY = 'coloringbook.secureLinkBannerDismissed';
+
+	/** Resolves true only if :453 answered the probe within the timeout. */
+	function probeSecureOrigin() {
+		if (typeof fetch !== 'function' || typeof AbortController !== 'function') {
+			return Promise.resolve(false);
+		}
+		const controller = new AbortController();
+		const timer = setTimeout(function () {
+			controller.abort();
+		}, SECURE_PROBE_TIMEOUT_MS);
+		return fetch(SECURE_PROBE_URL, {
+			'method': 'GET',
+			'mode': 'cors',
+			'cache': 'no-store',
+			'credentials': 'omit',
+			'redirect': 'follow',
+			'signal': controller.signal,
+		}).then(function () {
+			return true;
+		}, function () {
+			// Not on the tailnet, DNS cannot resolve it, COEP blocked it, or it
+			// simply timed out. All of these mean "stay here"; none are errors.
+			return false;
+		}).then(function (reachable) {
+			clearTimeout(timer);
+			return reachable;
+		});
+	}
+
+	/**
+	 * True if this origin looks like it already holds colouring. Deliberately
+	 * conservative: a browser without `indexedDB.databases()` (Firefox, Safari
+	 * before 14) is treated as "has a save", because wrongly redirecting costs
+	 * somebody their book while wrongly staying costs nothing but a banner.
+	 */
+	function hasExistingSave() {
+		try {
+			if (!window.indexedDB || typeof window.indexedDB.databases !== 'function') {
+				return Promise.resolve(true);
+			}
+			return window.indexedDB.databases().then(function (dbs) {
+				return !!(dbs && dbs.length > 0);
+			}, function () {
+				return true;
+			});
+		} catch (err) {
+			return Promise.resolve(true);
+		}
+	}
+
+	function bannerDismissed() {
+		try {
+			return window.localStorage.getItem(SECURE_BANNER_DISMISSED_KEY) === '1';
+		} catch (err) {
+			return false;
+		}
+	}
+
+	function rememberBannerDismissed() {
+		try {
+			window.localStorage.setItem(SECURE_BANNER_DISMISSED_KEY, '1');
+		} catch (err) {
+			// Private browsing, storage full, whatever — the banner just returns
+			// next time. Not worth a word to the player about it.
+		}
+	}
+
+	/** Small, dismissible offer that sits over the splash while the game loads. */
+	function showSecureLinkBanner() {
+		if (bannerDismissed() || document.getElementById('secure-link-banner')) {
+			return;
+		}
+		const banner = document.createElement('div');
+		banner.id = 'secure-link-banner';
+
+		const text = document.createElement('div');
+		text.appendChild(document.createTextNode('There is a safer link for this game: '));
+		const link = document.createElement('a');
+		link.href = SECURE_URL;
+		link.textContent = SECURE_URL;
+		text.appendChild(link);
+		text.appendChild(document.createTextNode(
+			'. Your colouring here stays on this address, so the new link starts a fresh book.'));
+		banner.appendChild(text);
+
+		const dismiss = document.createElement('button');
+		dismiss.type = 'button';
+		dismiss.textContent = 'OK';
+		dismiss.addEventListener('click', function () {
+			rememberBannerDismissed();
+			banner.remove();
+		});
+		banner.appendChild(dismiss);
+
+		document.body.appendChild(banner);
+	}
+
+	if (window.isSecureContext) {
+		// :453 (or any https/localhost origin): nothing to offer, nothing to probe.
+		boot();
+	} else {
+		// Put the splash up first so the probe is never a blank screen.
+		setStatusMode('progress');
+		sweepProgress();
+		probeSecureOrigin().then(function (reachable) {
+			if (!reachable) {
+				console.debug('Secure link ' + SECURE_URL + ' not reachable — staying on this address.');
+				boot();
+				return undefined;
+			}
+			return hasExistingSave().then(function (hasSave) {
+				if (!hasSave) {
+					// Nothing saved on this origin yet, so move before the engine
+					// touches IndexedDB and gives this origin something to lose.
+					console.debug('Secure link reachable and no save here — redirecting to ' + SECURE_URL);
+					window.location.replace(SECURE_URL);
+					return;
+				}
+				console.debug('Secure link reachable but a save exists here — offering, not redirecting.');
+				showSecureLinkBanner();
+				boot();
+			});
+		}).catch(function (err) {
+			// The gate must never be the reason the game does not start.
+			console.debug('Secure-link check failed, booting normally:', err);
+			boot();
+		});
+	}
+}());
+		</script>
+	</body>
+</html>

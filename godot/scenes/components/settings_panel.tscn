@@ -122,6 +122,42 @@ text = "Change"
 [node name="Divider" type="HSeparator" parent="Center/Panel/Margin/Column"]
 layout_mode = 2
 
+[node name="AccountRow" type="HBoxContainer" parent="Center/Panel/Margin/Column"]
+layout_mode = 2
+theme_override_constants/separation = 14
+
+[node name="AccountCaption" type="Label" parent="Center/Panel/Margin/Column/AccountRow"]
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.729412, 0.678431, 0.6, 1)
+theme_override_font_sizes/font_size = 22
+text = "Account"
+
+[node name="AccountValue" type="Label" parent="Center/Panel/Margin/Column/AccountRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 4
+mouse_filter = 2
+clip_text = true
+theme_override_colors/font_color = Color(0.976471, 0.960784, 0.933333, 1)
+theme_override_font_sizes/font_size = 22
+text = "—"
+
+[node name="AccountButton" type="Button" parent="Center/Panel/Margin/Column/AccountRow"]
+custom_minimum_size = Vector2(150, 56)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.972549, 0.94902, 0.905882, 1)
+theme_override_font_sizes/font_size = 22
+theme_override_styles/normal = SubResource("StyleBoxFlat_button")
+theme_override_styles/hover = SubResource("StyleBoxFlat_button")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_button")
+text = "Sign in"
+
+[node name="Divider3" type="HSeparator" parent="Center/Panel/Margin/Column"]
+layout_mode = 2
+
 [node name="EraseButton" type="Button" parent="Center/Panel/Margin/Column"]
 custom_minimum_size = Vector2(0, 56)
 layout_mode = 2

@@ -1,8 +1,10 @@
-[gd_scene load_steps=12 format=3]
+[gd_scene load_steps=14 format=3]
 
 [ext_resource type="Script" path="res://scripts/screens/coloring_page.gd" id="1_coloring_page"]
 [ext_resource type="PackedScene" path="res://scenes/components/page_view.tscn" id="2_page_view"]
 [ext_resource type="PackedScene" path="res://scenes/components/page_flip.tscn" id="3_page_flip"]
+[ext_resource type="Script" path="res://scripts/components/padlock_button.gd" id="4_padlock"]
+[ext_resource type="Script" path="res://scripts/components/history_button.gd" id="5_history"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_toolbar"]
 bg_color = Color(0.184314, 0.164706, 0.152941, 1)
@@ -144,6 +146,26 @@ theme_override_styles/disabled = SubResource("StyleBoxFlat_nav_off")
 text = "Start over"
 tooltip_text = "Clear this page and start it again"
 
+[node name="LockButton" type="Button" parent="Ui/Toolbar/Row"]
+layout_mode = 2
+size_flags_vertical = 4
+script = ExtResource("4_padlock")
+
+[node name="UndoButton" type="Button" parent="Ui/Toolbar/Row"]
+layout_mode = 2
+size_flags_vertical = 4
+disabled = true
+tooltip_text = "Undo the last stroke"
+script = ExtResource("5_history")
+
+[node name="RedoButton" type="Button" parent="Ui/Toolbar/Row"]
+layout_mode = 2
+size_flags_vertical = 4
+disabled = true
+tooltip_text = "Redo the stroke you took back"
+script = ExtResource("5_history")
+forward = true
+
 [node name="PageTitle" type="Label" parent="Ui/Toolbar/Row"]
 layout_mode = 2
 size_flags_horizontal = 3
@@ -202,6 +224,7 @@ size_flags_horizontal = 3
 size_flags_vertical = 3
 
 [node name="Celebration" type="Control" parent="."]
+visible = false
 modulate = Color(1, 1, 1, 0)
 layout_mode = 1
 anchors_preset = 15
@@ -211,41 +234,43 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 
-[node name="Center" type="CenterContainer" parent="Celebration"]
+[node name="Confetti" type="CPUParticles2D" parent="Celebration"]
+emitting = false
+amount = 180
+lifetime = 3.6
+one_shot = true
+explosiveness = 0.82
+randomness = 0.65
+lifetime_randomness = 0.35
+emission_shape = 3
+emission_rect_extents = Vector2(600, 8)
+spread = 32.0
+gravity = Vector2(0, 260)
+initial_velocity_min = 80.0
+initial_velocity_max = 230.0
+angular_velocity_min = -320.0
+angular_velocity_max = 320.0
+angle_min = -180.0
+angle_max = 180.0
+scale_amount_min = 0.55
+scale_amount_max = 1.35
+
+[node name="Message" type="Label" parent="Celebration"]
 layout_mode = 1
-anchors_preset = 15
+anchors_preset = 10
 anchor_right = 1.0
-anchor_bottom = 1.0
+offset_top = 88.0
+offset_bottom = 196.0
 grow_horizontal = 2
-grow_vertical = 2
-mouse_filter = 2
-
-[node name="Column" type="VBoxContainer" parent="Celebration/Center"]
-layout_mode = 2
-mouse_filter = 2
-theme_override_constants/separation = 10
-
-[node name="Title" type="Label" parent="Celebration/Center/Column"]
-layout_mode = 2
 mouse_filter = 2
 theme_override_colors/font_color = Color(1, 0.905882, 0.556863, 1)
 theme_override_colors/font_outline_color = Color(0.117647, 0.0862745, 0.054902, 1)
 theme_override_constants/outline_size = 14
-theme_override_font_sizes/font_size = 72
-text = "Page complete!"
+theme_override_font_sizes/font_size = 64
+text = "This looks fantastic!"
 horizontal_alignment = 1
 vertical_alignment = 1
-
-[node name="Hint" type="Label" parent="Celebration/Center/Column"]
-layout_mode = 2
-mouse_filter = 2
-theme_override_colors/font_color = Color(0.976471, 0.960784, 0.933333, 1)
-theme_override_colors/font_outline_color = Color(0.117647, 0.0862745, 0.054902, 1)
-theme_override_constants/outline_size = 10
-theme_override_font_sizes/font_size = 30
-text = "Tap › when you want the next page"
-horizontal_alignment = 1
-vertical_alignment = 1
+autowrap_mode = 3
 
 [node name="PageFlip" parent="." instance=ExtResource("3_page_flip")]
 layout_mode = 1
@@ -257,9 +282,9 @@ anchors_preset = 5
 anchor_left = 0.5
 anchor_right = 0.5
 offset_left = -150.0
-offset_top = 92.0
+offset_top = 228.0
 offset_right = 150.0
-offset_bottom = 156.0
+offset_bottom = 292.0
 grow_horizontal = 2
 grow_vertical = 1
 mouse_filter = 2

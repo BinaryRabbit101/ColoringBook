@@ -25,12 +25,18 @@ extends Control
 ##      before-number
 ##   c  the coyote book: discovery, validation, region counts, lossless ID-map
 ##      import flags, and get_region_id_at() agreeing with every centroid --
-##      followed by (c2) BL-9's page model: ONE page whose visible art is the
-##      detail drawing and whose regions were traced from an optional, never-shipped
-##      masking image, with the test book guarding the no-mask case
-##   d  page navigation rules: no skipping ahead, revisiting a reached page is
-##      allowed, completing a page unlocks the next one WITHOUT turning it (BL-4),
-##      and a jump BACK saves first and does not play the flip
+##      followed by (c2) the display/mask page model (BL-9, amended by BL-12): ONE
+##      page whose visible art is the detail drawing and whose regions were traced
+##      from an optional masking image -- which now SHIPS, as the pipeline's
+##      display-resolution artifact, and is DRAWN as a layer under the display art,
+##      while the artist's original stays out of the build. The test book guards
+##      the no-mask case
+##   d  free page navigation (BL-10): every page of the book is reachable from the
+##      first frame, a jump saves first and swaps instantly, and only the forward
+##      step off a page just finished plays the flip (BL-4). Then the two rules
+##      that go with free play: a COMPLETE page is still fully paintable and does
+##      not re-celebrate, and the per-page coloring lock stops strokes and Start
+##      over -- and nothing else -- across a page change
 ##   e  portrait: the WINDOW is resized to PORTRAIT_WINDOW and the title screen,
 ##      mode select and coloring page are all checked and screenshotted through
 ##      the real stretch pipeline
@@ -54,9 +60,14 @@ const COYOTE_IDMAP_IMPORTS: PackedStringArray = [
 ## artist's two images are the two halves of a single page -- the outline mask
 ## (coyote + background = 2 regions) and the detail art the player actually sees.
 const COYOTE_EXPECTED_REGIONS: PackedInt32Array = [2]
-## The page's display art, and the masking image its regions were traced from.
+## The page's display art, and the SHIPPED mask artifact its regions were traced
+## from -- the pipeline's display-resolution resample (BL-12), which is what the
+## runtime draws as a layer.
 const COYOTE_DISPLAY_IMAGE := "res://assets/books/coyote/page_01.png"
-const COYOTE_MASK_IMAGE := "res://assets/books/coyote/source/coyote_outline_source.png"
+const COYOTE_MASK_IMAGE := "res://assets/books/coyote/page_01_mask.png"
+## The artist's print-size original, which still never leaves the dev box: it sits
+## behind the source/ .gdignore and is named only in the regions JSON.
+const COYOTE_MASK_SOURCE := "res://assets/books/coyote/source/coyote_outline_source.png"
 ## Every Nth pixel of the alpha channel is compared by the stale-import guard.
 ## 11 keeps ~335k samples out of a 3.7 Mpx page: instant, and no two drawings
 ## agree on that many alpha samples by accident.
@@ -359,30 +370,53 @@ func _check_coyote_book() -> void:
 	_check_display_mask_split()
 
 
-## BL-9's data model, on the one book that uses it: a page has a REQUIRED display
-## image and an OPTIONAL masking image. The mask drives the mapping pipeline and
-## is never rendered -- so it does not even have to be in the build.
+## The display/optional-mask page model (BL-9), as BL-12 left it: a page has a
+## REQUIRED display image and an OPTIONAL masking image. The mask drives the
+## mapping pipeline AND is rendered as a layer under the display art -- so the
+## display-resolution artifact must be in the build, while the artist's print-size
+## original must still not be.
 func _check_display_mask_split() -> void:
-	print("\n-- check c2: the display / optional-mask page model (BL-9) --")
+	print("\n-- check c2: the display / optional-mask page model (BL-9 + BL-12) --")
 	var page := _coyote_book.get_page(0)
 	_expect(page.display_image_path == COYOTE_DISPLAY_IMAGE,
 		"the coyote page's display art is the DETAIL drawing (%s)" % page.display_image_path)
 	_expect(page.has_mask() and page.mask_image_path == COYOTE_MASK_IMAGE,
-		"...and it names the outline as its masking image (%s)" % page.mask_image_path)
+		"...and its mask is the pipeline's shipped artifact (%s)" % page.mask_image_path)
 	_expect(page.get_mapping_source_path() == page.mask_image_path,
 		"the mapping source is the mask, not the display image")
-	_expect(FileAccess.file_exists(COYOTE_MASK_IMAGE),
-		"the mask is on the dev box, where the pipeline runs")
-	_expect(not ResourceLoader.exists(COYOTE_MASK_IMAGE),
-		"...but it is NOT imported as a game resource: nothing can render it")
+	_expect(ResourceLoader.exists(COYOTE_MASK_IMAGE),
+		"the shipped mask IS imported as a game resource -- BL-12 renders it")
+	var mask_texture := page.load_mask_texture()
+	var display_size := (load(page.display_image_path) as Texture2D).get_size()
+	_expect(mask_texture != null and mask_texture.get_size() == display_size,
+		"...at the display image's resolution (%s)"
+		% [mask_texture.get_size() if mask_texture != null else "none"])
+	_expect(FileAccess.file_exists(COYOTE_MASK_SOURCE),
+		"the artist's print-size original is on the dev box, where the pipeline runs")
+	_expect(not ResourceLoader.exists(COYOTE_MASK_SOURCE),
+		"...but it is NOT imported: source/ carries a .gdignore and ships nothing")
 	_expect(page.validate().is_empty(),
-		"the page still validates with an unimported mask (%s)" % [page.validate()])
+		"the page validates (%s)" % [page.validate()])
+
+	# BL-12 made the mask a runtime asset, so validate() must now REFUSE a page
+	# that names one the build does not have -- which is exactly what pointing it
+	# back at the artist's original does.
+	var stale := PageDef.new()
+	stale.display_name = page.display_name
+	stale.display_image_path = page.display_image_path
+	stale.id_map_path = page.id_map_path
+	stale.regions_json_path = page.regions_json_path
+	stale.mask_image_path = COYOTE_MASK_SOURCE
+	var stale_problems := stale.validate()
+	_expect(not stale_problems.is_empty(),
+		"a page whose mask is not in the build no longer validates (%s)" % [stale_problems])
 
 	var json := page.load_regions_json()
 	_expect(String(json.get("source_image", "")) == COYOTE_DISPLAY_IMAGE.get_file(),
 		"the regions JSON belongs to the display page (%s)" % json.get("source_image"))
-	_expect(String(json.get("mask_image", "")) == COYOTE_MASK_IMAGE.get_file(),
-		"...and records the mask it was traced from (%s)" % json.get("mask_image"))
+	_expect(String(json.get("mask_image", "")) == COYOTE_MASK_SOURCE.get_file(),
+		"...and records the ORIGINAL it was traced from, for provenance (%s)"
+		% json.get("mask_image"))
 	var display_texture := load(page.display_image_path) as Texture2D
 	var json_size: Array = json.get("image_size", [])
 	_expect(display_texture != null and json_size.size() == 2
@@ -436,12 +470,25 @@ func _check_display_mask_split() -> void:
 	view.size = Vector2(600.0, 600.0)
 	await get_tree().process_frame
 	var loaded := view.load_page(
-		page.display_image_path, page.id_map_path, page.regions_json_path
+		page.display_image_path, page.id_map_path, page.regions_json_path, page.mask_image_path
 	)
 	_expect(loaded, "PageView loads the page from the DISPLAY image + the mask's ID map")
 	if loaded:
 		_expect(display_texture != null and view.get_page_size() == Vector2i(display_texture.get_size()),
 			"the loaded page is the display image's size (%s)" % view.get_page_size())
+
+		# BL-12's layer: paper -> paint -> MASK -> display art. Order is the whole
+		# point -- the mask has to sit over the colour and under the drawing.
+		_expect(view.has_mask_layer(), "the page draws its mask as a layer")
+		_expect(view.get_mask_texture() == page.load_mask_texture(),
+			"...and it is this page's own mask artifact")
+		var root := view.get_node("PageRoot")
+		var paint_index := root.get_node("PaintSprite").get_index()
+		var mask_index := root.get_node("MaskSprite").get_index()
+		var art_index := root.get_node("LineArtSprite").get_index()
+		_expect(paint_index < mask_index and mask_index < art_index,
+			"...between the paint (%d) and the display art (%d), at %d"
+			% [paint_index, art_index, mask_index])
 		# The smaller of the two regions is the coyote; the larger is the paper
 		# around it.
 		var body_id := 0
@@ -459,6 +506,17 @@ func _check_display_mask_split() -> void:
 			"...and the stroke stays locked to it while it drags (%d)"
 			% view.get_locked_region_id())
 		view.end_stroke()
+
+		# A maskless page must render byte-for-byte as it did before BL-12: no
+		# texture on the layer and the node hidden, not a transparent quad.
+		var plain_page := _test_book.get_page(0)
+		var plain_loaded := view.load_page(
+			plain_page.display_image_path, plain_page.id_map_path, plain_page.regions_json_path,
+			plain_page.mask_image_path
+		)
+		_expect(plain_loaded, "PageView loads a page that has no mask")
+		_expect(not view.has_mask_layer() and view.get_mask_texture() == null,
+			"...and draws no mask layer at all for it")
 	view.queue_free()
 
 
@@ -487,7 +545,7 @@ func _check_import_flags(import_path: String, page_number: int) -> void:
 # ======================================================= d: page navigation ==
 
 func _check_page_navigation() -> void:
-	print("\n-- check d: prev/next page navigation --")
+	print("\n-- check d: free page navigation, colouring on, and the lock --")
 	GameState.erase_book_progress(_test_book)
 	var screen := COLORING_PAGE_SCENE.instantiate() as ColoringPage
 	_host.add_child(screen)
@@ -507,19 +565,30 @@ func _check_page_navigation() -> void:
 	_expect(minf(prev.size.x, prev.size.y) >= 48.0 and minf(next.size.x, next.size.y) >= 48.0,
 		"both arrows clear the 48 px touch floor (%.0fx%.0f)" % [prev.size.x, prev.size.y])
 
-	# --- a fresh book: nowhere to go ------------------------------------------
-	_expect(prev.disabled, "on page 1 of a fresh book, Prev is disabled")
-	_expect(next.disabled, "...and Next is disabled: no skipping ahead to an unseen page")
-	_expect(not screen.can_go_to_page(1), "can_go_to_page(1) refuses the unreached page")
+	# --- BL-10: a fresh book offers every one of its pages --------------------
+	_expect(prev.disabled, "on page 1 there is nothing before it, so Prev is disabled")
+	_expect(not next.disabled,
+		"...but Next is LIVE on an untouched book: no page is gated behind another")
+	_expect(screen.can_go_to_page(1), "can_go_to_page(1) accepts a page nobody has coloured")
 	_expect(not screen.can_go_to_page(-1) and not screen.can_go_to_page(9),
-		"out-of-range jumps are refused")
-	_expect(not await screen.go_to_page(1), "go_to_page(1) is refused too, not just greyed out")
-	_expect(screen.get_page_label_text() == "1/2", "the page did not move ('%s')"
-		% screen.get_page_label_text())
+		"out-of-range jumps are still refused")
 
-	# --- finishing page 1 unlocks page 2; the PLAYER takes the flip (BL-4) ----
 	var flips: Array[int] = []
 	screen.get_page_flip().flip_started.connect(func() -> void: flips.append(1))
+	_expect(await screen.go_to_page(1), "go_to_page(1) succeeds on a completely fresh book")
+	_expect(screen.get_page_label_text() == "2/2",
+		"the untouched later page really opened ('%s')" % screen.get_page_label_text())
+	_expect(flips.is_empty(),
+		"...instantly -- the flip belongs to finishing a page, not to browsing (%d)" % flips.size())
+	await _wait_until(func() -> bool: return not screen.has_pending_restore(), NAV_TIMEOUT)
+	_expect(next.disabled, "on the LAST page, with nothing finished, Next has nowhere to go")
+	_expect(not prev.disabled, "...and Prev goes back")
+	_expect(not screen.is_celebrating(),
+		"...and nothing is celebrating a page nobody has coloured")
+
+	# --- back to page 1 and finish it; the PLAYER takes the flip (BL-4) -------
+	_expect(await screen.go_to_page(0), "go_to_page(0) came back to page 1")
+	await _wait_until(func() -> bool: return not screen.has_pending_restore(), NAV_TIMEOUT)
 	var strokes := await _fill_page(screen)
 	print("   page 1 filled with %d strokes" % strokes)
 	var finished := await _wait_until(
@@ -530,7 +599,10 @@ func _check_page_navigation() -> void:
 	_expect(finished, "page 1 completed ('%s')" % screen.get_page_label_text())
 	_expect(flips.is_empty(),
 		"...and did NOT turn itself: completion is not navigation (%d flip(s))" % flips.size())
-	_expect(not next.disabled, "...but it unlocked the next-page arrow")
+	_expect(screen.is_celebrating(), "...it raised the transient celebration (BL-11)")
+	_expect(screen.get_celebration_overlay() != null
+			and screen.get_celebration_overlay().mouse_filter == Control.MOUSE_FILTER_IGNORE,
+		"...which never intercepts a touch, so the page stays live under it")
 	next.pressed.emit()
 	var arrived := await _wait_until(
 		func() -> bool:
@@ -539,16 +611,10 @@ func _check_page_navigation() -> void:
 	)
 	_expect(arrived, "the next-page arrow turned to 2/2 ('%s')" % screen.get_page_label_text())
 	await _wait_until(func() -> bool: return not screen.has_pending_restore(), NAV_TIMEOUT)
-	_expect(flips.size() == 1, "the page turn played the flip once (%d)" % flips.size())
+	_expect(flips.size() == 1,
+		"the forward step off the page just finished played the flip once (%d)" % flips.size())
 
-	# --- now page 1 is reachable again ----------------------------------------
-	_expect(screen.furthest_reached_index() == 1, "the furthest page reached is index %d"
-		% screen.furthest_reached_index())
-	_expect(screen.can_go_to_page(0), "page 1 is reachable again once it has been colored")
-	_expect(not screen.get_prev_page_button().disabled, "...and Prev is enabled for it")
-	_expect(screen.get_next_page_button().disabled, "Next is disabled on the last page")
-
-	# Put a stroke on page 2 so the jump has something to save. A page with no
+	# Put a stroke on page 2 so the jump back has something to save. A page with no
 	# paint and no saved file is deliberately skipped -- there is nothing to write.
 	var page_view := screen.get_page_view()
 	var probe_region := page_view.get_region_ids()[1]
@@ -574,12 +640,55 @@ func _check_page_navigation() -> void:
 		"page 1 came back with its coverage restored (%.3f)"
 		% screen.get_coverage_tracker().page_coverage())
 
-	# --- and forward again, because page 2 has been reached -------------------
-	_expect(screen.can_go_to_page(1), "page 2 is reachable from page 1 now")
-	_expect(not screen.get_next_page_button().disabled, "Next is enabled again")
-	_expect(await screen.go_to_page(1), "go_to_page(1) succeeded")
-	_expect(screen.get_page_label_text() == "2/2",
-		"back on 2/2 ('%s')" % screen.get_page_label_text())
+	# --- BL-10: a complete page is still a page you can colour ---------------
+	_expect(screen.is_page_pre_completed(),
+		"...and it knows it opened already finished, so nothing celebrates again")
+	_expect(not screen.is_celebrating(), "no celebration is on screen for a page merely revisited")
+	var completed_region := page_view.get_region_ids()[0]
+	var completed_point: Vector2 = page_view.get_region_data(completed_region)["centroid"]
+	_expect(page_view.begin_stroke(completed_point),
+		"a stroke STARTS on the completed page -- colour for as long as you like")
+	page_view.continue_stroke(completed_point + Vector2(40.0, 0.0))
+	page_view.end_stroke()
+	await _wait_until(func() -> bool: return not screen.has_pending_coverage(), NAV_TIMEOUT)
+	_expect(screen.has_unsaved_paint(), "...the new stroke is tracked as unsaved work")
+	_expect(not screen.is_celebrating(), "...and it did NOT re-fire the celebration")
+	_expect(screen.get_coverage_tracker().is_page_complete()
+			and GameState.get_page_status(GameState.book_key(_test_book), 0)
+				== GameState.STATUS_COMPLETE,
+		"...completion is still sticky through it")
+	_expect(await screen.save_page_now(false), "...and it saves like any other stroke")
+
+	# --- the coloring lock ----------------------------------------------------
+	var lock := screen.get_lock_button()
+	_expect(lock != null and not screen.is_page_locked(), "the page starts unlocked")
+	screen.set_page_locked(true)
+	_expect(screen.is_page_locked() and lock.locked, "locking the page shows on the padlock")
+	_expect(not page_view.begin_stroke(completed_point),
+		"...and a press on a locked page starts NO stroke")
+	_expect(lock.is_wiggling(), "...the padlock wiggles so a child can see why")
+	_expect(screen.get_reset_button().disabled, "...Start over is disabled")
+	_expect(not next.disabled and not screen.get_save_button().disabled,
+		"...while navigation and Save carry on as normal")
+	_expect(GameState.is_page_locked(GameState.book_key(_test_book), 0),
+		"the lock is recorded against page 1")
+	await _settle_layout()
+	await _screenshot("coloring_locked.png")
+
+	# It follows the PAGE, not the screen: leave and come back.
+	_expect(await screen.go_to_page(1), "navigating away from a locked page works")
+	await _wait_until(func() -> bool: return not screen.has_pending_restore(), NAV_TIMEOUT)
+	_expect(not screen.is_page_locked(), "page 2 is not locked -- the lock is per page")
+	_expect(screen.get_page_view().painting_enabled, "...so page 2 paints normally")
+	_expect(await screen.go_to_page(0), "and back to page 1")
+	await _wait_until(func() -> bool: return not screen.has_pending_restore(), NAV_TIMEOUT)
+	_expect(screen.is_page_locked() and not screen.get_page_view().painting_enabled,
+		"page 1 came back LOCKED, straight out of the save")
+	screen.set_page_locked(false)
+	_expect(not screen.is_page_locked() and page_view.begin_stroke(completed_point),
+		"one tap unlocks it and painting comes straight back")
+	page_view.end_stroke()
+	await _wait_until(func() -> bool: return not screen.has_pending_coverage(), NAV_TIMEOUT)
 
 	screen.queue_free()
 	await get_tree().process_frame

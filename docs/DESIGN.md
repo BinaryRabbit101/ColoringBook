@@ -10,7 +10,7 @@ A digital coloring book. The player:
 
 1. Picks a **mode**: **Child** or **Adult** — this changes palette difficulty and UI presentation.
 2. Picks a **coloring book** (a collection of pages).
-3. Colors the current page. When the page is complete, the book **flips to the next page**.
+3. Colors **any page they like, for as long as they like**. Completion is a celebration, never a gate — see §2.1 (free play).
 
 ### The core coloring mechanic (the heart of the game)
 
@@ -40,13 +40,69 @@ TitleScreen ──► ModeSelect (Child / Adult)
               BookSelect (grid of book covers)
                     │
                     ▼
-              ColoringPage ◄────────────┐
-                    │  page complete    │
-                    ▼                   │
-              PageFlip animation ───────┘   (next page; after last page → BookComplete → BookSelect)
+              ColoringPage ◄──► free page navigation (any page, any order, any time)
+                    │  Back (the only way out of a book)
+                    ▼
+              BookSelect
 ```
 
+There is **no separate completion screen** — neither for a page nor for the
+book (BL-11). Completion is celebrated on the coloring page itself (§2.2).
+
 Progress (which pages are colored, per book, per mode) persists to `user://` via a save system.
+
+### 2.1 Free play, completion & the coloring lock (BL-10)
+
+Completing a page is **never a requirement** for anything. The rules:
+
+- **Any page, any time.** Every page of an open book is always reachable through
+  the prev/next navigation — no page is gated behind completing an earlier one.
+  A brand-new book starts with all of its pages selectable. (The page-flip
+  ceremony remains reserved for the forward step off a page the player just
+  finished; every other jump is an instant swap, per BL-4.)
+- **Color for as long as you want.** Coverage thresholds decide when the
+  *celebration* fires, not when coloring stops. A page that has reached
+  "complete" stays fully paintable — the player can keep adding strokes in the
+  same sitting or reopen the page days later and continue. Completion status is
+  sticky (it never downgrades except via *Start over*, BL-7), and re-painting a
+  complete page must not re-fire the celebration.
+- **The last page is not special (BL-11).** Completing the last page behaves
+  exactly like completing any other page: the transient celebration (§2.2)
+  plays and the player stays put. Its forward arrow is simply disabled — there
+  is no next page — and leaving the book is what it always is: the Back
+  button. There is no book-complete gesture, signal, or screen. Nobody is
+  yanked away from a page they are still enjoying.
+- **The coloring lock.** A padlock toggle in the coloring-page toolbar guards
+  against accidents (a finished page the player wants to protect, or handing the
+  device over just to *show* a page). While locked:
+  - presses on the page start **no stroke** (pan/zoom and two-finger gestures
+    still work — the lock stops paint, not looking);
+  - **Start over** is disabled (the lock's whole job is preventing accidental
+    damage);
+  - Save, navigation, palette browsing and mode switching are unaffected;
+  - tapping the page gives lightweight feedback (e.g. the padlock wiggles) so a
+    child understands why nothing is happening.
+  The lock is **per page** and **persists** in the save file, so a protected
+  page stays protected across sessions. Unlocking is the same single toggle —
+  visible, obvious state, no confirmation dialog needed.
+
+### 2.2 Completion celebration (BL-11)
+
+Completing a page triggers a **transient, on-page** celebration — the only
+completion presentation in the game:
+
+- A congratulatory message, picked **at random** from an authored pool
+  ("This looks fantastic!", "Beautiful work!", "So colorful!", …), appears
+  **above the page** together with a **confetti burst** (palette-colored
+  scraps, no art assets — the `CPUParticles2D` approach from the old
+  BookComplete screen).
+- Both **fade away on their own** after a few seconds. Nothing persists,
+  nothing needs dismissing, and the celebration never blocks input —
+  painting, pan/zoom, navigation and the toolbar all keep working under it.
+- The existing rules around *when* it fires are unchanged: thresholds from the
+  mode (§1), once per completion (sticky — re-painting a complete page or
+  restoring one from a save must not re-fire it), and the page-flip ceremony
+  still rewards the forward step off a page completed this visit (BL-4/BL-10).
 
 ## 3. Technical architecture
 
@@ -54,7 +110,7 @@ Progress (which pages are colored, per book, per mode) persists to `user://` via
 
 Produced offline by the **mapping pipeline** (§4), shipped with the page art. Two artifacts per page:
 
-**Display vs mask (BL-9).** Every page has one **display image** — the art the player sees, with paint appearing beneath its line work — and an **optional masking image**: separate line art that decides where paint may go. When a page has a mask, the mask is the pipeline's input and is *never* loaded or rendered at runtime (it need not even be in the build); when it has none, the display image is its own mapping source. Either way the two artifacts below are generated at, and named after, the **display** page.
+**Display vs mask (BL-9, amended by BL-12).** Every page has one **display image** — the art the player sees, with paint appearing beneath its line work — and an **optional masking image**: separate line art that decides where paint may go. When a page has a mask, the mask is the pipeline's input **and is also rendered at runtime** as a permanent layer under the display image (§3.2, BL-12) — so the pipeline exports a third artifact, **`<page>_mask.png`** (the mask resampled to the display image's resolution), which is what ships and what `PageDef.mask_image_path` points to. The artist's print-size original still stays out of the build (behind `source/` `.gdignore`); its provenance is the regions JSON's `mask_image` field. When a page has no mask, the display image is its own mapping source and no mask layer is drawn. Either way the mapping artifacts below are generated at, and named after, the **display** page.
 
 1. **`<page>_regions.json`** — vector data:
    ```json
@@ -88,7 +144,7 @@ Do **not** CPU-paint pixels with per-pixel region checks on mobile. Use the GPU:
 
 - The paint surface is a **`SubViewport`** the size of the page image; strokes are drawn into it (stamped brush quads along the drag path, interpolated so fast drags leave no gaps).
 - The brush material's **shader samples the ID-map texture** and `discard`s any fragment whose ID-map color ≠ the locked region's `id_color`. The stroke geometry can freely cross lines; the shader clips it to the region.
-- Scene layering (back → front): paper background → SubViewport paint texture → line-art texture (lines on top, transparent elsewhere).
+- Scene layering (back → front): paper background → SubViewport paint texture → **mask texture when the page has one** (BL-12 — its outlines stay visible over the paint as permanent region guides) → display/line-art texture (lines on top, transparent elsewhere).
 - The ID map **must** stay lossless end-to-end or region IDs bleed at edges. In Godot 4 that means: `.import` keeps `compress/mode=0`, `mipmaps/generate=false`, **and `detect_3d/compress_to=0`** (the default `1` silently re-imports as VRAM-compressed if the texture is ever seen in a 3D context). Texture *filtering* is not an import flag — set `TEXTURE_FILTER_NEAREST` on the node/material that samples the ID map.
 
 Per-region **coverage tracking** for completion: count painted pixels per region. Cheap approach: on stroke end, sample the SubViewport texture at a sparse grid of points per region (precomputed from the polygons) rather than reading back full images every frame. Threshold per mode (§1).
@@ -166,7 +222,7 @@ Steps:
 1. Load the line-art PNG; binarize: line pixels = alpha/darkness above threshold (configurable).
 2. **Flood-fill segmentation** of non-line pixels → connected regions; discard specks below a minimum area (noise).
 3. Assign each region an id and an `id_color` (encode id in RGB, e.g. `id = R<<16|G<<8|B`); write **`_idmap.png`**.
-4. **Marching squares** around each region → outline (+ holes), simplify (Ramer–Douglas–Peucker, tolerance configurable); compute centroid & area; write **`_regions.json`** (§3.1 schema).
+4. **Marching squares** around each region → outline (+ holes), simplify (Ramer–Douglas–Peucker, tolerance configurable); compute centroid & area; write **`_regions.json`** (§3.1 schema). On a `--display` run also write **`_mask.png`** — the mask as resampled in step 1, which is the runtime layer (§3.1/§3.2, BL-12) and costs one extra PNG encode because that image already exists.
 5. Print a summary (region count, dropped specks, min/max area) and fail loudly on: unclosed line gaps producing one giant region, or zero regions.
 
 Also provide a **debug overlay** toggle in `page_view.tscn` that tints regions from the JSON polygons — the fastest way to verify a page's mapping in-game.

@@ -6,6 +6,7 @@
 
 [resource]
 script = ExtResource("1_book_def")
+book_uid = "test-book-2026"
 display_name = "Test Book"
 cover_image_path = ""
 pages = Array[PageDef]([ExtResource("2_page_01"), ExtResource("3_page_02")])

@@ -15,13 +15,15 @@ Full spec: [docs/DESIGN.md](../../../docs/DESIGN.md) §3.1 & §4. The tool lives
   --script tools/generate_region_map.gd -- assets/books/<book>/page_01.png
 ```
 
-Outputs next to the source image: `page_01_idmap.png` + `page_01_regions.json`.
+Outputs next to the source image: `page_01_idmap.png` + `page_01_regions.json` (plus
+`page_01_mask.png` on a `--display` run — see below).
 
-### Display image vs masking image (BL-9)
+### Display image vs masking image (BL-9, amended by BL-12)
 
 Every page has a **display image** (the art the player sees) and an **optional masking image** (line
-art that only decides where paint may go, never rendered). The positional argument is always the
-**mapping source**; when that is a mask, name the page's display art with `--display`:
+art that decides where paint may go, and that BL-12 also draws as a layer under the display art).
+The positional argument is always the **mapping source**; when that is a mask, name the page's
+display art with `--display`:
 
 ```
   --script tools/generate_region_map.gd -- assets/books/coyote/source/coyote_outline_source.png \
@@ -29,12 +31,16 @@ art that only decides where paint may go, never rendered). The positional argume
 ```
 
 The artifacts are then written next to the **display** image (`page_01_idmap.png`,
-`page_01_regions.json`) because that is the page they belong to, and the mask is resampled to the
-display image's dimensions when they differ — the artist's mask is print-resolution while the
-shipped page fits the 2048 px budget, and an ID map that isn't pixel-for-pixel the display image is
-unusable. A mismatched **aspect** hard-fails instead (that is not the same drawing twice). The mask
-is never shipped and never loaded at runtime; `PageDef.mask_image_path` records it purely as the
-mapping source, so it may sit in the `.gdignore`d `source/` folder.
+`page_01_regions.json`, `page_01_mask.png`) because that is the page they belong to, and the mask is
+resampled to the display image's dimensions when they differ — the artist's mask is print-resolution
+while the shipped page fits the 2048 px budget, and an ID map that isn't pixel-for-pixel the display
+image is unusable. A mismatched **aspect** hard-fails instead (that is not the same drawing twice).
+
+**`page_01_mask.png` is that resample, and it SHIPS** (BL-12 reversed BL-9's "never shipped, never
+loaded"): the runtime draws it between the paint layer and the display art, so its outlines stay
+visible over the colour. `PageDef.mask_image_path` therefore points at this artifact — never into the
+`.gdignore`d `source/` folder, which `PageDef.validate()` now rejects — while the artist's print-size
+original stays out of the build and is recorded in the JSON's `mask_image` field for provenance.
 
 Optional per-run overrides (M6) after the source path — `--display`, `--line-alpha-min`, `--line-luminance-max`,
 `--dilate`, `--min-area`, `--rdp`, `--giant-fraction`. The defaults are still the constants at the
@@ -74,9 +80,9 @@ Coordinates are image pixel space; `outline`/`holes` vertices are pixel-corner (
 
 - ID map and **display** image must be **identical dimensions**; anti-aliased line edges belong to the **line** (unpaintable), never to a region — a 1-px halo of `#000000` around lines is correct and prevents edge bleed.
 - The `_idmap.png` **import settings** must stay lossless: `compress/mode=0`, `mipmaps/generate=false`, `detect_3d/compress_to=0` (the default `1` silently VRAM-compresses on 3D detection), `process/fix_alpha_border=false`. Filtering is a per-usage sampler setting in Godot 4, not an import flag — set `TEXTURE_FILTER_NEAREST` where the ID map is sampled. If regions "bleed" at boundaries in-game, check the `.import` file first.
-- Generated files are build artifacts of the source PNG: **never hand-edit**; re-run the tool after any art change, and commit source + both outputs + `.import` together.
-- Adding a new page = drop the display PNG under `assets/books/<book>/` (plus its masking image under `source/`, if it has one), run the tool, create/update the `PageDef` `.tres` — `display_image_path` + optional `mask_image_path` + the two artifact paths — then verify with the in-game debug overlay (region tinting) before calling it done.
+- Generated files are build artifacts of the source PNG: **never hand-edit**; re-run the tool after any art change, and commit source + every output + the `.import` files together.
+- Adding a new page = drop the display PNG under `assets/books/<book>/` (plus its masking image under `source/`, if it has one), run the tool, create/update the `PageDef` `.tres` — `display_image_path` + the artifact paths, and `mask_image_path` pointing at the generated `page_NN_mask.png` (**not** at the `source/` original) — then re-import (`--headless --import`, or the new artifact is invisible to a CLI run) and verify with the in-game debug overlay (region tinting) before calling it done.
 - Keep thresholds/tolerances as script constants at the top of the file with comments — pages vary in line weight and will need tuning. Tune a single page with a CLI flag, not by editing the constant.
 - **Source art belongs to the artist**: keep the untouched original next to the page under `assets/books/<book>/source/` with an empty `.gdignore` in that folder (Godot skips it, the Android preset excludes it), and put the *shipped* page — snake_case, within the 2048 px budget — at `assets/books/<book>/page_NN.png`. Real art arrives with spaces in the filename and at print resolution; both are the pipeline's problem, not the artist's.
 - **What "it mapped" means for real art** (M6, the coyote book): a hand-drawn page maps to the regions the *artist actually closed*, which is usually far fewer than the shapes a human sees. Contour lines that stop in mid-air (fur ticks, a leg outline that fades into a ruff) enclose nothing, so the whole body comes back as one region. That is correct output, not a failure — the failure mode to watch for is the giant-region check firing, i.e. paint leaking *between* shapes through a gap. Check the ID map visually before believing either verdict.
-- **A mask is how the artist controls that** (BL-9): the coyote page's detail art is full of fur ticks and inner contours, but its regions come from a plain silhouette mask — coyote + paper, 2 regions. The player colours the whole animal in one sweep with every detail line still drawn on top. Reach for a mask whenever the visible art's line work is decoration rather than a colouring boundary.
+- **A mask is how the artist controls that** (BL-9): the coyote page's detail art is full of fur ticks and inner contours, but its regions come from a plain silhouette mask — coyote + paper, 2 regions. The player colours the whole animal in one sweep with every detail line still drawn on top. Reach for a mask whenever the visible art's line work is decoration rather than a colouring boundary. Since BL-12 the mask is also **visible**, drawn over the paint and under the detail art, so it doubles as the region guide the detail lines do not give — draw it like something the player will see, not like scaffolding.

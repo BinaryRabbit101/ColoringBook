@@ -19,6 +19,7 @@ extends Control
 ## func get_selected_brush_size() -> float
 ## func get_color_buttons() -> Array[Control]
 ## func get_brush_size_controls() -> Array[Control]
+## func get_pick_preview() -> PickPreview
 ## [/codeblock]
 ## [method set_palette] auto-selects the first colour and the palette's default
 ## brush size, emitting [signal brush_size_picked] then [signal color_picked]
@@ -33,6 +34,12 @@ extends Control
 ## then FOLLOWS the finger across the row until it lifts. The drag half lives in
 ## [PaletteSlideInput], which both palettes share; the press half stays with the
 ## buttons so hover, tooltips and [signal BaseButton.pressed] keep working.
+##
+## [b]Pick preview[/b] (BACKLOG BL-15): the finger covers the crayon it is picking,
+## so the candidate is echoed in a [PickPreview] bubble floating above the touch
+## point. The palette owns the bubble and feeds it from [PaletteSlideInput]'s
+## candidate hook -- the same gesture tracking slide-to-select already does, not a
+## second copy of it.
 ##
 ## Self-contained: it is handed a [PaletteDef] and reaches nothing outside its
 ## own subtree. Signals up, calls down.
@@ -55,6 +62,9 @@ var _row: HBoxContainer
 var _scroll: ScrollContainer
 ## Drag half of slide-to-select; the crayons themselves make the first pick.
 var _slide := PaletteSlideInput.new()
+## BL-15's floating candidate bubble. Created here, never injected: the palette is
+## self-contained and the smoke test drives it standalone.
+var _preview: PickPreview
 
 
 func _ready() -> void:
@@ -66,7 +76,14 @@ func _resolve_nodes() -> void:
 		_scroll = get_node("Margin/Scroll") as ScrollContainer
 	if _row == null:
 		_row = get_node("Margin/Scroll/CrayonRow") as HBoxContainer
+	if _preview == null:
+		# Parented to the palette ROOT, not the scroller: the bubble has to float
+		# clear of both, and the root is a plain Control so nothing lays it out.
+		_preview = PickPreview.new()
+		_preview.name = "PickPreview"
+		add_child(_preview)
 	_slide.configure(self, _scroll)
+	_slide.set_candidate_hook(_on_slide_candidate, _on_slide_released)
 
 
 ## Slide-to-select runs BEFORE the GUI phase, like [PageView]'s painting, so one
@@ -75,6 +92,15 @@ func _resolve_nodes() -> void:
 func _input(event: InputEvent) -> void:
 	if _slide.handle_input(event):
 		get_viewport().set_input_as_handled()
+		return
+	# BL-16's dismiss audit. [PaletteSlideInput] already fades the bubble when the
+	# gesture it is tracking ends, but it only tracks gestures it CLAIMED: a press
+	# that started on a crayon the helper refused (outside its hit area, another
+	# control hovered) still raised the bubble through the button, and a release
+	# whose index it never saw would leave it up. Any pointer release, from anywhere,
+	# means no finger is choosing anything.
+	if _slide.is_release_event(event):
+		_on_slide_released()
 
 
 # ================================================== shared palette contract ==
@@ -167,6 +193,31 @@ func get_brush_size_controls() -> Array[Control]:
 	return []
 
 
+## The floating pick-preview bubble (BL-15). Never null after [method _ready].
+func get_pick_preview() -> PickPreview:
+	_resolve_nodes()
+	return _preview
+
+
+# ================================================================ pick preview ==
+
+## The finger is over crayon [param index] ([code]-1[/code] between crayons, where
+## the last candidate stands). Presentational only -- the pick itself is
+## [method select_color], called by the button and by [PaletteSlideInput].
+func _on_slide_candidate(index: int, viewport_position: Vector2) -> void:
+	if _preview == null or _palette == null:
+		return
+	if index < 0:
+		_preview.move_to(viewport_position)
+		return
+	_preview.show_color(_palette.get_color(index), viewport_position)
+
+
+func _on_slide_released() -> void:
+	if _preview != null:
+		_preview.dismiss()
+
+
 # =================================================================== internal ==
 
 func _on_crayon_pressed(index: int) -> void:
@@ -175,6 +226,8 @@ func _on_crayon_pressed(index: int) -> void:
 
 func _clear_row() -> void:
 	_crayons.clear()
+	if _preview != null:
+		_preview.hide_now()
 	var no_targets: Array[Control] = []
 	_slide.set_targets(no_targets, Callable())
 	if _row == null:

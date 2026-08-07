@@ -71,6 +71,8 @@ func _run() -> void:
 	_check_signals()
 	_check_debug_overlay()
 	await _check_composited_layer_stack()
+	await _check_painting_disabled()
+	await _check_stroke_replay()
 
 	print("=== %d/%d checks passed ===" % [_checks - _failures, _checks])
 	if "--stay" in OS.get_cmdline_user_args():
@@ -229,6 +231,136 @@ func _check_composited_layer_stack() -> void:
 	var darkest := _screen_darkest(screen, Vector2(936.5, 250.5), 3)
 	_expect(darkest < 0.45,
 		"line art still renders on top (darkest luminance near a line pixel: %.3f)" % darkest)
+
+
+## BL-10's coloring lock, at the level the component owns it: `painting_enabled`
+## off means a press starts NO stroke and reports it instead. Everything else --
+## the paint already down, the view, the region data -- is untouched.
+func _check_painting_disabled() -> void:
+	print("\n-- check 8: painting_enabled (BL-10 coloring lock) --")
+	var blocked: Array[Vector2] = []
+	var handler := func(position: Vector2) -> void: blocked.append(position)
+	_page_view.paint_blocked.connect(handler)
+
+	await _clear()
+	var point := Vector2(700.5, 250.5)
+	_page_view.painting_enabled = false
+	var started := _page_view.begin_stroke(point)
+	# The drag and release must be as harmless as the press: a lock that only
+	# stopped the FIRST event would still paint on any pointer that was already
+	# down when it went on.
+	_page_view.continue_stroke(point + Vector2(120.0, 0.0))
+	_page_view.end_stroke()
+	var paint := await _read_paint()
+
+	_expect(not started, "begin_stroke() is refused while painting is disabled")
+	_expect(not _page_view.is_stroke_active(), "no stroke is left active")
+	_expect(blocked.size() == 1 and blocked[0] == point,
+		"paint_blocked fired once with the press position (%s)" % [blocked])
+	_expect(_count_painted_by_region(paint).is_empty(),
+		"nothing was painted at all (%s)" % _count_painted_by_region(paint))
+
+	# --- and back on again ----------------------------------------------------
+	_page_view.painting_enabled = true
+	_expect(_page_view.begin_stroke(point), "re-enabling painting lets the next press through")
+	_page_view.continue_stroke(point + Vector2(120.0, 0.0))
+	# Turning the lock on MID-STROKE cancels what is down, so the flag is safe to
+	# flip at any moment.
+	_page_view.painting_enabled = false
+	_expect(not _page_view.is_stroke_active(), "disabling mid-stroke cancels the stroke in progress")
+	var during := await _read_paint()
+	_expect(int(_count_painted_by_region(during).get(4, 0)) > 0,
+		"...and the paint it had already laid down STAYS (%d px)"
+		% int(_count_painted_by_region(during).get(4, 0)))
+	_expect(blocked.size() == 1, "no extra paint_blocked came from the successful press (%d)"
+		% blocked.size())
+
+	_page_view.paint_blocked.disconnect(handler)
+	_page_view.painting_enabled = true
+	await _clear()
+
+
+## BL-17: stroke recipes, the rebuild, and the one property undo/redo lives or dies
+## by -- that replaying a stroke reproduces it EXACTLY. Everything here is compared
+## byte-for-byte against the layer the live strokes produced, not "roughly the same
+## number of pixels": an undo that shifted a dab by a pixel would look like a bug
+## the moment a child undid twice.
+func _check_stroke_replay() -> void:
+	print("\n-- check 9: stroke recipes & replay (BL-17) --")
+	await _clear()
+
+	# --- stroke one, recorded ------------------------------------------------
+	_page_view.brush_color = Color(0.15, 0.35, 0.85, 1.0)
+	_page_view.begin_stroke(Vector2(700.5, 250.5))
+	for x in range(720, 900, 20):
+		_page_view.continue_stroke(Vector2(x + 0.5, 250.5))
+	_page_view.end_stroke()
+	var recipe_a := _page_view.take_last_stroke_recipe()
+	_expect(not recipe_a.is_empty(), "a finished stroke leaves a recipe")
+	_expect(int(recipe_a.get("region_id", -1)) == 4,
+		"...naming the region it locked (%s)" % recipe_a.get("region_id"))
+	_expect(recipe_a.get("color") == Color(0.15, 0.35, 0.85, 1.0)
+		and is_equal_approx(float(recipe_a.get("diameter", 0.0)), BRUSH_DIAMETER),
+		"...with the brush it used (#%s at %.0f px)"
+		% [(recipe_a.get("color") as Color).to_html(false), recipe_a.get("diameter")])
+	var points_a: PackedVector2Array = recipe_a.get("points", PackedVector2Array())
+	_expect(points_a.size() > 20,
+		"...and every dab centre it stamped (%d points)" % points_a.size())
+	_expect(_page_view.take_last_stroke_recipe().is_empty(),
+		"taking the recipe consumes it -- one stroke cannot be recorded twice")
+	var after_a := (await _read_paint()).get_data()
+
+	# --- stroke two, on top --------------------------------------------------
+	_page_view.brush_color = Color(0.95, 0.75, 0.10, 1.0)
+	_page_view.begin_stroke(Vector2(264.5, 264.5))
+	_page_view.continue_stroke(Vector2(264.5, 200.5))
+	_page_view.end_stroke()
+	var recipe_b := _page_view.take_last_stroke_recipe()
+	var after_b := (await _read_paint()).get_data()
+	_expect(after_a != after_b, "precondition: the second stroke really changed the layer")
+
+	# --- undo: rebuild the page without it -----------------------------------
+	await _page_view.rebuild_paint(null, [recipe_a])
+	var rebuilt := (await _read_paint()).get_data()
+	_expect(rebuilt == after_a,
+		"rebuilding from the first recipe alone reproduces the layer BYTE FOR BYTE"
+		+ " (%d bytes)" % rebuilt.size())
+
+	# --- redo: stamp the popped recipe back on top ---------------------------
+	_page_view.stamp_recipe(recipe_b)
+	var redone := (await _read_paint()).get_data()
+	_expect(redone == after_b, "re-stamping the second recipe restores it exactly -- undo/redo is pixel-stable")
+
+	# --- the brush moved on, the recipe did not ------------------------------
+	# A replay must not be disturbed by whatever the palette is holding NOW.
+	_page_view.brush_color = Color(0.1, 0.9, 0.2, 1.0)
+	_page_view.brush_size = 8.0
+	await _page_view.rebuild_paint(null, [recipe_a, recipe_b])
+	var replayed := (await _read_paint()).get_data()
+	_expect(replayed == after_b,
+		"a replay uses the recipe's own brush, not the live one (colour and size changed under it)")
+	_page_view.brush_size = BRUSH_DIAMETER
+
+	# --- a baseline image goes back in bit-exact -----------------------------
+	# This is the M5 restore path, which the rebuild leans on for "the page as it
+	# was when it opened". Premultiplied over a freshly cleared target or it drifts.
+	var baseline := await _read_paint()
+	await _page_view.rebuild_paint(baseline, [])
+	var restored := (await _read_paint()).get_data()
+	_expect(restored == after_b, "a rebuild over a BASELINE image alone is bit-exact too")
+
+	# --- the clip travels with the recipe ------------------------------------
+	var counts := _count_painted_by_region(await _read_paint())
+	_expect(int(counts.get(4, 0)) > 0 and int(counts.get(5, 0)) > 0,
+		"both replayed strokes landed in their own regions (%s)" % counts)
+	_expect(int(counts.get(3, 0)) == 0 and int(counts.get(1, 0)) == 0,
+		"...and a replayed stroke is clipped by the shader exactly like a live one"
+		+ " (%d px in region 3, %d in region 1)" % [int(counts.get(3, 0)), int(counts.get(1, 0))])
+
+	_expect(not _page_view.is_replaying(), "the rebuild reported itself finished")
+	await _clear()
+	_expect(_page_view.take_last_stroke_recipe().is_empty(),
+		"clearing the page drops the pending recipe with the pixels")
 
 
 func _screen_sample(screen: Image, page_position: Vector2) -> Color:

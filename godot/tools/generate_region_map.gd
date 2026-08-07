@@ -1,9 +1,12 @@
 extends SceneTree
 ## Dev tool — the ColoringBook mapping pipeline (docs/DESIGN.md §3.1 & §4).
 ##
-## Turns a line-art page PNG into the two per-page runtime artifacts:
+## Turns a line-art page PNG into the per-page runtime artifacts:
 ##   <page>_idmap.png    lossless region ID map (#000000 = line / unpaintable)
 ##   <page>_regions.json version-1 region polygons, centroids and areas
+##   <page>_mask.png     --display runs only: the masking image resampled to the
+##                       display page's resolution (BL-12 — a RUNTIME asset now,
+##                       drawn as a layer under the display art)
 ##
 ## Usage:
 ##   <godot_exe> --headless --path <project> \
@@ -18,11 +21,18 @@ extends SceneTree
 ##   ... -- assets/books/coyote/source/coyote_outline_source.png \
 ##          --display assets/books/coyote/page_01.png
 ## The artifacts are then written next to the DISPLAY image (page_01_idmap.png,
-## page_01_regions.json), because that is the page they belong to, and the mask is
-## resized to the display image's dimensions when the two differ — the artist's
-## mask arrives at print resolution while the shipped page is inside the 2048 px
-## budget, and an ID map that does not match the display image pixel for pixel is
-## unusable. The mask itself is never shipped and never rendered.
+## page_01_regions.json, page_01_mask.png), because that is the page they belong
+## to, and the mask is resized to the display image's dimensions when the two
+## differ — the artist's mask arrives at print resolution while the shipped page
+## is inside the 2048 px budget, and an ID map that does not match the display
+## image pixel for pixel is unusable.
+##
+## That resampled mask is ALSO written out as <page>_mask.png (BL-12): it is no
+## longer build-only. The runtime draws it as a permanent layer between the paint
+## and the display art, so its outlines stay visible over the paint as region
+## guides. Only the resampled artifact ships; the artist's print-size original
+## stays behind the source/ .gdignore, named in the JSON's "mask_image" field for
+## provenance.
 ##
 ## Optional flags, after the source path (M6 — real art varies in line weight and
 ## the shipped defaults are not going to suit every page; overriding them per run
@@ -156,6 +166,16 @@ func _initialize() -> void:
 		quit(1)
 		return
 
+	# BL-12: the mask is a runtime layer now, so the display-resolution version we
+	# just mapped from is written out beside the ID map. `image` is exactly that --
+	# _binarize() only READ it -- so this costs a PNG encode and nothing else.
+	var mask_path := ""
+	if DISPLAY_IMAGE_PATH != "":
+		mask_path = base_path + "_mask.png"
+		if not _write_mask(mask_path, image):
+			quit(1)
+			return
+
 	_trace_regions(regions)
 	if CENTROID_SNAP_TO_REGION:
 		_snap_centroids(regions)
@@ -166,7 +186,7 @@ func _initialize() -> void:
 		quit(1)
 		return
 
-	_report(regions, dropped_specks, idmap_path, json_path)
+	_report(regions, dropped_specks, idmap_path, json_path, mask_path)
 	quit(0)
 
 
@@ -435,6 +455,19 @@ func _write_idmap(path: String) -> bool:
 		bytes[offset + 1] = (id >> 8) & 0xFF
 		bytes[offset + 2] = id & 0xFF
 	var image := Image.create_from_data(_width, _height, false, Image.FORMAT_RGB8, bytes)
+	var err := image.save_png(path)
+	if err != OK:
+		printerr("FAIL: could not write %s (error %d)" % [path, err])
+		return false
+	return true
+
+
+## The third artifact (BL-12): the masking image at the DISPLAY page's resolution,
+## which is precisely the image the segmentation above ran on. It ships and is
+## rendered as a layer under the display art, so its outlines stay visible over
+## the paint. Ordinary art as far as the importer is concerned -- unlike the ID
+## map, nothing here has to survive bit-exactly.
+func _write_mask(path: String, image: Image) -> bool:
 	var err := image.save_png(path)
 	if err != OK:
 		printerr("FAIL: could not write %s (error %d)" % [path, err])
@@ -720,7 +753,8 @@ func _validate(regions: Array[Dictionary]) -> String:
 
 ## Prints the run summary.
 func _report(
-	regions: Array[Dictionary], dropped_specks: int, idmap_path: String, json_path: String
+	regions: Array[Dictionary], dropped_specks: int, idmap_path: String, json_path: String,
+	mask_path: String = ""
 ) -> void:
 	var paintable := 0
 	var min_area := int(regions[0]["area_px"])
@@ -735,6 +769,8 @@ func _report(
 
 	print("Wrote %s" % idmap_path)
 	print("Wrote %s" % json_path)
+	if mask_path != "":
+		print("Wrote %s (display-resolution mask layer, BL-12)" % mask_path)
 	print("Regions: %d | dropped specks: %d | holes traced: %d" % [
 		regions.size(), dropped_specks, total_holes
 	])

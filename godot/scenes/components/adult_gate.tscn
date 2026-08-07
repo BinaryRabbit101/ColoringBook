@@ -1,0 +1,144 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/components/adult_gate.gd" id="1_adult_gate"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_scrim"]
+bg_color = Color(0.0392157, 0.0313726, 0.027451, 0.65)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
+bg_color = Color(0.184314, 0.164706, 0.152941, 1)
+border_width_left = 3
+border_width_top = 3
+border_width_right = 3
+border_width_bottom = 3
+border_color = Color(0.415686, 0.360784, 0.301961, 1)
+corner_radius_top_left = 20
+corner_radius_top_right = 20
+corner_radius_bottom_right = 20
+corner_radius_bottom_left = 20
+shadow_color = Color(0, 0, 0, 0.470588)
+shadow_size = 24
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_button"]
+bg_color = Color(0.352941, 0.309804, 0.278431, 1)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+
+[node name="AdultGate" type="Control"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_adult_gate")
+
+[node name="Scrim" type="Button" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+focus_mode = 0
+theme_override_styles/normal = SubResource("StyleBoxFlat_scrim")
+theme_override_styles/hover = SubResource("StyleBoxFlat_scrim")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_scrim")
+theme_override_styles/focus = SubResource("StyleBoxFlat_scrim")
+
+[node name="Center" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="Panel" type="PanelContainer" parent="Center"]
+custom_minimum_size = Vector2(600, 0)
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
+
+[node name="Margin" type="MarginContainer" parent="Center/Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 30
+theme_override_constants/margin_top = 26
+theme_override_constants/margin_right = 30
+theme_override_constants/margin_bottom = 26
+
+[node name="Column" type="VBoxContainer" parent="Center/Panel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 16
+
+[node name="Header" type="Label" parent="Center/Panel/Margin/Column"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.972549, 0.803922, 0.478431, 1)
+theme_override_font_sizes/font_size = 34
+text = "Grown-ups only"
+horizontal_alignment = 1
+
+[node name="Blurb" type="Label" parent="Center/Panel/Margin/Column"]
+layout_mode = 2
+mouse_filter = 2
+autowrap_mode = 3
+theme_override_colors/font_color = Color(0.729412, 0.678431, 0.6, 1)
+theme_override_font_sizes/font_size = 20
+text = "The next screen is for a parent or guardian. Please answer to carry on."
+horizontal_alignment = 1
+
+[node name="Question" type="Label" parent="Center/Panel/Margin/Column"]
+layout_mode = 2
+mouse_filter = 2
+autowrap_mode = 3
+theme_override_colors/font_color = Color(0.976471, 0.960784, 0.933333, 1)
+theme_override_font_sizes/font_size = 28
+text = "—"
+horizontal_alignment = 1
+
+[node name="Answer" type="LineEdit" parent="Center/Panel/Margin/Column"]
+custom_minimum_size = Vector2(0, 56)
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+placeholder_text = "Type the number"
+alignment = 1
+max_length = 4
+
+[node name="Hint" type="Label" parent="Center/Panel/Margin/Column"]
+visible = false
+layout_mode = 2
+mouse_filter = 2
+autowrap_mode = 3
+theme_override_colors/font_color = Color(0.937255, 0.788235, 0.756863, 1)
+theme_override_font_sizes/font_size = 19
+text = "—"
+horizontal_alignment = 1
+
+[node name="Row" type="HBoxContainer" parent="Center/Panel/Margin/Column"]
+layout_mode = 2
+theme_override_constants/separation = 14
+alignment = 1
+
+[node name="SubmitButton" type="Button" parent="Center/Panel/Margin/Column/Row"]
+custom_minimum_size = Vector2(230, 56)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.972549, 0.94902, 0.905882, 1)
+theme_override_font_sizes/font_size = 22
+theme_override_styles/normal = SubResource("StyleBoxFlat_button")
+theme_override_styles/hover = SubResource("StyleBoxFlat_button")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_button")
+text = "Continue"
+
+[node name="CancelButton" type="Button" parent="Center/Panel/Margin/Column/Row"]
+custom_minimum_size = Vector2(150, 56)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.972549, 0.94902, 0.905882, 1)
+theme_override_font_sizes/font_size = 22
+theme_override_styles/normal = SubResource("StyleBoxFlat_button")
+theme_override_styles/hover = SubResource("StyleBoxFlat_button")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_button")
+text = "Back"

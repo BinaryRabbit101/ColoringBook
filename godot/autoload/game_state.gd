@@ -10,6 +10,34 @@ extends Node
 ## "player progress/settings -> user://, written by GameState only"). Screens hand
 ## it an [Image] or a status; they never open a file.
 ##
+## [b]The one exception, and its exact edges (WP10, WP11).[/b] The
+## [code]Backend[/code] autoload owns three paths under [code]user://[/code] and
+## nothing else:
+## [codeblock]
+## user://auth.json        the device's account token   (AuthStore)
+## user://dlc/             installed DLC packs, and     (PackInstaller,
+##                         the entitlement cache         EntitlementsStore)
+## user://sync_queue.json  pending pushes, per-book      (SyncQueue, WP11)
+##                         base revisions and the
+##                         pull cursor
+## [/codeblock]
+## None of the three is player progress: one is a credential for the device, one is
+## CONTENT that arrived after the build, and the third is BOOKKEEPING ABOUT a sync
+## -- what the server was last known to hold, never what the player did. This class
+## never opens any of them, and Backend never opens the save file, the paint layers
+## or anything else in here -- so there is still exactly one writer per file, which
+## is the property the rule was protecting.
+##
+## [b]Sync writes go THROUGH this class[/b] (DLC_SERVER.md 8.2: "sync writes into
+## GameState through its existing API ... so there is still exactly one writer of
+## user://"). The three entry points WP11 uses are [method mark_page_status],
+## [method set_saved_page_index] and [method install_page_paint]; the paint-write
+## hook it listens to is [signal page_paint_written].
+## [method BookDef.discover] READS [code]user://dlc/[/code], and
+## [method book_key] keys a DLC book's progress by the same
+## [member BookDef.book_uid] as a built-in one, so a book delivered both ways has
+## one lot of progress (DLC_SERVER.md 6.1).
+##
 ## The structure is deliberate and unchanged: all state is plain instance vars
 ## (no statics, no hidden globals), every mutation emits a past-tense signal, and
 ## resource lookup is table-driven.
@@ -27,8 +55,6 @@ signal book_started(book: BookDef)
 ## Emitted whenever [member current_page_index] changes (including the reset to 0
 ## in [method start_book]).
 signal current_page_changed(page_index: int)
-## Emitted by [method finish_book] -- the player colored the last page.
-signal book_finished(book: BookDef)
 ## Emitted every time the save file is written. Dev/testing hook -- the game
 ## itself never listens. Payload is the absolute [code]user://[/code] path.
 signal save_written(path: String)
@@ -46,6 +72,19 @@ signal progress_erased()
 signal autosave_due()
 ## Emitted after [method erase_page_progress] has reset ONE page.
 signal page_progress_erased(book: BookDef, page_index: int)
+## Emitted after ONE page's paint layer has actually reached disk -- the paint
+## half of [signal save_written], and the hook DLC_SERVER.md 6.2 asks the sync
+## layer to use ("the sync layer hooks GameState.save_written and the paint-write
+## path; it never triggers an extra get_paint_image() readback of its own").
+##
+## [b]It fires AFTER the write[/b], always, so a listener can hash or upload the
+## file it names without racing the save it is reacting to -- and so the local save
+## is never delayed by anything a listener does.
+signal page_paint_written(book: BookDef, page_index: int, path: String)
+## Emitted after [method set_page_locked] actually changed a page's coloring lock
+## (BL-10). Nothing in the game listens today -- the screen that flipped the lock
+## already knows -- but the shelf will want it the day a locked page is badged.
+signal page_lock_changed(book: BookDef, page_index: int, locked: bool)
 
 const MODE_CHILD := PaletteDef.MODE_CHILD
 const MODE_ADULT := PaletteDef.MODE_ADULT
@@ -61,15 +100,48 @@ const PALETTE_PATHS := {
 ## Schema version of the save file. Bumping it means "this build writes a shape
 ## older builds cannot read"; see [method load_save] for what happens to a file
 ## from the future.
-const SAVE_VERSION := 1
+##
+## [b]v2 (WP7, DLC_SERVER.md 6.1)[/b]: the [code]books[/code] object is keyed by
+## [member BookDef.book_uid] instead of by [code]resource_path[/code]. A build-time
+## path is meaningless the moment the same book can arrive from
+## [code]user://dlc/[/code] or from a server row, so the key had to become the
+## book's own identity. Nothing else about the shape moved -- an entry is still
+## [code]{slug, current_page_index, pages[]}[/code] with the BL-10 page objects.
+const SAVE_VERSION := 2
 ## Save file name, inside [method get_save_root]. The version is in the NAME as
 ## well as in the payload so a v2 build can ship next to a v1 file untouched.
-const SAVE_FILE_NAME := "save_v1.json"
+const SAVE_FILE_NAME := "save_v2.json"
 ## Where a save from a newer build is moved before this build starts fresh, so
 ## the player's progress is never silently destroyed by a downgrade.
-const SAVE_BACKUP_NAME := "save_v1.json.bak"
+const SAVE_BACKUP_NAME := "save_v2.json.bak"
+## The schema this build can still MIGRATE from, and the file it lives in.
+## [method load_save] reads it only when there is no v2 file, converts it, and
+## leaves the original where it is -- a migration that deletes the only copy of the
+## player's progress has no second chance if it is wrong.
+const LEGACY_SAVE_VERSION := 1
+const LEGACY_SAVE_FILE_NAME := "save_v1.json"
+
+## v1 book key ([code]resource_path[/code]) -> v2 book key
+## ([member BookDef.book_uid]). Every book this game has ever shipped is in here,
+## and entries may never be removed: a save written by any older build has to be
+## able to find its way across. Both file names are listed because an exported
+## build can convert an authored [code].tres[/code] into a [code].res[/code].
+##
+## A v1 key that is NOT in this table (a book from a build we do not know, or a
+## test's synthetic key) is carried over UNCHANGED, which keeps its progress and
+## its paint directory exactly where they were.
+const LEGACY_BOOK_UIDS := {
+	"res://resources/books/coyote/book.tres": "coyote-2026",
+	"res://resources/books/coyote/book.res": "coyote-2026",
+	"res://resources/books/test_book/book.tres": "test-book-2026",
+	"res://resources/books/test_book/book.res": "test-book-2026",
+}
 ## Sub-directory of [method get_save_root] holding the per-page paint layers.
 const PAINT_DIR_NAME := "paint"
+## How much of a book uid the readable half of [method book_slug] keeps. Long
+## enough for every uid we author, short enough that a hostile pack cannot hand us
+## a 4 KB directory name.
+const MAX_SLUG_READABLE_LENGTH := 40
 ## Default root: the real one. Only dev harnesses change it.
 const DEFAULT_SAVE_ROOT := "user://"
 ## Mode a fresh install starts in. [method load_save] returns to it whenever
@@ -92,6 +164,16 @@ const AUTOSAVE_INTERVAL_SECONDS := 45.0
 const STATUS_UNTOUCHED := "untouched"
 const STATUS_IN_PROGRESS := "in_progress"
 const STATUS_COMPLETE := "complete"
+
+## Keys inside one [code]pages[][/code] entry.
+##
+## [b]BL-10 widened that entry[/b] from a bare status string to an object, so a
+## page can carry its coloring LOCK next to its status. The schema version did NOT
+## move, because the change is additive in both directions: [method _to_page_entry]
+## still accepts the old bare string (a save written before BL-10 loads with every
+## page unlocked), and a missing [constant PAGE_LOCKED_KEY] means unlocked.
+const PAGE_STATUS_KEY := "status"
+const PAGE_LOCKED_KEY := "locked"
 
 ## Current difficulty mode, "child" or "adult" (DESIGN.md 1). Assigning an
 ## unknown id is refused with an error and leaves the mode untouched; assigning
@@ -124,9 +206,10 @@ var _palette_cache: Dictionary = {}
 ## can run against a scratch directory (see [method set_save_root]).
 var _save_root: String = DEFAULT_SAVE_ROOT
 
-## book resource_path -> {
-##     "slug": String, "current_page_index": int, "pages": Array[String] }
-## The in-memory mirror of the "books" object in the save file.
+## BookDef.book_uid -> {
+##     "slug": String, "current_page_index": int, "pages": Array[Dictionary] }
+## where each page entry is { "status": String, "locked": bool } (BL-10).
+## The in-memory mirror of the "books" object in the save file (schema v2).
 var _books: Dictionary = {}
 
 ## Guards the cursor signal handlers while a save is being applied, so loading a
@@ -144,7 +227,6 @@ func _ready() -> void:
 	# writes progress, so no screen has to remember to call save_now().
 	book_started.connect(_on_book_started)
 	current_page_changed.connect(_on_current_page_changed)
-	book_finished.connect(_on_book_finished)
 	_start_autosave_timer()
 	load_save()
 
@@ -290,15 +372,6 @@ func is_on_last_page() -> bool:
 	return current_page_index >= current_book.page_count() - 1
 
 
-## Announces that the current book is finished. The cursor is LEFT ALONE so the
-## screen that reacts can still read the book; call [method clear_book] when
-## leaving for the shelf.
-func finish_book() -> void:
-	if current_book == null:
-		return
-	book_finished.emit(current_book)
-
-
 ## Leaves the current book. Emits nothing -- there is no book to talk about.
 func clear_book() -> void:
 	current_book = null
@@ -310,7 +383,7 @@ func clear_book() -> void:
 #
 # TWO artifacts, deliberately separate:
 #
-#   user://save_v1.json              small, structured, human-readable progress
+#   user://save_v2.json              small, structured, human-readable progress
 #   user://paint/<slug>/page_NN.png  the actual pixels the player laid down
 #
 # Progress is tiny and is rewritten on every cursor move (see _ready). Paint
@@ -320,8 +393,10 @@ func clear_book() -> void:
 # pages, the app quitting or backgrounding, the player pressing Save, and -- BL-6
 # -- an AUTOSAVE_INTERVAL_SECONDS tick that finds unsaved strokes.
 #
-# The save is keyed by BookDef.resource_path because that is the only stable
-# identity a book has -- display names are localisable and page counts change.
+# The save is keyed by BookDef.book_uid (schema v2, WP7): the only identity a book
+# keeps whether it is built in, installed from a DLC pack or synced from the
+# server. Display names are localisable, page counts change, and paths are
+# build-time facts -- none of the three can key progress.
 
 ## Root of everything this class writes. Ends with "/" or is a bare scheme.
 func get_save_root() -> String:
@@ -346,6 +421,11 @@ func get_backup_save_path() -> String:
 	return _save_root.path_join(SAVE_BACKUP_NAME)
 
 
+## The v1 save file this build migrates from, if it is still there.
+func get_legacy_save_path() -> String:
+	return _save_root.path_join(LEGACY_SAVE_FILE_NAME)
+
+
 ## Directory holding every book's paint layers.
 func get_paint_root() -> String:
 	return _save_root.path_join(PAINT_DIR_NAME)
@@ -353,40 +433,54 @@ func get_paint_root() -> String:
 
 # ---------------------------------------------------------------- book keys --
 
-## The save key for a book: its [code]resource_path[/code]. A book built at
-## runtime (tests) has none, so its display name stands in -- prefixed, so it can
-## never collide with a real path.
+## The save key for a book: its [member BookDef.book_uid] (save schema v2).
+##
+## [b]Why not the resource_path any more[/b] (DLC_SERVER.md 6.1): a path is a
+## build-time fact. The same book can be built in at
+## [code]res://resources/books/coyote/book.tres[/code] and installed from a pack at
+## [code]user://dlc/coyote-book/books/coyote-2026/[/code], and it is one book with
+## one lot of progress in both cases -- and one row on the server. The uid is the
+## only identity that survives all three.
+##
+## Books with no authored uid fall back to their path, then to their display name
+## (see [method BookDef.get_uid]), so a book somebody forgot to name still gets a
+## save entry of its own instead of sharing one with every other unnamed book.
 static func book_key(book: BookDef) -> String:
 	if book == null:
 		return ""
-	if book.resource_path != "":
-		return book.resource_path
-	return "runtime:%s" % book.display_name
+	return book.get_uid()
 
 
 ## Filesystem-safe directory name for a book's paint layers.
 ##
 ## [b]Derivation[/b] (stable, documented because it names files on the player's
-## disk): take the book's OWN directory from its resource_path
-## ([code]res://resources/books/test_book/book.tres[/code] ->
-## [code]test_book[/code]), lower-case it and replace every character outside
-## [code][a-z0-9_-][/code] with [code]_[/code], then append [code]_[/code] and 8
-## hex digits of an FNV-1a hash of the FULL resource_path.
+## disk): take the book's uid ([code]coyote-2026[/code]), lower-case it and replace
+## every character outside [code][a-z0-9_-][/code] with [code]_[/code], then append
+## [code]_[/code] and 8 hex digits of an FNV-1a hash of the FULL key.
 ##
 ## The readable half keeps the folder browsable; the hash half guarantees two
-## books whose directories happen to share a name (or differ only by case, on a
+## books whose readable halves collide (or differ only by case, on a
 ## case-insensitive filesystem) can never share a paint directory. The hash is
 ## hand-rolled rather than [method @GlobalScope.hash] precisely because this
 ## value is written to disk: it must not change when the engine changes.
-static func book_slug(book_path: String) -> String:
-	var directory := book_path.get_base_dir().get_file().to_lower()
+##
+## [b]v1 keys still work[/b]: a key that looks like a path keeps the v1 derivation
+## (its own directory name plus the hash of the whole path), so an unmigrated -- or
+## deliberately unmapped -- v1 entry still points at the paint directory it always
+## did. That is what makes [method _migrate_paint_dir] able to compute the OLD
+## directory name with this same function.
+static func book_slug(book_uid: String) -> String:
+	var readable := book_uid
+	if readable.contains("/"):
+		readable = readable.get_base_dir().get_file()
+	readable = readable.to_lower().substr(0, MAX_SLUG_READABLE_LENGTH)
 	var safe := ""
-	for i in directory.length():
-		var character := directory[i]
+	for i in readable.length():
+		var character := readable[i]
 		safe += character if _is_slug_char(character) else "_"
 	if safe.replace("_", "") == "":
 		safe = "book"
-	return "%s_%08x" % [safe, _stable_hash(book_path)]
+	return "%s_%08x" % [safe, _stable_hash(book_uid)]
 
 
 static func _is_slug_char(character: String) -> bool:
@@ -419,33 +513,117 @@ func get_paint_path_for_key(key: String, page_index: int) -> String:
 	return get_paint_root().path_join(book_slug(key)).path_join("page_%02d.png" % (page_index + 1))
 
 
+# ------------------------------------------------------------- page entries --
+# One slot of a book's `pages` array. Kept behind these four helpers so the shape
+# is written down in exactly one place -- and so the pre-BL-10 form (a bare status
+# string) is normalised on the way in rather than being checked for at every call
+# site.
+
+static func _new_page_entry(status: String = STATUS_UNTOUCHED, locked: bool = false) -> Dictionary:
+	return {PAGE_STATUS_KEY: status, PAGE_LOCKED_KEY: locked}
+
+
+## Whatever a save file put in a page slot, as the current object form. A bare
+## string is a save written before BL-10 (status only, never locked); an unknown
+## status degrades to untouched rather than propagating garbage.
+static func _to_page_entry(raw: Variant) -> Dictionary:
+	if typeof(raw) == TYPE_DICTIONARY:
+		var entry: Dictionary = raw
+		var status := String(entry.get(PAGE_STATUS_KEY, STATUS_UNTOUCHED))
+		return _new_page_entry(
+			status if _is_known_status(status) else STATUS_UNTOUCHED,
+			bool(entry.get(PAGE_LOCKED_KEY, false))
+		)
+	var legacy := String(raw)
+	return _new_page_entry(legacy if _is_known_status(legacy) else STATUS_UNTOUCHED, false)
+
+
+## The MUTABLE entry at [param page_index], growing (and normalising) the array as
+## needed. Every writer goes through here, so a legacy slot is upgraded in place
+## the first time it is touched.
+static func _page_slot(pages: Array, page_index: int) -> Dictionary:
+	while pages.size() <= page_index:
+		pages.append(_new_page_entry())
+	if typeof(pages[page_index]) != TYPE_DICTIONARY:
+		pages[page_index] = _to_page_entry(pages[page_index])
+	return pages[page_index]
+
+
+## Read-only field lookup that tolerates a short array and a legacy slot.
+static func _page_field(pages: Array, page_index: int, key: String, fallback: Variant) -> Variant:
+	if page_index < 0 or page_index >= pages.size():
+		return fallback
+	return _to_page_entry(pages[page_index])[key]
+
+
 # ---------------------------------------------------------------- progress ----
 
 ## A COPY of one book's saved state. Always a usable dictionary, even for a book
 ## that has never been opened:
-## [code]{ current_page_index: int, pages: Array[String], slug: String }[/code].
-func get_book_progress(book_path: String) -> Dictionary:
-	if not _books.has(book_path):
+## [code]{ current_page_index: int, pages: Array[Dictionary], slug: String }[/code],
+## each page entry being [code]{ status: String, locked: bool }[/code].
+func get_book_progress(book_uid: String) -> Dictionary:
+	if not _books.has(book_uid):
 		return {
 			"current_page_index": 0,
 			"pages": [],
-			"slug": book_slug(book_path) if book_path != "" else "",
+			"slug": book_slug(book_uid) if book_uid != "" else "",
 		}
-	return (_books[book_path] as Dictionary).duplicate(true)
+	return (_books[book_uid] as Dictionary).duplicate(true)
 
 
-func has_book_progress(book_path: String) -> bool:
-	return _books.has(book_path)
+func has_book_progress(book_uid: String) -> bool:
+	return _books.has(book_uid)
+
+
+## Every book uid the save currently holds an entry for, sorted so two devices
+## build the same payload in the same order. Read-only: the sync layer needs to
+## enumerate the shelf without being handed the live dictionary.
+func get_book_uids() -> PackedStringArray:
+	var uids := Array(_books.keys())
+	uids.sort()
+	var out := PackedStringArray()
+	for uid: Variant in uids:
+		out.append(String(uid))
+	return out
 
 
 ## Status of one page: one of the STATUS_* constants. Unknown pages are untouched.
-func get_page_status(book_path: String, page_index: int) -> String:
-	if not _books.has(book_path):
+func get_page_status(book_uid: String, page_index: int) -> String:
+	if not _books.has(book_uid):
 		return STATUS_UNTOUCHED
-	var pages: Array = (_books[book_path] as Dictionary)["pages"]
-	if page_index < 0 or page_index >= pages.size():
-		return STATUS_UNTOUCHED
-	return String(pages[page_index])
+	var pages: Array = (_books[book_uid] as Dictionary)["pages"]
+	return String(_page_field(pages, page_index, PAGE_STATUS_KEY, STATUS_UNTOUCHED))
+
+
+## True when the player has put the coloring lock on this page (BL-10). Pages
+## nobody has ever locked -- including every page of a save written before BL-10 --
+## are unlocked.
+func is_page_locked(book_uid: String, page_index: int) -> bool:
+	if not _books.has(book_uid):
+		return false
+	var pages: Array = (_books[book_uid] as Dictionary)["pages"]
+	return bool(_page_field(pages, page_index, PAGE_LOCKED_KEY, false))
+
+
+## Puts the coloring lock on (or takes it off) ONE page and saves immediately.
+##
+## The lock is the player's guard against accidents, so it must survive a crash,
+## a killed browser tab and a battery death the instant it is set -- and it costs a
+## few hundred bytes of JSON, not a paint readback. It is deliberately INDEPENDENT
+## of the page's status: locking a page changes nothing about how finished it is,
+## and [method erase_page_progress] leaves the lock alone.
+func set_page_locked(book: BookDef, page_index: int, locked: bool) -> bool:
+	if book == null or page_index < 0 or not book.has_page(page_index):
+		return false
+	var entry := _entry_for(book, true)
+	var page := _page_slot(entry["pages"], page_index)
+	if bool(page[PAGE_LOCKED_KEY]) == locked:
+		return true
+	page[PAGE_LOCKED_KEY] = locked
+	save_now()
+	page_lock_changed.emit(book, page_index, locked)
+	return true
 
 
 ## Page the player should resume [param book] on: the saved cursor, clamped into
@@ -463,6 +641,33 @@ func get_resume_index(book: BookDef) -> int:
 	return clampi(saved, 0, book.page_count() - 1)
 
 
+## Moves the SAVED resume cursor of a book the player is not currently in, and
+## saves. Returns false when nothing was written.
+##
+## [b]This exists for the sync merge and for nothing else[/b] (DLC_SERVER.md 6.3:
+## "current_page_index = the one from whichever side has the newer
+## client_updated_at"). Every other cursor move comes from the player, through
+## [method start_book] / [method advance_page] / [method set_page_index].
+##
+## [b]The open book is refused, deliberately.[/b] A tablet reporting that the
+## grown-up's phone is on page 5 must never turn the page under a child who is
+## colouring page 2 -- 8.2's "no screen ever awaits a request" has a twin, which is
+## that no response ever yanks a screen. The book being read right now keeps its
+## local cursor; the merge reconciles it at the next save point, when the child's
+## own [code]client_updated_at[/code] is the newer one anyway.
+func set_saved_page_index(book: BookDef, page_index: int) -> bool:
+	if book == null or page_index < 0 or not book.has_page(page_index):
+		return false
+	if book == current_book:
+		return false
+	var entry := _entry_for(book, true)
+	if int(entry["current_page_index"]) == page_index:
+		return false
+	entry["current_page_index"] = page_index
+	save_now()
+	return true
+
+
 ## True when every page of [param book] is recorded complete.
 func is_book_complete(book: BookDef) -> bool:
 	if book == null or book.page_count() == 0:
@@ -474,7 +679,7 @@ func is_book_complete(book: BookDef) -> bool:
 	if pages.size() < book.page_count():
 		return false
 	for i in book.page_count():
-		if String(pages[i]) != STATUS_COMPLETE:
+		if String(_page_field(pages, i, PAGE_STATUS_KEY, STATUS_UNTOUCHED)) != STATUS_COMPLETE:
 			return false
 	return true
 
@@ -489,14 +694,11 @@ func mark_page_status(book: BookDef, page_index: int, status: String) -> void:
 		push_error("GameState: unknown page status '%s'." % status)
 		return
 	var entry := _entry_for(book, true)
-	var pages: Array = entry["pages"]
-	while pages.size() <= page_index:
-		pages.append(STATUS_UNTOUCHED)
-	var previous := String(pages[page_index])
+	var page := _page_slot(entry["pages"], page_index)
+	var previous := String(page[PAGE_STATUS_KEY])
 	if previous == status or (previous == STATUS_COMPLETE and status != STATUS_COMPLETE):
 		return
-	pages[page_index] = status
-	entry["pages"] = pages
+	page[PAGE_STATUS_KEY] = status
 	_autosave()
 
 
@@ -509,6 +711,10 @@ func mark_page_status(book: BookDef, page_index: int, status: String) -> void:
 ## refuses to downgrade a completed page on purpose, so that a stale in_progress
 ## write can never un-finish a page under the player; a deliberate reset is the
 ## exception, and it writes the entry directly for exactly that reason.
+##
+## The page's coloring LOCK is not progress and is left exactly as it was (BL-10 --
+## in practice this is unreachable while locked, because the lock disables the
+## Start over button that leads here).
 func erase_page_progress(book: BookDef, page_index: int) -> bool:
 	if book == null or page_index < 0 or not book.has_page(page_index):
 		return false
@@ -516,11 +722,7 @@ func erase_page_progress(book: BookDef, page_index: int) -> bool:
 	if path != "" and FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
 	var entry := _entry_for(book, true)
-	var pages: Array = entry["pages"]
-	while pages.size() <= page_index:
-		pages.append(STATUS_UNTOUCHED)
-	pages[page_index] = STATUS_UNTOUCHED
-	entry["pages"] = pages
+	_page_slot(entry["pages"], page_index)[PAGE_STATUS_KEY] = STATUS_UNTOUCHED
 	save_now()
 	page_progress_erased.emit(book, page_index)
 	return true
@@ -562,6 +764,50 @@ func save_page_paint(book: BookDef, page_index: int, image: Image) -> bool:
 	if error != OK:
 		push_error("GameState: could not write paint layer '%s' (error %d)." % [path, error])
 		return false
+	page_paint_written.emit(book, page_index, path)
+	return true
+
+
+## Puts a paint layer that came from SOMEWHERE ELSE on disk byte for byte -- in
+## practice the copy WP11 pulled off the server after losing a last-write-wins race
+## (DLC_SERVER.md 6.3). Returns false, without writing, if the bytes are not a
+## loadable image.
+##
+## [b]Why raw bytes and not an [Image].[/b] Round-tripping through
+## [method Image.save_png] would re-encode the picture: same pixels, different file,
+## different sha256. The whole paint protocol is sha-first -- "does the server
+## already have this picture?" -- so a re-encode would make the local file
+## permanently disagree with the digest the server just handed us, and the next save
+## point would upload a "new" picture that is really the server's own, overwriting
+## the very thing we just pulled. Writing the bytes we were given keeps the two ends
+## byte-identical and the negotiation honest.
+##
+## The bytes are still DECODED first, and only written if that works: a truncated or
+## hostile download must not be able to replace a child's picture with something the
+## page loader will later refuse.
+##
+## [b]This is still GameState writing the file[/b] -- Backend hands over bytes and
+## never touches [code]user://paint/[/code] itself.
+func install_page_paint(book: BookDef, page_index: int, png: PackedByteArray) -> bool:
+	if book == null or page_index < 0 or png.is_empty():
+		return false
+	var probe := Image.new()
+	if probe.load_png_from_buffer(png) != OK:
+		push_warning("GameState: refused a paint layer for page %d that did not decode as a PNG."
+			% [page_index + 1])
+		return false
+	var path := get_paint_path(book, page_index)
+	if path == "":
+		return false
+	_ensure_dir(path.get_base_dir())
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_error("GameState: could not write paint layer '%s' (error %d)."
+			% [path, FileAccess.get_open_error()])
+		return false
+	file.store_buffer(png)
+	file.close()
+	page_paint_written.emit(book, page_index, path)
 	return true
 
 
@@ -595,10 +841,16 @@ func to_save_dict() -> Dictionary:
 	var books := {}
 	for key in _books:
 		var entry: Dictionary = _books[key]
+		# Rebuilt entry by entry rather than duplicate()d: the page slots are
+		# dictionaries now (BL-10), and a shallow copy would hand callers -- and
+		# JSON.stringify -- the LIVE ones.
+		var pages: Array = []
+		for raw in (entry["pages"] as Array):
+			pages.append(_to_page_entry(raw))
 		books[key] = {
 			"slug": entry["slug"],
 			"current_page_index": int(entry["current_page_index"]),
-			"pages": (entry["pages"] as Array).duplicate(),
+			"pages": pages,
 		}
 	return {
 		"version": SAVE_VERSION,
@@ -631,35 +883,50 @@ func save_now() -> bool:
 ## warns ONCE per process and starts fresh, and a file from a FUTURE schema is
 ## moved aside to [constant SAVE_BACKUP_NAME] first so a downgrade cannot destroy
 ## a newer build's progress.
+##
+## [b]WP7 migration[/b]: when there is no v2 file but a v1 one is sitting there,
+## the v1 file is read, converted by [method _migrate_v1_books] (keys rekeyed to
+## uids, paint directories renamed) and written back out as v2. The v1 file itself
+## is LEFT ALONE -- it costs a few hundred bytes and it is the only copy of the
+## progress if the migration ever gets something wrong.
 func load_save() -> bool:
 	_books.clear()
 	var path := get_save_path()
+	var source := path
 	if not FileAccess.file_exists(path):
-		return _fresh_state()
+		source = get_legacy_save_path()
+		if not FileAccess.file_exists(source):
+			return _fresh_state()
 
 	# A JSON instance rather than JSON.parse_string(): a corrupt save is a HANDLED
 	# condition, and the static helper logs an engine-level ERROR for it, which
 	# would make a recoverable situation look like a bug in the debug output.
 	var json := JSON.new()
-	if json.parse(FileAccess.get_file_as_string(path)) != OK \
+	if json.parse(FileAccess.get_file_as_string(source)) != OK \
 			or typeof(json.data) != TYPE_DICTIONARY:
 		_report_bad_save(
-			"'%s' is not a JSON object (%s)" % [path, json.get_error_message()]
+			"'%s' is not a JSON object (%s)" % [source, json.get_error_message()]
 		)
 		return _fresh_state()
 
 	var data: Dictionary = json.data
 	var version := int(data.get("version", 0))
 	if version > SAVE_VERSION:
-		_backup_save(path)
+		_backup_save(source)
 		_report_bad_save(
 			"'%s' is schema v%d, newer than this build's v%d; it was backed up to '%s'"
-			% [path, version, SAVE_VERSION, get_backup_save_path()]
+			% [source, version, SAVE_VERSION, get_backup_save_path()]
 		)
 		return _fresh_state()
+	var migrated := false
 	if version != SAVE_VERSION:
-		_report_bad_save("'%s' is schema v%d, which this build cannot read" % [path, version])
-		return _fresh_state()
+		if version != LEGACY_SAVE_VERSION:
+			_report_bad_save("'%s' is schema v%d, which this build cannot read" % [source, version])
+			return _fresh_state()
+		data = data.duplicate()
+		data["books"] = _migrate_v1_books(data.get("books", {}))
+		data["version"] = SAVE_VERSION
+		migrated = true
 
 	_autosave_enabled = false
 	var saved_mode := String(data.get("mode", mode))
@@ -676,17 +943,124 @@ func load_save() -> bool:
 			var pages: Array = []
 			var raw_pages: Variant = entry.get("pages", [])
 			if typeof(raw_pages) == TYPE_ARRAY:
-				for status_variant in (raw_pages as Array):
-					var status := String(status_variant)
-					pages.append(status if _is_known_status(status) else STATUS_UNTOUCHED)
+				for page_variant in (raw_pages as Array):
+					# Accepts BOTH shapes: the BL-10 object, and the bare status
+					# string every save written before it used.
+					pages.append(_to_page_entry(page_variant))
 			_books[key] = {
 				"slug": book_slug(key),
 				"current_page_index": maxi(int(entry.get("current_page_index", 0)), 0),
 				"pages": pages,
 			}
 	_autosave_enabled = true
+	if migrated:
+		# Write the v2 file straight away: the paint directories have already been
+		# renamed, so leaving the conversion in memory would strand them if the
+		# process died here.
+		save_now()
+		print_verbose("GameState: migrated '%s' to save schema v%d at '%s'."
+			% [source, SAVE_VERSION, path])
 	save_loaded.emit(false)
 	return true
+
+
+# ------------------------------------------------------- v1 -> v2 migration ----
+# DLC_SERVER.md 6.1. Two things change and nothing else: the KEY of every books[]
+# entry (resource_path -> book_uid) and the NAME of the paint directory that key
+# derives (book_slug hashes the key, so a rekeyed book needs its pixels moved).
+
+## The v2 [code]books[/code] object for a v1 one. Keys in
+## [constant LEGACY_BOOK_UIDS] are rekeyed and their paint directories renamed;
+## every other key is passed through untouched, which leaves its paint exactly
+## where it already is.
+func _migrate_v1_books(raw_books: Variant) -> Dictionary:
+	var migrated := {}
+	if typeof(raw_books) != TYPE_DICTIONARY:
+		return migrated
+	# Sorted so a merge (two v1 keys mapping to one uid, e.g. a .tres and a .res of
+	# the same book) always resolves the same way on every device.
+	var keys := (raw_books as Dictionary).keys()
+	keys.sort()
+	for key_variant in keys:
+		var old_key := String(key_variant)
+		var raw: Variant = (raw_books as Dictionary)[key_variant]
+		if typeof(raw) != TYPE_DICTIONARY:
+			continue
+		var entry: Dictionary = (raw as Dictionary).duplicate(true)
+		var new_key := String(LEGACY_BOOK_UIDS.get(old_key, old_key))
+		if new_key != old_key:
+			_migrate_paint_dir(old_key, new_key)
+		if migrated.has(new_key):
+			migrated[new_key] = _merge_book_entries(migrated[new_key], entry)
+		else:
+			entry["slug"] = book_slug(new_key)
+			migrated[new_key] = entry
+	return migrated
+
+
+## Moves [code]paint/<old slug>/[/code] to [code]paint/<new slug>/[/code].
+## [method book_slug] still derives the v1 name from a path-shaped key, so the
+## source directory is computed with the same function the v1 build used.
+func _migrate_paint_dir(old_key: String, new_key: String) -> void:
+	var from := get_paint_root().path_join(book_slug(old_key))
+	var to := get_paint_root().path_join(book_slug(new_key))
+	if from == to or not DirAccess.dir_exists_absolute(from):
+		return
+	if not DirAccess.dir_exists_absolute(to):
+		_ensure_dir(get_paint_root())
+		if DirAccess.rename_absolute(from, to) == OK:
+			print_verbose("GameState: moved paint layers '%s' -> '%s'." % [from, to])
+			return
+	# Rename refused (the target already exists, or the platform would not do it):
+	# move the files one at a time and NEVER overwrite. Losing a child's picture is
+	# the one failure this whole migration exists to avoid.
+	_ensure_dir(to)
+	var directory := DirAccess.open(from)
+	if directory == null:
+		return
+	var kept := 0
+	for name in directory.get_files():
+		if FileAccess.file_exists(to.path_join(name)):
+			kept += 1
+			continue
+		DirAccess.rename_absolute(from.path_join(name), to.path_join(name))
+	if kept > 0:
+		push_warning(
+			"GameState: %d paint layer(s) in '%s' already existed in '%s'; the originals were left in place."
+			% [kept, from, to]
+		)
+	else:
+		DirAccess.remove_absolute(from)
+
+
+## Two v1 entries that migrate onto one uid. Merged the way the server merges two
+## devices (DLC_SERVER.md 6.3): the better status wins per page, a lock anywhere
+## wins, and the furthest cursor wins. Nothing is ever downgraded.
+static func _merge_book_entries(into: Dictionary, other: Dictionary) -> Dictionary:
+	var pages: Array = into.get("pages", [])
+	var other_pages: Array = other.get("pages", [])
+	for i in other_pages.size():
+		var incoming := _to_page_entry(other_pages[i])
+		var slot := _page_slot(pages, i)
+		if _status_rank(String(incoming[PAGE_STATUS_KEY])) > _status_rank(String(slot[PAGE_STATUS_KEY])):
+			slot[PAGE_STATUS_KEY] = incoming[PAGE_STATUS_KEY]
+		slot[PAGE_LOCKED_KEY] = bool(slot[PAGE_LOCKED_KEY]) or bool(incoming[PAGE_LOCKED_KEY])
+	into["pages"] = pages
+	into["current_page_index"] = maxi(
+		int(into.get("current_page_index", 0)), int(other.get("current_page_index", 0))
+	)
+	return into
+
+
+## untouched < in_progress < complete (DLC_SERVER.md 6.3).
+static func _status_rank(status: String) -> int:
+	match status:
+		STATUS_COMPLETE:
+			return 2
+		STATUS_IN_PROGRESS:
+			return 1
+		_:
+			return 0
 
 
 ## Nothing usable on disk: back to the shipped defaults, so a first run and a
@@ -735,10 +1109,6 @@ func _on_current_page_changed(page_index: int) -> void:
 	_autosave()
 
 
-func _on_book_finished(_book: BookDef) -> void:
-	_autosave()
-
-
 ## The entry for [param book], created (sized to the book) on demand.
 func _entry_for(book: BookDef, create: bool) -> Dictionary:
 	var key := book_key(book)
@@ -753,7 +1123,7 @@ func _entry_for(book: BookDef, create: bool) -> Dictionary:
 	var entry: Dictionary = _books[key]
 	var pages: Array = entry["pages"]
 	while pages.size() < book.page_count():
-		pages.append(STATUS_UNTOUCHED)
+		pages.append(_new_page_entry())
 	if book.page_count() > 0 and pages.size() > book.page_count():
 		_forget_pages_beyond(key, book.page_count(), pages.size())
 		pages.resize(book.page_count())

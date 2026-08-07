@@ -159,6 +159,69 @@ Every agent: read this doc + DLC_SERVER.md first; conventions from Reminders/Sto
 `composer test` must be green before reporting done; no edits outside `server/` except
 WP6's doc updates.
 
+## Campaign 2 — client integration, Dusk, first API-served book (2026-08-06)
+
+Campaign 1 (WP0–WP6) built the server; it lives on the `server-build` branch,
+416 tests green. Campaign 2 wires the game to it.
+
+> **Status (2026-08-06): all of Campaign 2 is done.** WP7–WP12 complete: eight
+> godot smoke suites green (paint 47, palette 112, flow 159, shell 147, mobile
+> 139, dlc 90, backend 151, sync 87), Dusk 33 browser tests, coyote-book v1
+> published and round-tripped, web build deployed to the port-91 site with live
+> in-browser play verified. Known follow-ups: web save is slow (blocking
+> readback — design call), the debug Test Book ships in the release build,
+> dev smokes ride in the `.pck`, HTTPS on the mini-pc would remove two shell
+> workarounds, and BL-18 (erase vs sync restore) needs a decision.
+
+### WP7 — Godot Phase 0 (client prep; no server dependency)
+
+DLC_SERVER.md §6.1, §8.1 items 1–3, §12 Phase 0.
+
+- `BookDef.book_uid` authored `@export` (`coyote-2026` for the coyote book);
+  `book_key()` uses it; save schema v2 keyed by uid with a v1 migration
+  (lookup table of known `res://` paths → uids) and one-time paint-dir rename
+  (`book_slug()` hashes the uid).
+- `BookDef.discover()` second root: `user://dlc/*/books/*/book.json` (§7.2
+  shape) → in-memory `BookDef`/`PageDef` with `is_runtime`. **De-dupe by
+  `book_uid`, built-in wins** — the DLC coyote pack deliberately shares
+  `coyote-2026` with the built-in book.
+- `PageView.load_page_textures(...)` primitive; `load_page()` becomes a thin
+  wrapper. Runtime textures via `Image.load_from_file()` →
+  `ImageTexture.create_from_image()` on a `WorkerThreadPool` task; the ID map
+  keeps `TEXTURE_FILTER_NEAREST` and must never be VRAM-compressed.
+- Prove with a hand-seeded pack in `user://dlc/` + a `dlc_smoke.gd` dev smoke
+  following the existing `*_smoke.gd` patterns.
+
+### WP8 — Dusk browser tests (server/)
+
+- `laravel/dusk` (house version per Reminders), scaffold, chromedriver.
+- Coverage: guardian register, login, child-profiles CRUD, devices revoke,
+  account deletion, pictures restore, admin gating (non-admin 404, sidebar
+  hidden), admin pack list/create/publish, entitlement grant.
+- Separate `composer test:dusk`; the main `composer test` gate is untouched.
+
+### WP9 — Coyote pack: build tool + first published pack
+
+- `pack build` CLI (design §10.2): walks the coyote book's artifacts, emits a
+  §7.2 pack directory (manifest.json, book.json, display/mask/idmap/regions
+  per page), pack slug `coyote-book`, `is_free`, `book_uid` `coyote-2026`.
+  GDScript headless or PHP — **not Python** (not on this box).
+- Publish through `php artisan pack:publish`; verify by API round trip
+  (entitle → manifest → download, sha256s match).
+
+### WP10 — Backend client: auth, entitlements, pack install (Godot)
+After WP7+WP9. Adult gate + sign-in, `user://auth.json`, entitlements check,
+download to `user://dlc/<slug>.incoming/` + sha256 verify + atomic swap,
+offline-first rules (§8.2). `Backend` facade over `RefCounted` classes (Q3).
+
+### WP11 — Sync client (Godot)
+After WP10. `sync_queue.json`, progress push/pull + client-side merge mirror,
+409 retry; paint sha-negotiation upload + on-demand download (§8.3).
+
+### WP12 — Integration: game vs live local server end-to-end; then export the
+web build and deploy to the mini-pc port-91 site (game only — the Laravel app
+deploys in a later round).
+
 ## Deploy (later, not this campaign)
 
 Mini-pc deploy conventions assume one repo per site with `deploy.sh` doing

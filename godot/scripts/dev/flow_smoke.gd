@@ -18,10 +18,15 @@ extends Control
 ##   2  CoverageTracker against page 1's real geometry, driven by SYNTHETIC paint
 ##      images -- no GPU, no PageView readback
 ##   3  BookSelect renders and reports the chosen book
-##   4  ColoringPage end to end: paint every region of page 1, it completes WITHOUT
-##      turning itself (BL-4), pressing the next-page arrow plays the flip, the
-##      second page is really loaded, the palette still drives the brush
-##   5  ... and finishing page 2 emits book_completed
+##   4  ColoringPage end to end: every page is reachable from the first frame
+##      (BL-10), paint every region of page 1, it completes WITHOUT turning itself
+##      (BL-4) and celebrates TRANSIENTLY (BL-11 -- a random message, a confetti
+##      burst, both fading on their own and blocking nothing), pressing the
+##      next-page arrow plays the flip, the second page is really loaded, the
+##      palette still drives the brush
+##   5  ... and finishing page 2 does NOT end the book: the last page celebrates
+##      exactly like any other, its forward arrow is simply disabled, and Back is
+##      the only way out (BL-11 -- there is no BookComplete screen any more)
 ##   6  the M2 and M3 smoke tests still pass, run as child processes
 ##
 ## Exit code is 0 only if every check passes.
@@ -79,7 +84,6 @@ var _flip_started_count := 0
 var _flip_finished_count := 0
 var _page_changed_events: Array[int] = []
 var _page_completed_events: Array[int] = []
-var _book_completed_events: Array[BookDef] = []
 var _coverage_history: Dictionary = {}
 var _coverage_regressions: Array[String] = []
 
@@ -176,7 +180,10 @@ func _check_resources() -> void:
 
 	# Discovery, not a preload list. M6 added the coyote book by dropping a folder
 	# in -- no code changed, which is the property this check exists to defend.
-	var discovered := BookDef.discover()
+	# WP7 gave discover() a second root (installed DLC packs). This check is about
+	# the res:// scan, so it asks for that one alone -- whether a pack is installed
+	# on this machine is not this smoke's business, and dlc_smoke owns that half.
+	var discovered := BookDef.discover(BookDef.BOOKS_ROOT, "")
 	_expect(discovered.size() == EXPECTED_BOOK_COUNT,
 		"BookDef.discover() found %d books by scanning (%d)"
 		% [EXPECTED_BOOK_COUNT, discovered.size()])
@@ -433,7 +440,8 @@ func _check_book_select() -> void:
 	_host.add_child(shelf)
 	await get_tree().process_frame
 
-	var count := shelf.load_books()
+	# Built-in books only: see check 1 -- an installed DLC pack is dlc_smoke's business.
+	var count := shelf.load_books(BookDef.BOOKS_ROOT, "")
 	_expect(count == EXPECTED_BOOK_COUNT,
 		"shelf loaded %d books by scanning res://resources/books/ (%d)"
 		% [EXPECTED_BOOK_COUNT, count])
@@ -503,7 +511,6 @@ func _check_coloring_flow() -> void:
 	screen.get_page_flip().flip_finished.connect(func() -> void: _flip_finished_count += 1)
 	screen.page_changed.connect(func(index: int) -> void: _page_changed_events.append(index))
 	screen.page_completed.connect(func(index: int) -> void: _page_completed_events.append(index))
-	screen.book_completed.connect(func(book: BookDef) -> void: _book_completed_events.append(book))
 	screen.coverage_updated.connect(_on_coverage_updated)
 
 	_expect(screen.load_book(_book), "load_book(test_book) succeeded")
@@ -528,9 +535,33 @@ func _check_coloring_flow() -> void:
 	_expect(is_equal_approx(page_view.brush_hardness, palette_def.default_brush_hardness),
 		"PageView.brush_hardness came from the def (%.2f)" % page_view.brush_hardness)
 
+	# BL-16 part 1: the "now painting with" chip BL-15 docked in the toolbar is gone,
+	# component and wiring. The pick bubble and the selected states answer "which one
+	# is it" where the player is already looking.
+	_expect(screen.get_node_or_null("Ui/Toolbar/Row/BrushIndicator") == null,
+		"the toolbar carries no brush-indicator chip any more (BL-16)")
+	palette.select_color(4)
+	_expect(page_view.brush_color == palette_def.get_color(4),
+		"a pick still drives the brush directly (#%s)" % page_view.brush_color.to_html(false))
+	palette.select_color(0)
+
 	var tracker := screen.get_coverage_tracker()
 	_expect(tracker != null and is_equal_approx(tracker.get_threshold(), palette_def.completion_threshold),
 		"the tracker's threshold is the palette's %.2f" % palette_def.completion_threshold)
+
+	# --- BL-10: free page choice, from the very first frame -------------------
+	# Nothing has been coloured, so under the M6 rule page 2 was unreachable. It is
+	# not gated on anything any more: completion is a celebration, never a key.
+	_expect(screen.can_go_to_page(1),
+		"page 2 of an untouched book is reachable straight away (free play)")
+	_expect(not screen.get_next_page_button().disabled,
+		"...so the next-page arrow is live before a single stroke")
+	_expect(not screen.can_go_to_page(0), "the page already open is not a jump")
+	_expect(screen.get_prev_page_button().disabled, "there is nothing before page 1")
+	_expect(not screen.can_go_to_page(-1) and not screen.can_go_to_page(2),
+		"out-of-range jumps are still refused")
+	_expect(not screen.is_celebrating(),
+		"nothing is celebrating over a page nobody has coloured yet")
 
 	# Remember page 1's ID map so we can prove the page really swapped later.
 	var page_01_ids := page_view.get_id_map_image().duplicate()
@@ -540,6 +571,8 @@ func _check_coloring_flow() -> void:
 	_expect(only_page_02.x >= 0.0 and only_page_01.x >= 0.0,
 		"found coordinates that tell the pages apart: %s is line art on page 1 / paintable on page 2, %s is the reverse"
 		% [only_page_02, only_page_01])
+
+	await _check_undo_redo(screen)
 
 	# --- paint page 1 --------------------------------------------------------
 	var strokes := await _fill_page(screen)
@@ -557,9 +590,32 @@ func _check_coloring_flow() -> void:
 		"completing page 1 did NOT flip on its own (%d flip(s))" % _flip_started_count)
 	_expect(screen.get_page_label_text() == "1/2",
 		"the player is still on the page they finished ('%s')" % screen.get_page_label_text())
-	_expect(screen.is_celebrating(), "the finished page is showing its 'page complete' state")
 	_expect(not screen.get_next_page_button().disabled,
-		"...and the next-page arrow is unlocked, so turning the page is the PLAYER's call")
+		"...and the next-page arrow is live, so turning the page is the PLAYER's call")
+
+	# --- BL-11: the celebration is transient and blocks nothing --------------
+	_expect(screen.is_celebrating(), "completing the page raised the celebration")
+	_expect(ColoringPage.CELEBRATION_MESSAGES.has(screen.get_celebration_message()),
+		"...with a congratulation from the authored pool ('%s')" % screen.get_celebration_message())
+	var confetti := screen.get_confetti()
+	_expect(confetti != null and confetti.emitting, "...and a confetti burst")
+	_expect(confetti != null and confetti.color_initial_ramp != null
+			and confetti.color_initial_ramp.get_point_count() > 1,
+		"...whose scraps are palette-coloured (%d colours)"
+		% [confetti.color_initial_ramp.get_point_count() if confetti != null
+			and confetti.color_initial_ramp != null else 0])
+	var overlay := screen.get_celebration_overlay()
+	_expect(overlay != null and overlay.mouse_filter == Control.MOUSE_FILTER_IGNORE,
+		"the celebration cannot swallow a tap -- it is presentation, never a gate")
+	# It is still fully paintable underneath, mid-celebration.
+	_expect(page_view.begin_stroke(page_view.get_region_data(2)["centroid"]),
+		"...and a stroke still starts while it is on screen")
+	page_view.end_stroke()
+	await _wait_for_coverage(screen)
+	var faded := await _wait_until(func() -> bool: return not screen.is_celebrating(), 15.0)
+	_expect(faded, "the celebration faded away on its own -- nothing had to dismiss it")
+	_expect(screen.get_page_label_text() == "1/2",
+		"...leaving the player exactly where they were ('%s')" % screen.get_page_label_text())
 
 	# --- the flip, when the player asks for it -------------------------------
 	screen.get_next_page_button().pressed.emit()
@@ -590,6 +646,11 @@ func _check_coloring_flow() -> void:
 	_expect(fresh_tracker != tracker, "a fresh CoverageTracker was built for page 2")
 	_expect(fresh_tracker.page_coverage() == 0.0,
 		"page 2 starts at 0 coverage (%.3f)" % fresh_tracker.page_coverage())
+	# BL-17: the history is per page VISIT. Turning the page must not leave the
+	# previous page's strokes undoable onto this one.
+	_expect(not screen.can_undo() and not screen.can_redo(),
+		"turning the page cleared the undo history (%d/%d)"
+		% [screen.undo_depth(), screen.redo_depth()])
 
 	# --- the palette still drives the brush on the new page ------------------
 	print("\n-- check 4b: palette still functional after the flip --")
@@ -616,18 +677,49 @@ func _check_coloring_flow() -> void:
 	_expect(worst <= COLOR_TOLERANCE,
 		"the core pixel is the picked palette colour (worst channel delta %d/255)" % worst)
 
-	# --- finish page 2 -> book_completed ------------------------------------
+	# --- finish page 2: the book ends when the PLAYER says so (BL-10) --------
 	print("\n-- check 5: finishing the last page --")
 	var strokes_2 := await _fill_page(screen)
 	print("   page 2 filled with %d strokes" % strokes_2)
-	await _wait_until(func() -> bool: return not _book_completed_events.is_empty(), 12.0)
-	_expect(fresh_tracker.is_page_complete(),
+	var last_done := await _wait_until(
+		func() -> bool:
+			return fresh_tracker.is_page_complete() and not screen.is_transitioning(),
+		12.0
+	)
+	_expect(last_done and fresh_tracker.is_page_complete(),
 		"every region of page 2 reached the threshold (%d/%d done)"
 		% [fresh_tracker.done_region_count(), fresh_tracker.region_count()])
 	_expect(_page_completed_events == [0, 1], "page_completed fired for both pages (%s)" % [_page_completed_events])
-	_expect(_book_completed_events.size() == 1 and _book_completed_events[0] == _book,
-		"book_completed fired once with the test book (%d event(s))" % _book_completed_events.size())
-	_expect(_flip_started_count == 1, "no flip played past the last page (%d)" % _flip_started_count)
+	_expect(screen.is_celebrating(),
+		"...it celebrates exactly like any other page (BL-11)")
+	_expect(screen.get_page_label_text() == "2/2",
+		"...and the player is still on it ('%s')" % screen.get_page_label_text())
+	_expect(screen.get_next_page_button().disabled,
+		"the forward arrow is DISABLED on the last page -- there is nowhere to turn to")
+	_expect(not screen.get_back_button().disabled,
+		"...and Back is the way out of the book, exactly as it always was")
+
+	# Still fully paintable: a complete page is never a read-only page (BL-10).
+	var extra_point := Vector2(270.5, 250.5)
+	_expect(page_view.begin_stroke(extra_point),
+		"a stroke still STARTS on the completed page -- colour forever")
+	page_view.continue_stroke(extra_point + Vector2(0.0, 40.0))
+	page_view.end_stroke()
+	await _wait_for_coverage(screen)
+	_expect(_page_completed_events == [0, 1],
+		"...and painting on it did not re-fire page_completed (%s)" % [_page_completed_events])
+	_expect(fresh_tracker.is_page_complete(), "...the page is still recorded complete")
+
+	# BL-11: the last page's celebration is as transient as every other one, and
+	# when it is gone the player is simply still on page 2 with a live toolbar.
+	var last_faded := await _wait_until(func() -> bool: return not screen.is_celebrating(), 15.0)
+	_expect(last_faded, "the last page's celebration faded away by itself too")
+	_expect(_flip_started_count == 1,
+		"no flip played past the last page -- there is nothing behind it to reveal (%d)"
+		% _flip_started_count)
+	_expect(GameState.current_page_index == 1, "the cursor is still on the last page")
+	_expect(screen.get_next_page_button().disabled and not screen.get_back_button().disabled,
+		"the only control that leaves the book is still Back")
 
 	# --- back button ---------------------------------------------------------
 	# M6: leaving the book flushes the paint layer through the ASYNC readback and
@@ -648,6 +740,130 @@ func _check_coloring_flow() -> void:
 
 	screen.queue_free()
 	await get_tree().process_frame
+
+
+## BL-17 at the screen's level: the buttons, the stacks, the interlocks and the
+## coverage re-settle. The pixel-exactness of a replay is proved in the M2 paint
+## smoke, where the whole layer is compared byte for byte; what matters here is that
+## the screen drives it at the right moments and refuses at the wrong ones.
+func _check_undo_redo(screen: ColoringPage) -> void:
+	print("\n-- check 4a: undo / redo (BL-17) --")
+	var page_view := screen.get_page_view()
+	var tracker := screen.get_coverage_tracker()
+	var undo_button := screen.get_undo_button()
+	var redo_button := screen.get_redo_button()
+
+	_expect(undo_button != null and redo_button != null
+		and undo_button.get_parent().name == "Row"
+		and undo_button.get_parent().get_parent().name == "Toolbar",
+		"undo and redo are in the coloring toolbar, at the top of the page")
+	_expect(undo_button != null and redo_button != null
+		and undo_button.custom_minimum_size.x >= 48.0
+		and undo_button.custom_minimum_size.y >= 48.0
+		and redo_button.custom_minimum_size.x >= 48.0,
+		"...as touch targets (%s)" % [undo_button.custom_minimum_size if undo_button else null])
+	_expect(not screen.can_undo() and not screen.can_redo(),
+		"a page opens with an empty history -- the restored save is a BASELINE, not a stroke")
+	_expect(undo_button.disabled and redo_button.disabled,
+		"...so both buttons start disabled")
+
+	# --- one stroke, then take it back ---------------------------------------
+	var start := Vector2(700.5, 250.5)
+	var sample := Vector2i(790, 250)
+	var region_id := page_view.get_region_id_at(start)
+	_expect(region_id > 0 and page_view.get_region_id_at(Vector2(sample) + Vector2(0.5, 0.5)) == region_id,
+		"precondition: %s and %s are both in region %d" % [start, sample, region_id])
+	page_view.begin_stroke(start)
+	page_view.continue_stroke(Vector2(860.5, 250.5))
+	page_view.end_stroke()
+	await _wait_for_coverage(screen)
+
+	var painted := _paint_pixel(page_view, sample)
+	_expect(painted.a8 > 200, "the stroke landed on the page (a=%d)" % painted.a8)
+	_expect(screen.can_undo() and not undo_button.disabled, "a finished stroke arms undo")
+	_expect(not screen.can_redo() and redo_button.disabled, "there is nothing to redo yet")
+	var coverage_before := tracker.region_coverage(region_id)
+	_expect(coverage_before > 0.0, "...and the tracker saw it (%.3f)" % coverage_before)
+
+	# The rebuild is a transition, and nothing may touch the page during one.
+	# undo() is a coroutine and its value cannot be read without await, so it is
+	# launched through a Callable and lands in cells (captured by value, per the
+	# lambda gotcha) -- the assertions below need it IN FLIGHT, not finished.
+	var undo_result: Array = [false]
+	var undo_done: Array = [false]
+	(func() -> void:
+		undo_result[0] = await screen.undo()
+		undo_done[0] = true).call()
+	_expect(screen.is_replaying() and screen.is_transitioning(),
+		"a rebuild in flight counts as a transition")
+	# A refused redo() returns false before its first await, so this await
+	# resumes synchronously -- the rebuild is still in flight afterwards.
+	var refused_mid_replay: bool = await screen.redo()
+	_expect(not refused_mid_replay,
+		"...so a second history step is refused while it runs")
+	_expect(undo_button.disabled and redo_button.disabled,
+		"...and both buttons are dead for the duration")
+	while not undo_done[0]:
+		await get_tree().process_frame
+	_expect(bool(undo_result[0]), "undo() reported it ran")
+
+	_expect(_paint_pixel(page_view, sample).a8 == 0,
+		"the undone stroke's pixels are gone (a=%d)" % _paint_pixel(page_view, sample).a8)
+	_expect(not screen.can_undo() and undo_button.disabled,
+		"...the stack is empty again, so undo disables itself")
+	_expect(screen.can_redo() and not redo_button.disabled, "...and redo is armed")
+	_expect(tracker.region_coverage(region_id) >= coverage_before - 0.0001,
+		"coverage re-settled WITHOUT downgrading -- completion stays sticky (%.3f -> %.3f)"
+		% [coverage_before, tracker.region_coverage(region_id)])
+	_expect(screen.has_unsaved_paint(), "the page is marked paint-dirty by the undo")
+
+	# --- and put it back ------------------------------------------------------
+	_expect(await screen.redo(), "redo() reported it ran")
+	var restored := _paint_pixel(page_view, sample)
+	_expect(restored == painted,
+		"the redone stroke is the same pixel it was (%s vs %s)" % [restored, painted])
+	_expect(screen.can_undo() and not screen.can_redo(),
+		"...and the stacks swapped back over")
+
+	# --- a new stroke ends the branch ----------------------------------------
+	_expect(await screen.undo(), "undo again, to have something to redo")
+	_expect(screen.can_redo(), "precondition: a stroke is waiting to be redone")
+	page_view.begin_stroke(Vector2(264.5, 264.5))
+	page_view.continue_stroke(Vector2(264.5, 210.5))
+	page_view.end_stroke()
+	await _wait_for_coverage(screen)
+	_expect(not screen.can_redo() and redo_button.disabled,
+		"drawing something new clears the redo stack")
+	_expect(screen.undo_depth() == 1, "...and the new stroke is the only thing to undo (%d)"
+		% screen.undo_depth())
+
+	# --- the coloring lock owns the page, and that includes its history -------
+	screen.set_page_locked(true)
+	_expect(undo_button.disabled and redo_button.disabled,
+		"a locked page disables undo and redo, exactly like Start over (BL-10)")
+	var refused_locked: bool = await screen.undo()
+	_expect(not refused_locked,
+		"...and refuses the call itself, not just the button")
+	screen.set_page_locked(false)
+	_expect(not undo_button.disabled, "unlocking gives undo back")
+
+	# --- never mid-stroke ----------------------------------------------------
+	page_view.begin_stroke(Vector2(700.5, 250.5))
+	var refused_mid_stroke: bool = await screen.undo()
+	_expect(not refused_mid_stroke,
+		"undo is refused while a stroke is still down")
+	page_view.end_stroke()
+	await _wait_for_coverage(screen)
+	_expect(screen.can_undo(), "...and is available again the moment it lifts")
+
+
+## One pixel of the paint layer. The blocking readback is deliberate here -- this is
+## a harness, and the M6 rule is about the running game.
+static func _paint_pixel(page_view: PageView, position: Vector2i) -> Color:
+	var image := page_view.get_paint_image()
+	if image.get_format() != Image.FORMAT_RGBA8:
+		image.convert(Image.FORMAT_RGBA8)
+	return image.get_pixel(position.x, position.y)
 
 
 func _on_flip_started() -> void:

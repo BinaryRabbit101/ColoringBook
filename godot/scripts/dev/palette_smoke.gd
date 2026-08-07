@@ -13,6 +13,10 @@ extends Control
 ## Every pick goes through the same entry points the touch path uses: a real
 ## BaseButton `pressed` emission, a `BrushSizeSlider.pick_at_local_x()` at a real
 ## stop position, or the `select_color` / `select_brush_size` handlers those call.
+## The BL-15 selection-feedback checks go further and synthesise real
+## InputEventScreenTouch / InputEventScreenDrag events at real on-screen
+## coordinates, because the pick-preview bubble is driven by the gesture, not by
+## the pick.
 ## Exit code is 0 only if every check passes.
 
 const CHILD_PALETTE := "res://resources/palettes/child_palette.tres"
@@ -25,7 +29,12 @@ const REGIONS_JSON := "res://assets/books/test_book/page_01_regions.json"
 ## Expected authored shape of the shipped palettes.
 const CHILD_COLOR_COUNT := 10
 const MIN_ADULT_COLOR_COUNT := 24
-const ADULT_BRUSH_SIZE_COUNT := 3
+## BL-14 widened the adult range from three stops to five.
+const ADULT_BRUSH_SIZE_COUNT := 5
+## The ends of that range: a true fine-detail tip, and a top size matching child
+## mode's single forgiving brush.
+const ADULT_FINEST_BRUSH := 8.0
+const ADULT_BOLDEST_BRUSH := 96.0
 const ADULT_FAMILY_COUNT := 6
 
 ## Minimum perceptual separation between two child crayons, as an RGB distance
@@ -82,6 +91,7 @@ func _run() -> void:
 	_check_auto_selection()
 	_check_simulated_picks()
 	await _check_page_view_integration()
+	await _check_selection_feedback()
 	_check_game_state()
 
 	await _showcase()
@@ -145,6 +155,28 @@ func _check_palette_resources() -> void:
 		"child's brush (%.0f px) is larger than the adult's finest (%.0f px)"
 		% [_child_def.get_brush_size(0), _adult_def.get_brush_size(0)])
 
+	# BL-14: the range grew at BOTH ends, and the ends are the point.
+	_expect(is_equal_approx(_adult_def.get_brush_size(0), ADULT_FINEST_BRUSH),
+		"the adult range starts at the %.0f px detail tip (%.0f px)"
+		% [ADULT_FINEST_BRUSH, _adult_def.get_brush_size(0)])
+	_expect(
+		is_equal_approx(_adult_def.get_brush_size(ADULT_BRUSH_SIZE_COUNT - 1), ADULT_BOLDEST_BRUSH),
+		"...and ends at the %.0f px fill brush (%.0f px)"
+		% [ADULT_BOLDEST_BRUSH, _adult_def.get_brush_size(ADULT_BRUSH_SIZE_COUNT - 1)]
+	)
+	_expect(
+		is_equal_approx(
+			_adult_def.get_brush_size(ADULT_BRUSH_SIZE_COUNT - 1), _child_def.get_brush_size(0)
+		),
+		"the adult's boldest brush matches child mode's single forgiving one"
+	)
+	_expect(
+		_adult_def.get_default_brush_size_index() > 0
+		and _adult_def.get_default_brush_size_index() < ADULT_BRUSH_SIZE_COUNT - 1,
+		"the default stop (index %d of %d) still sits inside the widened range, not on an end"
+		% [_adult_def.get_default_brush_size_index(), ADULT_BRUSH_SIZE_COUNT]
+	)
+
 	for def in [_child_def, _adult_def]:
 		var threshold: float = def.completion_threshold
 		_expect(threshold > 0.0 and threshold <= 1.0,
@@ -196,6 +228,20 @@ func _check_components_built() -> void:
 		)
 	_expect(stops_grow, "slider stops are the def's diameters, drawn larger left to right")
 
+	# BL-14: five stops including a 96 px one still has to LAY OUT. The knob is a
+	# capped proxy, so the drawn extent is bounded no matter how bold the brush is,
+	# and the end stops keep their whole ring inside the control.
+	var last_stop := ADULT_BRUSH_SIZE_COUNT - 1
+	_expect(
+		slider != null and slider.knob_radius_for_index(last_stop) <= BrushSizeSlider.MAX_KNOB_RADIUS,
+		"the %.0f px knob is capped at %.0f px radius, not drawn at its diameter (%.1f)"
+		% [ADULT_BOLDEST_BRUSH, BrushSizeSlider.MAX_KNOB_RADIUS,
+			slider.knob_radius_for_index(last_stop) if slider else -1.0]
+	)
+	_expect(BrushSizeSlider.SIDE_PADDING >= BrushSizeSlider.max_knob_extent(),
+		"the end stops' rings fit inside the track's %.0f px side padding (need %.1f)"
+		% [BrushSizeSlider.SIDE_PADDING, BrushSizeSlider.max_knob_extent()])
+
 	var swatch_colors_match := true
 	for i in swatches.size():
 		swatch_colors_match = swatch_colors_match and (swatches[i] as SwatchButton).swatch_color == _adult_def.get_color(i)
@@ -233,6 +279,21 @@ func _measure_targets(label: String) -> void:
 	_expect(adult_min >= PaletteAdult.MIN_TOUCH_TARGET,
 		"[%s] every swatch/size-dot target >= %.0f px (smallest %.1f px)"
 		% [label, PaletteAdult.MIN_TOUCH_TARGET, adult_min])
+
+	# BL-14: the five stops have to lay out sanely at whatever width the toolbar
+	# gives the bar -- ticks far enough apart to aim at, and the end knobs' rings
+	# still inside the control.
+	var slider := _adult_palette.get_brush_size_slider()
+	if slider == null:
+		return
+	var gap := slider.local_x_for_index(1) - slider.local_x_for_index(0)
+	_expect(gap >= BrushSizeSlider.MAX_KNOB_RADIUS,
+		"[%s] the %d slider ticks are %.1f px apart, clear of the %.0f px knob"
+		% [label, slider.stop_count(), gap, BrushSizeSlider.MAX_KNOB_RADIUS])
+	var far_edge := slider.local_x_for_index(slider.stop_count() - 1) + BrushSizeSlider.max_knob_extent()
+	_expect(far_edge <= slider.size.x + 0.5,
+		"[%s] the boldest knob's ring ends at %.1f px, inside the %.0f px bar"
+		% [label, far_edge, slider.size.x])
 
 
 ## (c) set_palette auto-selects the first colour and the default brush size,
@@ -357,9 +418,210 @@ func _check_page_view_integration() -> void:
 		% [expected.to_html(false), worst])
 
 
-## (f) GameState: default mode, palette lookup, mode_changed.
+## (f) BL-15: selection feedback the finger does not hide -- the floating pick
+## preview, the "now painting with" chip, and the strengthened per-item states.
+##
+## The bubble is driven by the GESTURE, not by the pick, so this is the one check
+## that synthesises real touch events at real on-screen coordinates and feeds them
+## to the palette's own `_input` -- exactly what the engine does with a finger.
+func _check_selection_feedback() -> void:
+	print("\n-- check 7: selection feedback (BL-15, round 2 in BL-16) --")
+	# PaletteSlideInput refuses a gesture when something else is hovered (that is
+	# how the settings scrim wins over the palette). In a windowed harness the real
+	# cursor may be sitting anywhere, so take the two full-screen controls that are
+	# not the palettes out of the hover picture and let the test be deterministic.
+	_page_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	($Stack as Control).mouse_filter = Control.MOUSE_FILTER_IGNORE
+	await _settle()
+
+	# --- one shared component, and it can never be touched --------------------
+	var child_preview := _child_palette.get_pick_preview()
+	var adult_preview := _adult_palette.get_pick_preview()
+	_expect(child_preview != null and adult_preview != null,
+		"both palettes own a PickPreview bubble")
+	if child_preview == null or adult_preview == null:
+		return
+	_expect(child_preview != adult_preview and child_preview.get_script() == adult_preview.get_script(),
+		"...one each, from the SAME shared component (not a per-palette copy)")
+	_expect(
+		child_preview.mouse_filter == Control.MOUSE_FILTER_IGNORE
+		and adult_preview.mouse_filter == Control.MOUSE_FILTER_IGNORE,
+		"the bubble is MOUSE_FILTER_IGNORE -- it can never be hit-tested"
+	)
+	_expect(not child_preview.z_as_relative and child_preview.z_index > 0,
+		"...and draws at an absolute z (%d), so it clears the palette AND the toolbar"
+		% child_preview.z_index)
+	_expect(not child_preview.is_showing(), "nothing is previewed before a finger lands")
+
+	# --- it appears above the finger, follows it, and fades on release --------
+	var crayons := _child_palette.get_color_buttons()
+	var from_index := 2
+	var to_index := 6
+	var from_point := _center_of(crayons[from_index])
+	var to_point := _center_of(crayons[to_index])
+
+	_send_touch(_child_palette, from_point, true)
+	_expect(child_preview.is_showing(), "a press on a crayon raises the bubble")
+	_expect(child_preview.get_mode() == PickPreview.MODE_COLOR
+		and child_preview.get_preview_color() == _child_def.get_color(from_index),
+		"...showing the candidate colour #%s" % child_preview.get_preview_color().to_html(false))
+	var bubble := child_preview.get_viewport_rect_of_bubble()
+	_expect(bubble.end.y <= from_point.y,
+		"the bubble sits entirely ABOVE the touch point (bottom %.0f <= finger %.0f)"
+		% [bubble.end.y, from_point.y])
+	_expect(not bubble.has_point(from_point), "...so the finger cannot be covering it")
+	# BL-16 part 3: twice the size, floated higher. The numbers are asserted rather
+	# than eyeballed because "make it bigger" is exactly the kind of change that
+	# quietly gets tuned back down.
+	_expect(PickPreview.BUBBLE_RADIUS >= 92.0 and bubble.size.x >= 184.0,
+		"the bubble is drawn at DOUBLE the BL-15 size (radius %.0f px, %.0f px across)"
+		% [PickPreview.BUBBLE_RADIUS, bubble.size.x])
+	_expect(from_point.y - bubble.end.y >= PickPreview.FINGER_GAP - 1.0,
+		"...and floats %.0f px clear of the press point, above the hand and not just the fingertip"
+		% (from_point.y - bubble.end.y))
+
+	_send_drag(_child_palette, from_point, to_point)
+	_expect(child_preview.get_preview_color() == _child_def.get_color(to_index),
+		"sliding to another crayon updates the candidate (#%s)"
+		% child_preview.get_preview_color().to_html(false))
+	_expect(_child_palette.get_selected_color_index() == to_index,
+		"...and slide-to-select still commits the pick underneath it (index %d)"
+		% _child_palette.get_selected_color_index())
+	var moved := child_preview.get_viewport_rect_of_bubble()
+	_expect(moved.position.x > bubble.position.x,
+		"the bubble travelled with the finger (%.0f -> %.0f px)"
+		% [bubble.position.x, moved.position.x])
+	_expect(moved.end.y <= to_point.y, "...staying above it the whole way")
+
+	_send_touch(_child_palette, to_point, false)
+	_expect(not child_preview.is_active(), "lifting the finger ends the preview")
+	await _wait(PickPreview.FADE_OUT_SECONDS + 0.15)
+	_expect(not child_preview.is_showing(), "...and it has faded away")
+
+	# --- the size slider drives the same bubble, as a dot ---------------------
+	var slider := _adult_palette.get_brush_size_slider()
+	_adult_palette.select_color(9)
+	slider.pick_at_local_x(slider.local_x_for_index(ADULT_BRUSH_SIZE_COUNT - 1))
+	_expect(adult_preview.is_showing() and adult_preview.get_mode() == PickPreview.MODE_SIZE,
+		"the size slider raises the same bubble in DOT mode")
+	_expect(is_equal_approx(adult_preview.get_preview_diameter(), ADULT_BOLDEST_BRUSH),
+		"...previewing the candidate diameter (%.0f px)" % adult_preview.get_preview_diameter())
+	_expect(adult_preview.get_preview_color() == _adult_palette.get_selected_color(),
+		"...drawn in the colour actually loaded, not an abstract circle")
+	slider.pick_at_local_x(slider.local_x_for_index(0))
+	_expect(is_equal_approx(adult_preview.get_preview_diameter(), ADULT_FINEST_BRUSH),
+		"sliding to the finest stop shrinks the dot to %.0f px"
+		% adult_preview.get_preview_diameter())
+	slider.end_preview()
+	_expect(not adult_preview.is_active(), "lifting off the bar ends the size preview")
+	adult_preview.hide_now()
+
+	# --- BL-16 part 2: every way a gesture can end fades the bubble -----------
+	# The bug this is guarding: a bubble left painted over the palette because the
+	# release took a path nobody had walked. The claimed-slide path is covered
+	# above; these are the ones that BYPASS PaletteSlideInput's own bookkeeping.
+	child_preview.show_color(_child_def.get_color(1), from_point)
+	_expect(child_preview.is_showing(), "precondition: a bubble is up")
+	# A release the slide helper never saw the press for -- a press it refused
+	# (outside its hit area, another control hovered) still raised this through the
+	# crayon button itself.
+	_send_touch(_child_palette, Vector2(4.0, 4.0), false)
+	_expect(not child_preview.is_active(),
+		"a release the slide helper never claimed still ends the preview")
+
+	child_preview.show_color(_child_def.get_color(1), from_point)
+	_send_mouse_release(_child_palette, from_point)
+	_expect(not child_preview.is_active(),
+		"...and so does a plain mouse release, for a build without touch emulation")
+
+	# The slider hears its own release through _gui_input, which only arrives while
+	# the pointer is still over the bar. A finger that slid off the end and lifted
+	# there was never told to stop -- and kept the bar in its dragging state.
+	var bar_point := slider.get_global_transform_with_canvas() * Vector2(
+		slider.local_x_for_index(ADULT_BRUSH_SIZE_COUNT - 1), slider.size.y * 0.5
+	)
+	_send_touch(_adult_palette, bar_point, true)
+	slider.pick_at_local_x(slider.local_x_for_index(ADULT_BRUSH_SIZE_COUNT - 1))
+	_expect(adult_preview.is_showing(), "precondition: the size bubble is up")
+	_send_touch(_adult_palette, Vector2(4.0, 4.0), false)
+	_expect(not adult_preview.is_active(),
+		"a release that lands off the size bar still ends its preview")
+
+	# Focus loss: the web build's finger that leaves the canvas, the tab that goes
+	# away. No release event is ever delivered, so the bubble has to save itself.
+	child_preview.show_color(_child_def.get_color(1), from_point)
+	child_preview.notification(Node.NOTIFICATION_APPLICATION_FOCUS_OUT)
+	_expect(not child_preview.is_showing(),
+		"losing application focus mid-slide hides the bubble at once")
+
+	# A palette rebuilt under a finger (the mid-book mode switch) takes its bubble
+	# down with it rather than leaving one floating over the new one.
+	child_preview.show_color(_child_def.get_color(1), from_point)
+	_child_palette.set_palette(_child_def)
+	_expect(not _child_palette.get_pick_preview().is_showing(),
+		"rebuilding the palette clears the bubble")
+	_child_palette.select_color(0)
+
+	# --- BL-16 part 4: per-item selected states, louder again ----------------
+	var swatches := _adult_palette.get_color_buttons()
+	_adult_palette.select_color(5)
+	var selected_swatch := swatches[5] as SwatchButton
+	var neighbour := swatches[6] as SwatchButton
+	_expect(selected_swatch.patch_inset() < neighbour.patch_inset(),
+		"the selected swatch is drawn LARGER than its neighbours (%.0f px inset vs %.0f)"
+		% [selected_swatch.patch_inset(), neighbour.patch_inset()])
+	var selected_side := SwatchButton.DEFAULT_SIZE.x - SwatchButton.SELECTED_INSET * 2.0
+	var idle_side := SwatchButton.DEFAULT_SIZE.x - SwatchButton.IDLE_INSET * 2.0
+	_expect(selected_side >= idle_side * 1.3,
+		"...by a full %.2fx, not a nudge (%.0f px vs %.0f)"
+		% [selected_side / idle_side, selected_side, idle_side])
+	_expect(SwatchButton.SELECTION_RING_WIDTH >= 6.0,
+		"...inside a ring at least 6 px thick (%.0f px)" % SwatchButton.SELECTION_RING_WIDTH)
+	_expect(
+		SwatchButton.SELECTED_INSET
+		>= SwatchButton.SELECTION_RING_WIDTH + SwatchButton.SELECTION_KEYLINE_WIDTH * 0.5,
+		"...which still fits in the swatch's own box, so the grid's scroller cannot clip it"
+	)
+	_expect(selected_swatch.is_bouncing() and selected_swatch.scale.x > 1.0,
+		"picking a swatch plays a settle bounce (scale %.2f)" % selected_swatch.scale.x)
+	_expect(not neighbour.is_bouncing() and is_equal_approx(neighbour.scale.x, 1.0),
+		"...only the one that was picked")
+	await _wait(SwatchButton.SELECT_BOUNCE_SECONDS + 0.2)
+	_expect(is_equal_approx(selected_swatch.scale.x, 1.0),
+		"...and it settles back to its own box, which is what the scroller clips against (%.3f)"
+		% selected_swatch.scale.x)
+
+	var crayons_now := _child_palette.get_color_buttons()
+	_child_palette.select_color(3)
+	var selected_crayon := crayons_now[3] as CrayonButton
+	_expect(CrayonButton.LIFT_PX >= CrayonButton.DEFAULT_SIZE.x * 0.45,
+		"a selected crayon lifts %.0f px, half its own width" % CrayonButton.LIFT_PX)
+	_expect(
+		CrayonButton.SELECTED_WIDTH_SCALE > CrayonButton.HOVER_WIDTH_SCALE
+		and CrayonButton.HOVER_WIDTH_SCALE > CrayonButton.IDLE_WIDTH_SCALE
+		and CrayonButton.SELECTED_WIDTH_SCALE >= CrayonButton.IDLE_WIDTH_SCALE * 1.4,
+		"...and is %.2fx the width of an unselected one"
+		% (CrayonButton.SELECTED_WIDTH_SCALE / CrayonButton.IDLE_WIDTH_SCALE)
+	)
+	_expect(CrayonButton.GLOW_LAYERS >= 8 and CrayonButton.GLOW_ALPHA >= 0.20,
+		"the halo behind it gained layers (%d) and opacity (%.2f)"
+		% [CrayonButton.GLOW_LAYERS, CrayonButton.GLOW_ALPHA])
+	_expect(selected_crayon.is_bouncing()
+		and selected_crayon.current_lift() > CrayonButton.LIFT_PX,
+		"picking a crayon springs it past its resting lift (%.0f px of %.0f)"
+		% [selected_crayon.current_lift(), CrayonButton.LIFT_PX])
+	_expect(CrayonButton.LIFT_HEADROOM >= CrayonButton.LIFT_PX * CrayonButton.SELECT_BOUNCE_SCALE,
+		"...into headroom the box already reserved, so the row's scroller cannot clip the peak")
+	await _wait(CrayonButton.SELECT_BOUNCE_SECONDS + 0.2)
+	_expect(is_equal_approx(selected_crayon.current_lift(), CrayonButton.LIFT_PX),
+		"...and settles at exactly the resting lift (%.1f px)" % selected_crayon.current_lift())
+	_expect((crayons_now[4] as CrayonButton).current_lift() == 0.0,
+		"an unselected crayon does not lift at all")
+
+
+## (g) GameState: default mode, palette lookup, mode_changed.
 func _check_game_state() -> void:
-	print("\n-- check 7: GameState --")
+	print("\n-- check 8: GameState --")
 	GameState.reload_palettes()
 	# M5: the mode is persisted, so a real save could have put the game in adult
 	# mode before this test ran. Point saves at an empty scratch root -- loading
@@ -404,6 +666,14 @@ func _showcase() -> void:
 	_adult_palette.select_color(SHOWCASE_ADULT_INDEX)
 	_adult_palette.select_brush_size(SHOWCASE_ADULT_SIZE_INDEX)
 	await _settle()
+	# BL-15: park a bubble over the showcase crayon so the screenshot shows the
+	# thing a still frame otherwise never catches.
+	var crayons := _child_palette.get_color_buttons()
+	if SHOWCASE_CHILD_INDEX < crayons.size():
+		_child_palette.get_pick_preview().show_color(
+			_child_def.get_color(SHOWCASE_CHILD_INDEX), _center_of(crayons[SHOWCASE_CHILD_INDEX])
+		)
+	await _settle()
 
 
 # =================================================================== helpers ==
@@ -422,6 +692,43 @@ func _settle() -> void:
 			break
 	await get_tree().process_frame
 	await RenderingServer.frame_post_draw
+
+
+func _wait(seconds: float) -> void:
+	await get_tree().create_timer(seconds).timeout
+
+
+## Middle of [param control], in viewport coordinates -- where a finger aiming at
+## it would actually land.
+static func _center_of(control: Control) -> Vector2:
+	return control.get_global_transform_with_canvas() * (control.size * 0.5)
+
+
+## One synthetic finger down/up at a viewport position, fed straight to the
+## palette's `_input` the way the engine feeds it real ones.
+static func _send_touch(palette: Control, viewport_position: Vector2, pressed: bool) -> void:
+	var event := InputEventScreenTouch.new()
+	event.index = 0
+	event.position = viewport_position
+	event.pressed = pressed
+	palette._input(event)
+
+
+## A mouse button release, for the path a build without touch emulation takes.
+static func _send_mouse_release(palette: Control, viewport_position: Vector2) -> void:
+	var event := InputEventMouseButton.new()
+	event.button_index = MOUSE_BUTTON_LEFT
+	event.position = viewport_position
+	event.pressed = false
+	palette._input(event)
+
+
+static func _send_drag(palette: Control, from_position: Vector2, to_position: Vector2) -> void:
+	var event := InputEventScreenDrag.new()
+	event.index = 0
+	event.position = to_position
+	event.relative = to_position - from_position
+	palette._input(event)
 
 
 func _smallest_target(controls: Array[Control]) -> float:

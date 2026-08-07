@@ -8,7 +8,9 @@ extends Control
 ## directory per book, each holding a [code]book.tres[/code]. Dropping a new book
 ## directory into the project puts it on the shelf with no code change. A
 ## hardcoded preload list would make every new book a code edit, and would rot the
-## moment a book is renamed.
+## moment a book is renamed. Since WP7 the same call also picks up books from
+## installed DLC packs under [code]user://dlc/[/code] -- same shelf, same ordering,
+## two sources.
 ##
 ## Signals up: [signal book_chosen]. The parent decides what happens next (M5's
 ## [code]main.tscn[/code] swaps in the coloring screen); this screen never does.
@@ -38,9 +40,12 @@ func _ready() -> void:
 
 # ====================================================================== data ==
 
-## Scans [param root] and fills the shelf. Returns the number of books shown.
-func load_books(root: String = BookDef.BOOKS_ROOT) -> int:
-	return set_books(BookDef.discover(root))
+## Scans [param root] (built-in books) and [param dlc_root] (installed DLC packs,
+## WP7) and fills the shelf. Returns the number of books shown. Passing "" as
+## [param dlc_root] shows built-in books only, which is what the dev harnesses that
+## assert an exact shelf size do.
+func load_books(root: String = BookDef.BOOKS_ROOT, dlc_root: String = BookDef.DLC_ROOT) -> int:
+	return set_books(BookDef.discover(root, dlc_root))
 
 
 ## Fills the shelf from an explicit list (dependency injection for tests and for

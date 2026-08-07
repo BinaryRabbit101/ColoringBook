@@ -25,6 +25,10 @@ signal closed()
 signal mode_change_requested()
 ## The player confirmed the destructive erase.
 signal erase_all_confirmed()
+## The grown-up tapped "Account" (WP10). The parent puts the [AdultGate] in front
+## of it and only then the [AccountPanel] -- this panel never opens an account
+## screen itself, and never speaks to the network.
+signal account_requested()
 
 ## Where the version string comes from (set in project.godot).
 const VERSION_SETTING := "application/config/version"
@@ -37,6 +41,8 @@ const ACK_SECONDS := 2.2
 @onready var _scrim: Button = $Scrim
 @onready var _mode_value: Label = $Center/Panel/Margin/Column/ModeRow/ModeValue
 @onready var _change_button: Button = $Center/Panel/Margin/Column/ModeRow/ChangeButton
+@onready var _account_value: Label = $Center/Panel/Margin/Column/AccountRow/AccountValue
+@onready var _account_button: Button = $Center/Panel/Margin/Column/AccountRow/AccountButton
 @onready var _erase_button: Button = $Center/Panel/Margin/Column/EraseButton
 @onready var _confirm_box: VBoxContainer = $Center/Panel/Margin/Column/ConfirmBox
 @onready var _confirm_button: Button = $Center/Panel/Margin/Column/ConfirmBox/Row/ConfirmButton
@@ -50,6 +56,7 @@ func _ready() -> void:
 	_scrim.pressed.connect(_on_close_pressed)
 	_close_button.pressed.connect(_on_close_pressed)
 	_change_button.pressed.connect(func() -> void: mode_change_requested.emit())
+	_account_button.pressed.connect(func() -> void: account_requested.emit())
 	_erase_button.pressed.connect(_on_erase_pressed)
 	_cancel_button.pressed.connect(_on_cancel_pressed)
 	_confirm_button.pressed.connect(_on_confirm_pressed)
@@ -67,6 +74,13 @@ func refresh() -> void:
 		GameState.mode.capitalize(),
 		palette.display_name if palette != null else "?",
 	]
+	# WP10: the account row reads Backend, which is inert (and therefore reads
+	# "Not signed in") whenever there is no account or no server configured. This
+	# panel still never talks to the network itself.
+	var signed_in := Backend.is_signed_in()
+	_account_value.text = Backend.get_account_email() if signed_in else "Not signed in"
+	_account_button.text = "Manage" if signed_in else "Sign in"
+	_account_button.visible = Backend.is_enabled()
 	_version_label.text = "ColoringBook %s (%s)" % [
 		String(ProjectSettings.get_setting(VERSION_SETTING, "0.0.0")), BUILD_TAG
 	]
@@ -123,6 +137,14 @@ func _on_close_pressed() -> void:
 
 func get_change_mode_button() -> Button:
 	return _change_button
+
+
+func get_account_button() -> Button:
+	return _account_button
+
+
+func get_account_text() -> String:
+	return _account_value.text
 
 
 func get_erase_button() -> Button:

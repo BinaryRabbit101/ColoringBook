@@ -9,7 +9,7 @@ extends Control
 ## Extra user args (after a bare `--`):
 ##   --stay             leave the app running afterwards, on whatever screen it
 ##                      reached, WITHOUT deleting the scratch save
-##   --shot-dir <dir>   where title.png / mode_select.png / book_complete.png go
+##   --shot-dir <dir>   where title.png / mode_select.png / page_complete.png go
 ##                      (default user://shell_smoke/shots)
 ##
 ## [b]Persistence is isolated.[/b] The harness drives the REAL [code]GameState[/code]
@@ -26,8 +26,12 @@ extends Control
 ##      coverage restored
 ##   c2 the toolbar's Save button writes the page on demand (BL-6), and its
 ##      Start over button resets THAT page only, behind a two-button confirm (BL-7)
-##   d  both pages completed -> BookComplete -> "Color again" wipes paint + status
-##      and reopens the book clean at 1/2
+##   c3 the padlock locks THIS page -- no strokes, no Start over, everything else
+##      untouched -- and the lock is written to the save immediately (BL-10)
+##   d  both pages completed; each one celebrates TRANSIENTLY and stays put, the
+##      LAST page is not special (BL-11: its forward arrow is simply disabled and
+##      Back is the exit -- there is no BookComplete screen), then
+##      erase_book_progress wipes paint + status and the book reopens clean at 1/2
 ##   e  settings "erase all progress" (two-step confirm) empties the save and the
 ##      paint directory
 ##   f  changing mode mid-book swaps the palette component and the completion
@@ -40,6 +44,9 @@ extends Control
 
 const MAIN_SCENE := preload("res://scenes/main.tscn")
 const BOOK_PATH := "res://resources/books/test_book/book.tres"
+## What the save file keys that book by since schema v2 (WP7): its authored
+## [member BookDef.book_uid], not the path it is loaded from.
+const BOOK_UID := "test-book-2026"
 ## Books on the shelf after M6 added the coyote art book: test_book + coyote.
 const EXPECTED_BOOK_COUNT := 2
 
@@ -100,6 +107,7 @@ func _run() -> void:
 	await _check_paint_and_save()
 	await _check_resume()
 	await _check_manual_save_and_restart()
+	await _check_coloring_lock()
 	await _check_complete_and_again()
 	await _check_erase_all()
 	await _check_mode_change_mid_book()
@@ -281,24 +289,35 @@ func _check_paint_and_save() -> void:
 	_expect(String(data_dict.get("mode", "")) == PaletteDef.MODE_CHILD,
 		"the saved mode is 'child' (%s)" % data_dict.get("mode"))
 	var books: Dictionary = data_dict.get("books", {})
-	_expect(books.has(BOOK_PATH),
-		"the book is keyed by its resource_path (keys: %s)" % [books.keys()])
-	if not books.has(BOOK_PATH):
+	# WP7 / save schema v2: the key is the book's OWN identity, not the path this
+	# build happens to load it from.
+	_expect(books.has(BOOK_UID) and GameState.book_key(_book) == BOOK_UID,
+		"the book is keyed by its book_uid '%s' (keys: %s)" % [BOOK_UID, books.keys()])
+	if not books.has(BOOK_UID):
 		return
-	var entry: Dictionary = books[BOOK_PATH]
+	var entry: Dictionary = books[BOOK_UID]
 	_expect(int(entry.get("current_page_index", -1)) == 0,
 		"current_page_index is 0 (%s)" % entry.get("current_page_index"))
 	var pages: Array = entry.get("pages", [])
 	_expect(pages.size() == _book.page_count(),
-		"a status per page (%d of %d)" % [pages.size(), _book.page_count()])
-	_expect(pages.size() > 0 and String(pages[0]) == GameState.STATUS_IN_PROGRESS,
-		"page 1 is '%s' (%s)" % [GameState.STATUS_IN_PROGRESS, pages[0] if pages.size() > 0 else "-"])
+		"an entry per page (%d of %d)" % [pages.size(), _book.page_count()])
+	# BL-10 widened a page entry from a bare status string to an object carrying the
+	# status AND the coloring lock.
+	var first_page: Dictionary = (
+		pages[0] if pages.size() > 0 and typeof(pages[0]) == TYPE_DICTIONARY else {}
+	)
+	_expect(String(first_page.get(GameState.PAGE_STATUS_KEY, "-")) == GameState.STATUS_IN_PROGRESS,
+		"page 1 is '%s' (%s)"
+		% [GameState.STATUS_IN_PROGRESS, first_page.get(GameState.PAGE_STATUS_KEY, "-")])
+	_expect(first_page.has(GameState.PAGE_LOCKED_KEY)
+			and not bool(first_page[GameState.PAGE_LOCKED_KEY]),
+		"...and carries its lock flag, unlocked (%s)" % [first_page])
 
 	var paint_path := GameState.get_paint_path(_book, 0)
 	_expect(FileAccess.file_exists(paint_path),
 		"the paint layer was written to %s" % ProjectSettings.globalize_path(paint_path))
-	_expect(paint_path.contains("/%s/" % GameState.book_slug(BOOK_PATH)),
-		"the paint path uses the book slug '%s'" % GameState.book_slug(BOOK_PATH))
+	_expect(paint_path.contains("/%s/" % GameState.book_slug(BOOK_UID)),
+		"the paint path uses the book slug '%s'" % GameState.book_slug(BOOK_UID))
 
 
 # ========================================================== c: resume a book ==
@@ -395,11 +414,11 @@ func _check_manual_save_and_restart() -> void:
 	await _settle_layout()
 
 	_expect(not FileAccess.file_exists(paint_path), "confirming deleted page 1's paint layer")
-	_expect(GameState.get_page_status(BOOK_PATH, 0) == GameState.STATUS_UNTOUCHED,
+	_expect(GameState.get_page_status(BOOK_UID, 0) == GameState.STATUS_UNTOUCHED,
 		"page 1 is '%s' again (%s)"
-		% [GameState.STATUS_UNTOUCHED, GameState.get_page_status(BOOK_PATH, 0)])
-	_expect(GameState.get_page_status(BOOK_PATH, 1) == GameState.STATUS_IN_PROGRESS,
-		"page 2's progress was NOT touched (%s)" % GameState.get_page_status(BOOK_PATH, 1))
+		% [GameState.STATUS_UNTOUCHED, GameState.get_page_status(BOOK_UID, 0)])
+	_expect(GameState.get_page_status(BOOK_UID, 1) == GameState.STATUS_IN_PROGRESS,
+		"page 2's progress was NOT touched (%s)" % GameState.get_page_status(BOOK_UID, 1))
 	_expect(is_zero_approx(coloring.get_coverage_tracker().page_coverage()),
 		"the tracker is back to zero coverage (%.3f)"
 		% coloring.get_coverage_tracker().page_coverage())
@@ -412,10 +431,75 @@ func _check_manual_save_and_restart() -> void:
 	GameState.erase_page_progress(_book, 1)
 
 
-# ================================ d: finish the book, then "Color again" ==
+# ================================================ c3: the coloring lock (BL-10) ==
+# The lock has to do exactly two things and refuse to do a third: stop strokes,
+# disable Start over, and leave everything else -- Save, navigation, the palette,
+# the paint already down -- exactly as it was. And it has to be on disk the moment
+# it is set, because a lock that survives only until the next crash is not a lock.
+
+func _check_coloring_lock() -> void:
+	print("\n-- check c3: the padlock --")
+	var coloring := _main.get_current_screen() as ColoringPage
+	if coloring == null:
+		_expect(false, "the coloring page is open")
+		return
+	var page_view := coloring.get_page_view()
+	var lock := coloring.get_lock_button()
+	_expect(lock != null, "the toolbar carries a padlock button")
+	if lock == null:
+		return
+	_expect(minf(lock.size.x, lock.size.y) >= 48.0,
+		"...clearing the 48 px touch floor (%.0fx%.0f)" % [lock.size.x, lock.size.y])
+	_expect(not coloring.is_page_locked() and not lock.locked, "a page starts unlocked")
+
+	# --- lock it --------------------------------------------------------------
+	lock.pressed.emit()
+	_expect(coloring.is_page_locked(), "one tap locks the page -- no confirm step")
+	_expect(lock.locked, "...and the padlock itself shows the state")
+	_expect(not page_view.painting_enabled, "...painting is off on the page view")
+	_expect(not page_view.begin_stroke(_probe_point), "...a press starts NO stroke")
+	_expect(lock.is_wiggling(), "...and the padlock wiggled to say why nothing happened")
+	_expect(not page_view.is_stroke_active(), "...nothing is left half-started")
+	_expect(coloring.get_reset_button().disabled, "Start over is disabled while locked")
+	_expect(not coloring.restart_current_page(),
+		"...and refuses to run even when called directly")
+
+	# --- everything else is untouched ----------------------------------------
+	_expect(not coloring.get_save_button().disabled, "Save still works while locked")
+	_expect(not coloring.get_next_page_button().disabled, "navigation still works")
+	_expect(not coloring.get_back_button().disabled, "...and so does leaving the book")
+	_expect(coloring.get_palette() != null and coloring.get_palette().visible,
+		"the palette is still there to browse")
+
+	# --- it is in the save, at once ------------------------------------------
+	_expect(GameState.is_page_locked(BOOK_UID, 0), "GameState records the lock")
+	_expect(not GameState.is_page_locked(BOOK_UID, 1), "...for THIS page only")
+	var saved_entry: Dictionary = (_read_save().get("books", {}) as Dictionary).get(BOOK_UID, {})
+	var saved_pages: Array = saved_entry.get("pages", [])
+	_expect(saved_pages.size() > 0 and typeof(saved_pages[0]) == TYPE_DICTIONARY
+			and bool((saved_pages[0] as Dictionary).get(GameState.PAGE_LOCKED_KEY, false)),
+		"...and it is on disk immediately, without waiting for a save point (%s)"
+		% [saved_pages[0] if saved_pages.size() > 0 else "-"])
+	GameState.load_save()
+	_expect(GameState.is_page_locked(BOOK_UID, 0),
+		"...so it survives being read back out of that file")
+
+	# --- unlock ---------------------------------------------------------------
+	lock.pressed.emit()
+	_expect(not coloring.is_page_locked() and not lock.locked,
+		"one more tap unlocks it, again with no dialog")
+	_expect(page_view.painting_enabled and not coloring.get_reset_button().disabled,
+		"painting and Start over come straight back")
+	_expect(page_view.begin_stroke(_probe_point), "...and a press starts a stroke again")
+	page_view.end_stroke()
+	await _wait_for_coverage(coloring)
+	_expect(not GameState.is_page_locked(BOOK_UID, 0), "the save agrees the page is unlocked")
+
+
+# ============ d: finish both pages, leave by Back, start the book over ==
 
 func _check_complete_and_again() -> void:
-	print("\n-- check d: finish both pages -> BookComplete -> Color again --")
+	print("\n-- check d: finish both pages, then start the book over --")
 	var coloring := _main.get_current_screen() as ColoringPage
 	if coloring == null:
 		_expect(false, "the coloring page is open")
@@ -431,6 +515,9 @@ func _check_complete_and_again() -> void:
 		PAINT_TIMEOUT
 	)
 	_expect(finished, "page 1 completed and stayed on 1/2 ('%s')" % coloring.get_page_label_text())
+	_expect(coloring.is_celebrating(), "...with the transient celebration up (BL-11)")
+	_expect(ColoringPage.CELEBRATION_MESSAGES.has(coloring.get_celebration_message()),
+		"...showing a congratulation from the pool ('%s')" % coloring.get_celebration_message())
 	coloring.get_next_page_button().pressed.emit()
 	# The flip is asynchronous; wait for the second page to be interactive.
 	var on_page_2 := await _wait_until(
@@ -441,47 +528,73 @@ func _check_complete_and_again() -> void:
 		% coloring.get_page_label_text())
 	await _wait_until(func() -> bool: return not coloring.has_pending_restore(), NAV_TIMEOUT)
 
-	_expect(GameState.get_page_status(BOOK_PATH, 0) == GameState.STATUS_COMPLETE,
+	_expect(GameState.get_page_status(BOOK_UID, 0) == GameState.STATUS_COMPLETE,
 		"page 1 was saved as '%s' (%s)"
-		% [GameState.STATUS_COMPLETE, GameState.get_page_status(BOOK_PATH, 0)])
+		% [GameState.STATUS_COMPLETE, GameState.get_page_status(BOOK_UID, 0)])
 	_expect(FileAccess.file_exists(GameState.get_paint_path(_book, 0)),
 		"page 1's finished paint layer is on disk")
 
 	var strokes_2 := await _fill_page(coloring)
 	print("   page 2 filled with %d strokes" % strokes_2)
-	var celebrated := await _wait_for_screen(Main.SCREEN_BOOK_COMPLETE, PAINT_TIMEOUT)
-	_expect(celebrated, "finishing the last page shows BookComplete (%s)" % _main.get_current_screen_id())
-	var complete := _main.get_current_screen() as BookComplete
-	if complete == null:
-		return
-	_expect(complete.get_book() == _book, "the celebration names the finished book")
+	# BL-11: the LAST page behaves like every other one. Filling it up celebrates
+	# and stays put, and there is nowhere for the book to end TO -- the player
+	# leaves with Back, whenever they feel like it.
+	var last_done := await _wait_until(
+		func() -> bool:
+			return coloring.get_coverage_tracker().is_page_complete() \
+				and not coloring.is_transitioning(),
+		PAINT_TIMEOUT
+	)
+	_expect(last_done, "page 2 completed ('%s')" % coloring.get_page_label_text())
+	_expect(_main.get_current_screen_id() == Main.SCREEN_COLORING,
+		"...and the book did NOT take the player anywhere (%s)" % _main.get_current_screen_id())
+	_expect(coloring.is_celebrating(), "...it celebrated on the page, like any other page")
+	_expect(coloring.get_next_page_button().disabled,
+		"...the forward arrow is disabled: there is no page after the last one")
+	_expect(not coloring.get_back_button().disabled, "...and Back is the way out")
 	_expect(GameState.is_book_complete(_book), "every page is recorded complete")
-	# Let the headline finish its pop-in, or the screenshot catches it mid-fade.
-	await get_tree().create_timer(BookComplete.POP_SECONDS + 0.2).timeout
 	await _settle_layout()
-	await _screenshot("book_complete.png")
+	await _screenshot("page_complete.png")
+
+	# ...and the whole celebration is gone again a few seconds later, on its own.
+	var faded := await _wait_until(func() -> bool: return not coloring.is_celebrating(), 15.0)
+	_expect(faded, "the celebration faded away with nothing dismissing it")
+	_expect(_main.get_current_screen_id() == Main.SCREEN_COLORING
+			and coloring.get_page_label_text() == "2/2",
+		"...leaving the player on the page they finished ('%s')" % coloring.get_page_label_text())
 
 	var paint_0 := GameState.get_paint_path(_book, 0)
 	var paint_1 := GameState.get_paint_path(_book, 1)
 	_expect(FileAccess.file_exists(paint_0) and FileAccess.file_exists(paint_1),
-		"both pages' paint layers exist before 'Color again'")
+		"both pages' paint layers are on disk")
 
-	# --- Color again ---------------------------------------------------------
-	complete.get_again_button().pressed.emit()
+	# --- leave by Back, wipe the book, colour it again ------------------------
+	coloring.get_back_button().pressed.emit()
+	var left := await _wait_for_screen(Main.SCREEN_BOOK_SELECT, PAINT_TIMEOUT)
+	_expect(left, "Back leaves the finished book for the shelf (%s)" % _main.get_current_screen_id())
+
+	GameState.erase_book_progress(_book)
+	_expect(not FileAccess.file_exists(paint_0) and not FileAccess.file_exists(paint_1),
+		"erase_book_progress deleted both saved paint layers")
+	_expect(GameState.get_page_status(BOOK_UID, 0) == GameState.STATUS_UNTOUCHED
+			and GameState.get_page_status(BOOK_UID, 1) == GameState.STATUS_UNTOUCHED,
+		"both page statuses were reset (%s, %s)"
+		% [GameState.get_page_status(BOOK_UID, 0), GameState.get_page_status(BOOK_UID, 1)])
+
+	var shelf := _main.get_current_screen() as BookSelect
+	var cell := _cell_for(shelf, _book) if shelf != null else null
+	_expect(cell != null, "the wiped book is still on the shelf")
+	if cell == null:
+		return
+	cell.pressed.emit()
 	var restarted := await _wait_for_screen(Main.SCREEN_COLORING)
-	_expect(restarted, "'Color again' reopens the book (%s)" % _main.get_current_screen_id())
+	_expect(restarted, "picking it opens it again (%s)" % _main.get_current_screen_id())
 	var fresh := _main.get_current_screen() as ColoringPage
 	if fresh == null:
 		return
 	await _wait_until(func() -> bool: return not fresh.has_pending_restore(), NAV_TIMEOUT)
 	await _settle_layout()
 
-	_expect(not FileAccess.file_exists(paint_0) and not FileAccess.file_exists(paint_1),
-		"'Color again' deleted both saved paint layers")
-	_expect(GameState.get_page_status(BOOK_PATH, 0) == GameState.STATUS_UNTOUCHED
-			and GameState.get_page_status(BOOK_PATH, 1) == GameState.STATUS_UNTOUCHED,
-		"both page statuses were reset (%s, %s)"
-		% [GameState.get_page_status(BOOK_PATH, 0), GameState.get_page_status(BOOK_PATH, 1)])
 	_expect(fresh.get_page_label_text() == "1/2",
 		"the restarted book is back at 1/2 ('%s')" % fresh.get_page_label_text())
 	_expect(is_zero_approx(fresh.get_coverage_tracker().page_coverage()),
@@ -593,13 +706,13 @@ func _check_broken_saves() -> void:
 	print("\n-- check h: corrupt and future save files --")
 	GameState.mark_page_status(_book, 0, GameState.STATUS_COMPLETE)
 	GameState.set_mode(PaletteDef.MODE_ADULT)
-	_expect(not GameState.get_book_progress(BOOK_PATH).get("pages", []).is_empty(),
+	_expect(not GameState.get_book_progress(BOOK_UID).get("pages", []).is_empty(),
 		"there is in-memory progress before the corrupt read")
 
 	_write_text(GameState.get_save_path(), "{ this is not json ]]")
 	var loaded := GameState.load_save()
 	_expect(not loaded, "load_save() reports that nothing was loaded")
-	_expect((GameState.get_book_progress(BOOK_PATH).get("pages", []) as Array).is_empty(),
+	_expect((GameState.get_book_progress(BOOK_UID).get("pages", []) as Array).is_empty(),
 		"the in-memory progress was reset")
 	_expect(GameState.mode == GameState.DEFAULT_MODE,
 		"the mode fell back to the shipped default '%s' (%s)"
@@ -612,14 +725,14 @@ func _check_broken_saves() -> void:
 		DirAccess.remove_absolute(backup)
 	_write_text(GameState.get_save_path(),
 		'{"version": 99, "mode": "adult", "books": {"%s": {"current_page_index": 5, "pages": []}}}'
-		% BOOK_PATH)
+		% BOOK_UID)
 	var future_loaded := GameState.load_save()
 	_expect(not future_loaded, "a v99 save is refused")
 	_expect(FileAccess.file_exists(backup),
 		"...and backed up to %s" % ProjectSettings.globalize_path(backup))
 	_expect(FileAccess.get_file_as_string(backup).contains("\"version\": 99"),
 		"the backup is the original bytes")
-	_expect(not GameState.has_book_progress(BOOK_PATH), "the future save's progress was NOT applied")
+	_expect(not GameState.has_book_progress(BOOK_UID), "the future save's progress was NOT applied")
 
 	# --- a save that remembers pages the book no longer has (BL-9) -----------
 	# Books SHRINK: BL-9 folded the coyote book's two bogus pages back into one,
@@ -629,26 +742,43 @@ func _check_broken_saves() -> void:
 	_write_text(GameState.get_save_path(),
 		('{"version": 1, "mode": "child", "books": {"%s": '
 		+ '{"current_page_index": 3, "pages": ["complete", "in_progress", "complete", "complete"]}}}')
-		% BOOK_PATH)
+		% BOOK_UID)
 	_expect(GameState.load_save(), "a save listing 4 pages for a 2-page book loads")
-	var orphan := GameState.get_paint_path_for_key(BOOK_PATH, 2)
+	# ...and those page entries are BARE STATUS STRINGS -- the shape every save
+	# written before BL-10 used. Reading them is the backward-compatibility half of
+	# widening a page entry into an object.
+	_expect(GameState.get_page_status(BOOK_UID, 0) == GameState.STATUS_COMPLETE,
+		"a pre-BL-10 save's bare status strings still read as statuses (%s)"
+		% GameState.get_page_status(BOOK_UID, 0))
+	_expect(not GameState.is_page_locked(BOOK_UID, 0)
+			and not GameState.is_page_locked(BOOK_UID, 1),
+		"...and every page of it comes back UNLOCKED, because it could not say otherwise")
+	var orphan := GameState.get_paint_path_for_key(BOOK_UID, 2)
 	DirAccess.make_dir_recursive_absolute(orphan.get_base_dir())
 	_write_text(orphan, "not really a png, but it is a file on disk")
 	# Any path that touches the entry trims it; this one also proves completion is
 	# still sticky while the trim happens underneath it.
 	GameState.mark_page_status(_book, 0, GameState.STATUS_IN_PROGRESS)
-	var trimmed := GameState.get_book_progress(BOOK_PATH)
+	var trimmed := GameState.get_book_progress(BOOK_UID)
 	_expect((trimmed.get("pages", []) as Array).size() == _book.page_count(),
 		"the entry was trimmed to the book's %d pages (%d)"
 		% [_book.page_count(), (trimmed.get("pages", []) as Array).size()])
-	_expect(String((trimmed.get("pages", []) as Array)[0]) == GameState.STATUS_COMPLETE,
+	_expect(GameState.get_page_status(BOOK_UID, 0) == GameState.STATUS_COMPLETE,
 		"the surviving pages kept their statuses")
+	# (mark_page_status refused the downgrade above, so nothing has been WRITTEN
+	# since the legacy file was planted -- ask for the write explicitly.)
+	GameState.save_now()
+	var rewritten: Array = ((_read_save().get("books", {}) as Dictionary)
+		.get(BOOK_UID, {}) as Dictionary).get("pages", [])
+	_expect(rewritten.size() > 0 and typeof(rewritten[0]) == TYPE_DICTIONARY,
+		"...and writing that save back upgrades its entries to the object form (%s)"
+		% [rewritten[0] if rewritten.size() > 0 else "-"])
 	_expect(int(trimmed.get("current_page_index", -1)) == _book.page_count() - 1,
 		"the saved cursor was clamped into the shorter book (%s)"
 		% trimmed.get("current_page_index"))
 	_expect(not FileAccess.file_exists(orphan),
 		"the removed page's paint layer was deleted from user://")
-	_expect(GameState.get_page_status(BOOK_PATH, 2) == GameState.STATUS_UNTOUCHED
+	_expect(GameState.get_page_status(BOOK_UID, 2) == GameState.STATUS_UNTOUCHED
 			and is_instance_valid(_main),
 		"asking about the page that no longer exists is untouched, not a crash")
 

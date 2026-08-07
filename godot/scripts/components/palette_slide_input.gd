@@ -23,6 +23,13 @@ extends RefCounted
 ## Drags that belong to a slide are CONSUMED by the palette, so the
 ## [ScrollContainer] the swatches sit in cannot drag-scroll under the finger at the
 ## same time. Wheel scrolling is untouched.
+##
+## [b]Candidate reporting[/b] (BACKLOG BL-15): the gesture is already tracked here,
+## so the pick-preview bubble is fed from here too rather than being re-derived in
+## each palette. [method set_candidate_hook] adds two purely presentational
+## callbacks -- "the finger is over target N at this viewport position" and "the
+## finger lifted" -- which fire on EVERY drag event, not only when the pick
+## changes, because the bubble has to follow the finger regardless.
 
 ## The palette this belongs to. Everything is hit-tested through its subtree.
 var _owner: Control
@@ -31,6 +38,9 @@ var _owner: Control
 var _hit_area: Control
 var _targets: Array[Control] = []
 var _on_pick: Callable
+## BL-15 presentational hooks; see [method set_candidate_hook].
+var _on_candidate: Callable
+var _on_release: Callable
 
 ## Touch index of the slide in progress, -1 when idle.
 var _touch_index := -1
@@ -54,6 +64,17 @@ func set_targets(targets: Array[Control], on_pick: Callable) -> void:
 	cancel()
 
 
+## Purely presentational (BL-15). [param on_candidate] takes
+## [code](index: int, viewport_position: Vector2)[/code] and is called as the
+## gesture starts and on every drag event while it is claimed -- index -1 means the
+## finger is between targets. [param on_release] takes nothing and is called once
+## when the gesture ends, however it ends. Neither ever picks anything; that is
+## still [method set_targets]'s callback.
+func set_candidate_hook(on_candidate: Callable, on_release: Callable) -> void:
+	_on_candidate = on_candidate
+	_on_release = on_release
+
+
 ## Feeds one input event in. Returns true when the caller should mark it handled.
 func handle_input(event: InputEvent) -> bool:
 	if _owner == null or not _owner.is_visible_in_tree():
@@ -70,6 +91,8 @@ func handle_input(event: InputEvent) -> bool:
 		if index >= 0 and index != _last_index:
 			_last_index = index
 			_on_pick.call(index)
+		# Reported every event, not only on a change: the bubble tracks the finger.
+		_report_candidate(index, event.position)
 		return true
 	return false
 
@@ -78,9 +101,31 @@ func is_sliding() -> bool:
 	return _touch_index >= 0
 
 
+## True for the end of a pointer gesture, in either form the engine can deliver it
+## (touch, or a mouse button where touch emulation is off). Lives here so both
+## palettes ask the same question -- BL-16's dismiss audit turns "any release at
+## all" into "fade the preview", which is only safe if "release" means the same
+## thing in both of them.
+##
+## An instance method rather than a static one on purpose: a static call on a
+## [code]class_name[/code] script has bitten this project before (BL-15).
+func is_release_event(event: InputEvent) -> bool:
+	if event is InputEventScreenTouch:
+		return not event.pressed
+	if event is InputEventMouseButton:
+		return not event.pressed
+	return false
+
+
+## Ends any gesture in progress. Fires the release hook exactly once per gesture,
+## so a cancel from anywhere (a rebuild, a scrim, the palette going away) fades the
+## preview just like a lifted finger.
 func cancel() -> void:
+	var was_sliding := _touch_index >= 0
 	_touch_index = -1
 	_last_index = -1
+	if was_sliding and _on_release.is_valid():
+		_on_release.call()
 
 
 # =================================================================== internal ==
@@ -96,6 +141,12 @@ func _begin(touch_index: int, viewport_position: Vector2) -> void:
 	_touch_index = touch_index
 	# Whatever is under the press has just been picked by the control itself.
 	_last_index = _index_at(viewport_position)
+	_report_candidate(_last_index, viewport_position)
+
+
+func _report_candidate(index: int, viewport_position: Vector2) -> void:
+	if _on_candidate.is_valid():
+		_on_candidate.call(index, viewport_position)
 
 
 ## An overlay over the palette (the settings scrim) owns the gesture, not us:
