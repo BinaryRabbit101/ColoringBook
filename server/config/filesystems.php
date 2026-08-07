@@ -14,6 +14,30 @@
  */
 $private = 'app/'.trim((string) env('COLORINGBOOK_PRIVATE_ROOT', 'private'), '/');
 
+/*
+ * Permissions for the three private disks below.
+ *
+ * Flysystem's local adapter creates "private" files 0600 and directories 0700 by
+ * default, owned by whoever ran the process. On the deployed box that is *two*
+ * different users: `php artisan pack:publish` runs as the operator over SSH, while
+ * every read is PHP-FPM as `www-data`. 0700 means www-data cannot even traverse
+ * `packs/<slug>/`, so an import that looked perfectly successful answers every
+ * download with `FILE_NOT_FOUND` — and the only fix was a manual
+ * `chmod -R g+rX storage/app/private` after each publish, remembered or not.
+ *
+ * Group-readable (0750 / 0640) is the smallest change that makes the two users
+ * agree. The deployed tree is `gemini:www-data` with the setgid bit set, so every
+ * directory Flysystem creates inherits the serving group; the mode is the only
+ * half PHP controls, and it is the half that was wrong. www-data can then read
+ * the bytes it is asked to serve and still cannot write them. World access stays
+ * off — these files are private by design, reachable only through an authorised
+ * controller (or the X-Accel-Redirect Nginx follows as root).
+ */
+$privatePermissions = [
+    'file' => ['public' => 0644, 'private' => 0640],
+    'dir' => ['public' => 0755, 'private' => 0750],
+];
+
 return [
 
     /*
@@ -72,6 +96,7 @@ return [
             'driver' => 'local',
             'root' => storage_path($private.'/packs'),
             'serve' => false,
+            'permissions' => $privatePermissions,
             'throw' => true,
             'report' => false,
         ],
@@ -80,6 +105,7 @@ return [
             'driver' => 'local',
             'root' => storage_path($private.'/assets'),
             'serve' => false,
+            'permissions' => $privatePermissions,
             'throw' => true,
             'report' => false,
         ],
@@ -88,6 +114,7 @@ return [
             'driver' => 'local',
             'root' => storage_path($private.'/paint'),
             'serve' => false,
+            'permissions' => $privatePermissions,
             'throw' => true,
             'report' => false,
         ],

@@ -162,6 +162,34 @@ func _check_pure_logic() -> void:
 	_expect(BackendConfig.for_web_origin("https://game.example/") == "https://game.example/api/v1",
 		"the web export's same-origin base URL is a PATH on the game's own host (7.4)")
 
+	# The WEB branch of the resolution, proved from this desktop run: resolve_base_url()
+	# takes the platform and the page origin as ARGUMENTS for exactly this reason. It
+	# matters because the dev default is a loopback -- in a browser tab 127.0.0.1 is the
+	# CHILD's machine, so a web build that used it would fail in a way nothing here
+	# would catch.
+	_expect(BackendConfig.resolve_base_url("", BackendConfig.DEFAULT_BASE_URL, true,
+			"http://192.168.0.164:91") == "http://192.168.0.164:91/api/v1",
+		"a web build resolves the API against the PAGE'S OWN ORIGIN, not the dev loopback")
+	_expect(BackendConfig.resolve_base_url("", BackendConfig.DEFAULT_BASE_URL, true,
+			"https://minipc.example.ts.net:453/") == "https://minipc.example.ts.net:453/api/v1",
+		"...whichever of the two URLs the shell landed on -- the origin carries the port")
+	_expect(BackendConfig.resolve_base_url("", BackendConfig.DEFAULT_BASE_URL, false,
+			"http://192.168.0.164:91") == BackendConfig.DEFAULT_BASE_URL,
+		"...and a DESKTOP run is untouched by any of it")
+	_expect(BackendConfig.resolve_base_url("http://laptop.lan:8123/api/v1",
+			BackendConfig.DEFAULT_BASE_URL, true, "http://192.168.0.164:91")
+			== "http://laptop.lan:8123/api/v1",
+		"an explicit user://backend.json override still wins, web included")
+	_expect(BackendConfig.resolve_base_url("", "https://api.example/api/v1", true,
+			"http://192.168.0.164:91") == "https://api.example/api/v1",
+		"...as does an export deliberately pointed somewhere other than the dev default")
+	_expect(BackendConfig.resolve_base_url("", BackendConfig.DEFAULT_BASE_URL, true, "")
+			== BackendConfig.WEB_ORIGIN_PATH,
+		"with no readable origin a web build falls back to the same-origin PATH (%s)"
+		% BackendConfig.WEB_ORIGIN_PATH)
+	_expect(BackendConfig.get_page_origin() == "",
+		"there is no page origin outside a browser, so this desktop run is unaffected")
+
 	# min_client_version -- the coyote pack ships 0.6.0 against a 0.6.0 build, so
 	# "equal is satisfied" is not a detail, it is the shipping case.
 	_expect(BackendConfig.compare_versions("0.6.0", "0.6") == 0,

@@ -26,10 +26,22 @@ extends RefCounted
 ## topology is therefore to serve the API from a PATH on the game's own vhost
 ## ([code]https://<game-host>/api[/code]) rather than a second port, at which point
 ## the base URL for a web build is the relative-to-origin
-## [code]/api[/code] -- which is what [method for_web_origin] produces, and why the
-## default below is only ever right for a desktop dev run.
+## [code]/api[/code] -- which is what [method for_web_origin] produces.
 ##
-## Plain [RefCounted] with static methods: no nodes, no state, trivially testable.
+## So a web build [b]does not use the project setting's dev default[/b]:
+## [constant DEFAULT_BASE_URL] is a loopback address, and in a browser tab
+## [code]127.0.0.1[/code] is the PLAYER's machine, not the server -- pointing a web
+## export at it is never right, merely silently broken. [method get_base_url]
+## therefore resolves the page's own origin ([method get_page_origin]) and appends
+## [constant WEB_ORIGIN_PATH]. Two escape hatches survive that, in this order:
+## [constant OVERRIDE_PATH] still wins outright, and an export whose
+## [constant BASE_URL_SETTING] has deliberately been pointed somewhere other than
+## the dev default is taken at its word (that is what a feature-tagged override is
+## for). The origin substitution only ever replaces the default nobody chose.
+##
+## [b]Plain [RefCounted] with static methods[/b]: no nodes, no state, trivially
+## testable -- and the web branch above is [method resolve_base_url], which takes
+## its inputs as arguments precisely so a DESKTOP smoke run can prove it.
 
 ## Project setting holding the API root, INCLUDING the version prefix.
 const BASE_URL_SETTING := "coloringbook/backend/base_url"
@@ -49,13 +61,62 @@ const WEB_ORIGIN_PATH := "/api/v1"
 
 
 ## The API root this run should use. Override file first, then the project setting,
-## then [constant DEFAULT_BASE_URL]. Always returned without a trailing slash.
+## then -- on web only -- the page's own origin. Always returned without a trailing
+## slash. All three inputs are gathered here and decided in [method resolve_base_url].
 static func get_base_url() -> String:
-	var override: Variant = _read_override().get("base_url", "")
-	if String(override).strip_edges() != "":
-		return String(override).strip_edges().rstrip("/")
-	var setting := String(ProjectSettings.get_setting(BASE_URL_SETTING, DEFAULT_BASE_URL))
-	return setting.strip_edges().rstrip("/")
+	return resolve_base_url(
+		String(_read_override().get("base_url", "")),
+		String(ProjectSettings.get_setting(BASE_URL_SETTING, DEFAULT_BASE_URL)),
+		OS.has_feature("web"),
+		get_page_origin(),
+	)
+
+
+## The decision behind [method get_base_url], with every input passed in: no
+## [ProjectSettings], no [FileAccess], no [JavaScriptBridge]. That is what lets a
+## DESKTOP smoke run prove the web branch, which is otherwise only observable by
+## loading the export in a browser.
+##
+## [param override] is [constant OVERRIDE_PATH]'s [code]base_url[/code] ("" when the
+## file is absent, which is the normal case); [param setting] is
+## [constant BASE_URL_SETTING]; [param is_web] is [code]OS.has_feature("web")[/code];
+## [param page_origin] is the browser's [code]location.origin[/code] ("" anywhere
+## else). See the class doc for why web ignores the dev default but honours an
+## export that was deliberately pointed elsewhere.
+static func resolve_base_url(override: String, setting: String, is_web: bool,
+		page_origin: String) -> String:
+	var chosen := override.strip_edges().rstrip("/")
+	if chosen != "":
+		return chosen
+	chosen = setting.strip_edges().rstrip("/")
+	if not is_web:
+		return chosen
+	if chosen != "" and chosen != DEFAULT_BASE_URL:
+		return chosen
+	var origin := page_origin.strip_edges()
+	if origin == "":
+		# Nothing readable to be same-origin WITH. The bare path is still the right
+		# answer -- it is what a browser resolves against the document anyway -- and
+		# it is emphatically better than a loopback that would reach the child's own
+		# machine.
+		return WEB_ORIGIN_PATH
+	return for_web_origin(origin)
+
+
+## The browser's [code]location.origin[/code], or "" on every other platform (and on
+## a page that has none -- a [code]file://[/code] document reports the literal
+## "null"). Scheme-checked rather than trusted, so a malformed value degrades to the
+## relative fallback instead of being pasted into a URL.
+static func get_page_origin() -> String:
+	if not OS.has_feature("web"):
+		return ""
+	var raw: Variant = JavaScriptBridge.eval("window.location.origin", true)
+	if typeof(raw) != TYPE_STRING:
+		return ""
+	var origin := String(raw).strip_edges()
+	if not (origin.begins_with("http://") or origin.begins_with("https://")):
+		return ""
+	return origin
 
 
 ## False turns every [Backend] method into a no-op even when a token is present.

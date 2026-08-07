@@ -53,6 +53,33 @@ class ScaffoldTest extends TestCase
         }
     }
 
+    /**
+     * Publishing and serving are two different Unix users on the deployed box
+     * (the operator over SSH, then PHP-FPM). Flysystem's 0700/0600 default makes
+     * a freshly published pack unreadable — and un-traversable — to the process
+     * that has to serve it, which surfaces as FILE_NOT_FOUND on every download.
+     */
+    public function test_the_private_disks_write_group_readable_files_and_directories(): void
+    {
+        foreach (['packs', 'assets', 'paint'] as $disk) {
+            $this->assertSame(
+                0640,
+                config("filesystems.disks.{$disk}.permissions.file.private"),
+            );
+
+            // The directory bit is the one that bites: without +x on the group,
+            // the bytes inside are unreachable however readable they are.
+            $this->assertSame(
+                0750,
+                config("filesystems.disks.{$disk}.permissions.dir.private"),
+            );
+
+            // Private means private: nothing here is world-anything.
+            $this->assertSame(0, config("filesystems.disks.{$disk}.permissions.file.private") & 0007);
+            $this->assertSame(0, config("filesystems.disks.{$disk}.permissions.dir.private") & 0007);
+        }
+    }
+
     public function test_accel_redirect_is_off_by_default(): void
     {
         $this->assertFalse(config('coloringbook.accel_redirect'));
