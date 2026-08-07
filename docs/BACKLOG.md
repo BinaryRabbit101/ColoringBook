@@ -212,6 +212,14 @@ Sticker sets are catalog content, delivered exactly like coloring books
   sticker packs beside books with the kind visible on the card.
 - Repo keeps dev-fixture sticker sets for the smokes, excluded from release
   exports exactly like `resources/books/*` (the BL-25 preset rule).
+- **Seed content**: ship a small FREE "Starter Stickers" pack with the feature
+  (mainly for testing) — roughly 6–10 simple crowd-pleasers (stars, hearts,
+  smiley, rainbow, balloon, paw print…), primitive-drawn or emoji-style art is
+  fine. Published to the dev server (mini-pc) as a free entitlement the moment
+  the server half lands, so hand-testing downloads a real pack end-to-end; it
+  doubles as the reference pack the authoring UI and delta updates are
+  exercised against. It can share art with the repo's smoke fixtures, but the
+  shipped copy comes from the server like everything else.
 - Depends on BL-36 for the client feature it feeds; the server half can start
   as soon as BL-36 pins the set-def and save shapes.
 - Affected: `server/` (catalog-kind migration, authoring UI + publish, API),
