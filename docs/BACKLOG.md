@@ -81,6 +81,112 @@ requests the same way (godotengine/godot#76825). Not yet filed upstream for
   browsers. The game itself (shelf, coloring, saves) runs fine there.
 
 
+### BL-33: Landscape column must show every crayon — no scrolling — `open` (2026-08-07)
+Playtest: on a horizontal display the docked crayon column scrolls; every crayon
+must be visible at once, no scrollbar. BL-21 shipped that scroll as a known
+trade ("a BL-23 set can be any length") — this entry reverses the trade for the
+shipped lineup. Direction:
+- Size crayons dynamically: available strip length ÷ crayon count, clamped at
+  `CrayonButton.MIN_TOUCH_TARGET` (the 64 px floor is non-negotiable —
+  DESIGN.md §1).
+- If a set cannot fit at the floor (a long authored set on a short canvas),
+  wrap to a second rank inside `STRIP_THICKNESS` (212) rather than scroll —
+  scale the whole crayon down so two ranks fit, or widen the strip for the
+  column case only. Agent decides with smoke evidence; scrolling is the one
+  outcome that's off the table.
+- Portrait row gets the same treatment for free if it falls out naturally, but
+  landscape is the acceptance bar.
+- Coordinates with BL-34: the cycle arrows land at the strip's ends, which
+  changes what length is actually available to the crayons. Do BL-34 first or
+  together.
+- Acceptance: shipped ten-crayon lineup + both tool tiles fully visible in the
+  landscape column at the smallest supported canvas, zero scroll; palette
+  smoke gains fit checks in all layouts.
+- Affected: `scripts/components/palette_child.gd`, `crayon_button.gd`,
+  `scenes/components/palette_child.tscn`, palette smoke.
+
+### BL-34: Cycle-left / cycle-right arrows at the strip's ends — `open` (2026-08-07)
+Replace the single `CrayonBoxButton` (forward-only cycle) with a cycle-left and
+a cycle-right control sitting at the OUTER ends of the crayon strip — outside
+the crayons, one at each end of the long axis.
+- `PaletteDef.wrap_crayon_set()` already wraps; add the backward direction
+  (wrap negative) and a `prev_crayon_set()` beside `next_crayon_set()`.
+- Both arrows stay OUTSIDE the `ScrollContainer` so a slide-to-select can never
+  land on one (the BL-2/BL-23 rule, preserved).
+- This deliberately reworks the tool-tile geometry the smokes guard ("two 88 px
+  tiles share the strip's short axis; a third overflows silently"): arrows move
+  to the long-axis ends, freeing short-axis room. `IntensityButton` stays where
+  it is. Rewrite the tile-fit smoke checks around the new geometry rather than
+  contorting to keep the old ones green.
+- Decide where the current box's identity lives now that the tile that drew it
+  is gone: pips under an arrow, a transient box-name label on cycle (nice —
+  says "Neon!" as the strip swaps), or both.
+- Affected: `palette_child.gd`, `crayon_box_button.gd` (reshaped into arrow
+  buttons or replaced), `palette_def.gd`, palette smoke tile-fit block.
+
+### BL-35: Crayon sets round 2 — same lineup, escalating finishes — `open` (2026-08-07)
+Playtest: the default box is right; the authored sets (Pastel/Neon/Earth/Candy/
+Spooky) read as washed out, dull, or dark — "more color options", not more fun.
+New vision: **every box carries the SAME crayon lineup; what changes is the
+finish**, and each box stands out more than the one before. Working ladder:
+box 1 classic wax (today's look) → box 2 neon glow (strokes bloom) → box 3
+textured wax (directional crayon-grain strokes) → box 4 animated (shimmer /
+sparkle) → whatever tops that. Design notes for the implementing agent:
+- `CrayonSetDef` gains an effect identity (e.g. `effect: StringName`). This is
+  a conscious amendment to BL-23's "colours and nothing else": a finish is how
+  the paint LOOKS, not how the game plays — brush size, hardness and threshold
+  stay forbidden on sets, and the coloring-mechanics skill + DESIGN.md must be
+  updated to say so.
+- The paint pipeline flattens strokes into the SubViewport, so finishes split
+  into two tiers:
+  1. **Bakeable at stamp time** — glow = bright core + additive halo in
+     `brush.gdshader` stamps; grain = noise/stroke-texture-modulated stamps.
+     These persist in the saved paint PNG for free. Ship these first.
+  2. **Live/animated** — needs an effect-mask channel or per-stroke metadata
+     that survives save/restore (BL-17 recipes are per-visit only today).
+     Phase 2, after the persistence question is answered — do not block the
+     bakeable finishes on it.
+- BL-17 undo recipes must capture the finish params so rebuilds stay
+  pixel-exact; the region-clip rule (shader discards outside the locked
+  region's id) applies to every finish, glow halos included.
+- The intensity ladder (BL-22) keeps working on every crayon of every box.
+- The crayon buttons themselves should preview their finish — a glowing crayon,
+  a sparkling crayon — so a box sells itself before the first stroke.
+- Existing `sets/*.tres` are re-authored to the shared lineup + a finish, not
+  deleted; count can change if the ladder wants fewer, better boxes.
+- Affected: `crayon_set_def.gd` + `resources/palettes/sets/*.tres`,
+  `palette_def.gd`, `scenes/components/brush.gdshader` + `page_view.gd`
+  (stamp effects), `crayon_button.gd`/`palette_child.gd` (finish previews),
+  DESIGN.md + coloring-mechanics skill, palette/paint smokes.
+
+### BL-36: Sticker sets — the cycle keeps going past crayons — `open` (2026-08-07)
+Cycling past the last crayon box lands on sticker sets: the strip swaps crayons
+for a row of stickers, tap the page to place one. Decisions to settle in
+design, then build:
+- **Placement layer**: stickers sit ON TOP of the page (above line art) — they
+  are stickers, not paint. Not region-clipped, never counted toward coverage.
+- **Fun by default**: slight random rotation on placement, a satisfying
+  plop/settle animation; sticker size proportional to the page.
+- **Palette contract**: the strip's contract today is `color_picked` +
+  `brush_size_picked` and nothing else reaches the paint path. Sticker mode
+  adds a surface (e.g. `sticker_picked(texture)` + a mode signal) —
+  `ColoringPage` opts in; `PageView` painting stays untouched. Entering sticker
+  mode disables stroke painting until a crayon box is cycled back.
+- **History**: placing a sticker is an undoable entry in BL-17's stacks
+  (placement list, not paint pixels); removal = undo, plus optionally a
+  peel-off gesture later.
+- **Persistence**: a per-page sticker list in the save (additive key beside
+  `status`/`locked`, reader tolerates its absence — same trick as BL-10's
+  entry upgrade), and the paint-layer sync (BL-8/WP11) carries it.
+- **Discovery**: `StickerSetDef` discovered like crayon sets and books —
+  `resources/palettes/stickers/*.tres` naming textures; art needed (start with
+  primitive-drawn or emoji-style shapes; real art can follow).
+- Depends on BL-34 (the cycle ring is what grows); independent of BL-35.
+- Affected: new `sticker_set_def.gd` + assets, `palette_child.gd` (mode +
+  cycle ring), `coloring_page.gd` (placement, history, save points),
+  `game_state.gd` (save shape), a new sticker layer component over `PageView`,
+  DESIGN.md, palette/flow smokes.
+
 ## Completed — archived
 
 Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md):
