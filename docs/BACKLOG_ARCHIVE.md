@@ -1787,3 +1787,232 @@ after BL-34 because the arrows decide how much length is left.
   rather than scrolls. paint 47 / flow 159 / shell 151 unchanged.
 - Affected: `palette_child.gd`, `crayon_button.gd`, `coloring_page.gd` (a stale
   doc line), palette + mobile smokes.
+
+### BL-36: Sticker sets — the cycle keeps going past crayons — `done`
+Logged 2026-08-07: cycling past the last crayon box lands on sticker sets — the
+strip swaps its crayons for a row of stickers, and a tap on the page sticks one
+down. Done 2026-08-07 with BL-37, which is where the sets come from.
+
+- **The ring, not a second control.** `PaletteChild.stage_count()` is
+  `crayon_set_count() + sticker_set_count()`, `get_stage_index()` is where the
+  strip is on it, and `set_stage()` wraps **both** ways. BL-34's two
+  `CrayonCycleButton` bars keep their names (`next_crayon_set()` /
+  `prev_crayon_set()`) and their job; what changed is that their **pips count
+  STAGES**, and each bar previews the stage it would fetch — a sticker
+  destination advertises itself with the confetti palette plus a four-point star,
+  because the youngest player cannot read the banner that says which it was. The
+  box-name flash announces a sticker set exactly the way it announces "Neon!".
+- **A sticker is not paint, and everything follows from that.** `StickerLayer`
+  (new, `scripts/components/sticker_layer.gd`) hangs inside `PageView`'s
+  `PageRoot` **above the line art**, so a sticker covers line work and pans/zooms
+  with the drawing for free. It is never region-clipped, never reaches the paint
+  SubViewport, and therefore never reaches coverage, completion or the saved PNG.
+  That last one is why it is nodes rather than pixels: five numbers and two ids
+  survive a save exactly, at any page resolution, and can be peeled off one at a
+  time by undo.
+- **Placement is BL-10's gate, reused, and there is no second input path.**
+  Entering sticker mode sets `PageView.painting_enabled = false`, so a press comes
+  back as `paint_blocked(page_position)` and `ColoringPage._on_paint_blocked()`
+  turns it into a placement. `_apply_painting_gate()` is the ONE place that flag is
+  now written, because two things drive it — the padlock and sticker mode — and
+  the padlock is asked FIRST, so a locked page refuses a sticker exactly the way it
+  refuses a stroke and the padlock shakes either way. A tap in the margin
+  (`OUT_OF_BOUNDS_ID`) places nothing; a tap on LINE ART very much does, which is
+  the whole point of a sticker.
+- **Fun by default**: `StickerLayer.MAX_TILT` 0.22 rad of random tilt, a
+  back-eased plop from 1.55x with the shadow settling with it, and a size that is
+  a FRACTION of the page's short side (`DEFAULT_SIZE_RATIO` 0.17) rather than a
+  pixel count — so one save looks right on a 512 px page and a 2048 px one, and a
+  pack re-published at a different resolution does not move a single sticker a
+  child already stuck down.
+- **BL-17's two stacks became ONE timeline.** Entries are
+  `{kind: "stroke", recipe}` or `{kind: "sticker", placement}`, because undo has to
+  take back the last **thing that happened** — a stroke stack beside a sticker
+  stack would rub out a stroke the player made before the sticker they are looking
+  at. The paint rebuild filters the timeline for its recipes (`_stroke_recipes()`,
+  a pass over at most `UNDO_DEPTH` entries), and a sticker undo does **no rebuild,
+  no readback and no coverage re-settle**: peeling a sticker off changes no paint
+  pixel, so the expensive half would not merely be wasted, it would be wrong.
+  `StickerLayer.pop()` is always the right sticker because only a placement grows
+  that list. Every BL-17 interlock is unchanged (locked / transitioning /
+  mid-stroke / mid-replay / restoring).
+- **Restored stickers are BASELINE**, exactly like the restored paint layer: a new
+  visit cannot undo what a previous one stuck down. Start over is the one thing
+  that removes a sticker without an undo, and it clears the save too.
+- **Save shape**: an additive `"stickers"` key in the BL-10 page entry, at the
+  SAME `SAVE_VERSION` (2). A pre-BL-36 file loads with a bare page and is upgraded
+  in place the next time the slot is written — BL-10's trick, third time used.
+  `GameState.get_page_stickers()` / `set_page_stickers()`, written the moment they
+  change (like the lock: a few hundred bytes of JSON, not a paint readback, and a
+  sticker a child stuck on has to survive a killed browser tab). The placement
+  dictionary is **the same object in three places** — the undo entry, the layer's
+  list and the save file — which is what makes "the save round-trips" a property
+  rather than a hope.
+- **Contract**: two new signals and no change to the three that were there.
+  `sticker_mode_changed(active)` goes out BEFORE the pick that accompanies it;
+  `sticker_picked(sticker)` carries a `StickerDef` or null. **Entering** sticker
+  mode emits neither `color_picked` nor `brush_effect_picked` — no colour and no
+  wax changed and there is nothing to paint with; **leaving** emits the mode
+  signal first, then the box's finish, then its colour, so a listener is holding
+  the right wax before the colour lands.
+- **The strip in sticker mode** is `StickerButton` cards — a sibling of
+  `CrayonButton`, not a subclass: it offers the same `canonical_size` /
+  `orientation` / `box_for()` contract so BL-33's no-scroll fit sizes it with the
+  code it already had, but it does **not** rotate in the landscape dock, because a
+  crayon on its side is still a crayon and artwork on its side is just wrong. The
+  intensity tile is hidden (a sticker has no ladder) and the pick bubble is not
+  raised (a card is bigger than a fingertip and its art reads round the finger).
+  `get_color_buttons()` is EMPTY in sticker mode and `get_strip_buttons()` is
+  whatever is up — the split matters, and the smokes assert it.
+- **Discovery mirrors `BookDef` exactly.** `StickerSetDef.discover()` scans
+  `res://resources/stickers/*/sticker_set.tres` then
+  `user://dlc/<pack>/stickers/<set>/sticker_set.json`, de-duped by `set_uid` with
+  the BUILT-IN winning, and the strip discovers **once**, in `set_palette()` — a
+  pack cannot install itself while a page is open. `resources/stickers/*` and
+  `assets/stickers/*` are excluded from both export presets, so a released build's
+  sets all come from the server (BL-25's rule). One difference from books, on
+  purpose: a set whose individual sticker is missing **drops that sticker and
+  survives**, where a book with an unusable page is dropped whole — a box with
+  seven stickers instead of eight is still a box, and dropping it would take away
+  every sticker a child had already stuck down out of it.
+- **Art**: the free "Starter Stickers" set — star, heart, smiley, rainbow,
+  balloon, paw print, flower, crown — generated by
+  `scenes/dev/sticker_render.tscn` from primitives on transparent 256px squares,
+  each with an ink outline and a white die-cut keyline (which is what makes a
+  sticker look STUCK ON rather than drawn). Generated rather than hand-painted for
+  `splash_render.gd`'s reason: it cannot drift from the palette it was drawn
+  against, and it is re-runnable. `palette_smoke -- --stickers` leaves the sticker
+  strip on screen for the eyeball pass.
+- **Gotcha**: `const X := PackedColorArray([...])` is not a constant expression in
+  GDScript — a typed `Array[Color]` const plus a small static that packs it is the
+  way (`PaletteChild.STICKER_ACCENTS` / `sticker_accent_colors()`), the same shape
+  `ColoringPage.SAVE_SPARKS` already used.
+- **Gotcha**: the flow smoke's sticker block runs LAST, after every other check in
+  `_check_coloring_flow()`. It navigates and presses Start over, both of which
+  build a NEW `CoverageTracker`, and every assertion above is holding a reference
+  to the one it was given — put it earlier and "every region of page 1 reached the
+  threshold" fails against a tracker nobody is updating any more.
+- Smokes: **palette 199 -> 234, flow 159 -> 206**; paint 67, shell 151, mobile 141
+  unchanged. Palette gained the starter set's discovery and validation, the ring's
+  shape, cycling onto the stickers and home again with no colour and no finish in
+  flight, the strip of cards fitting and not scrolling, the hidden intensity tile,
+  the pips counting stages, the back bar advertising a sticker destination, and a
+  pre-BL-36 save loading and upgrading in place. Flow gained the layer above the
+  line art inside the page transform, a press placing instead of painting, the
+  placement's page position/tilt/size-ratio, coverage and completion unmoved by it,
+  undo/redo round-tripping a placement byte for byte, ONE timeline (the sticker
+  first, then the stroke under it), the padlock and the page edge both refusing
+  one, the save round-trip across a page change, a page with no sticker key
+  loading clean, and Start over clearing both the layer and the save.
+- Affected: new `sticker_def.gd`, `sticker_set_def.gd`, `sticker_layer.gd`,
+  `sticker_button.gd`, `scenes/dev/sticker_render.{tscn,gd}`,
+  `resources/stickers/starter/sticker_set.tres`, `assets/stickers/starter/*.png`;
+  `palette_child.gd`, `crayon_cycle_button.gd`, `page_view.{gd,tscn}`,
+  `coloring_page.gd`, `game_state.gd`, `export_presets.cfg`, palette + flow smokes,
+  DESIGN.md, coloring-mechanics skill.
+
+### BL-37: Sticker packs served by the API server — `done`
+Logged 2026-08-07 beside BL-36, done 2026-08-07 with it. Sticker sets are catalog
+content, delivered exactly like coloring books — and the entry is mostly about how
+little had to change to make that true.
+
+- **A sticker pack is the SAME pack.** Same zip, same manifest, same
+  `PublishPackDirectory`, same entitlements, same signed downloads, same delta
+  updates. `tests/Feature/StickerPackDeliveryTest.php` exists to hold that claim
+  down: it publishes the fixture through the CLI's own action, lists it in the
+  shop, auto-grants it as a free pack, and fetches one sticker through BL-26's
+  per-file route — none of which needed a sticker-shaped code path.
+- **`manifest.kind` / `packs.kind`** (`book` default, `sticker_set` added).
+  **Absent means `book`**: every manifest written before BL-37 has no such key and
+  every one of them is books, and the column defaults the same way, so no existing
+  row, client or delta moved. `PackManifest::published()` writes it out explicitly,
+  so a *published* manifest always says what it carries. The kind decides exactly
+  two things — which payload array `PackManifestValidator` requires, and which
+  catalog rows a publish rebuilds — and an unknown kind is an error rather than
+  being read as a book.
+- **§7.2's sticker layout**: `stickers/<set_uid>/<sticker_id>.png`, plus a
+  synthesised `stickers/<set_uid>/sticker_set.json` — the sticker half of
+  `book.json` — added to the `files` map so it carries a digest like everything
+  else. It is what the client's `StickerSetDef.discover()` reads; the manifest is
+  never opened by the game. **Files are named after the STABLE id, never the
+  index**: an index moves when a set is reordered, and a delta would then
+  re-download every file after the one that moved.
+- **Two pairs of tables, the split BL-24 drew.** `sticker_sets` / `stickers` are a
+  projection of the newest release, dropped and rebuilt on every publish;
+  `authored_sticker_sets` / `authored_stickers` are the workspace the publish
+  button builds from. `set_uid` is the sticker half of `book_uid` — authored,
+  globally unique, stable forever, and named by every placement in a child's save —
+  checked three ways on creation (both sticker tables and `packs.slug`, which is one
+  namespace shared with books). `sticker_id` is unique **within** its set: two sets
+  may both offer a `star`, and a placement names the pair.
+- **`StickerValidation` replaces the mapping half rather than joining it.** §10.3
+  predicted the sticker publish path would be strictly simpler than a book's, and
+  this is where that is cashed in: a sticker has no regions, so there is no headless
+  Godot, no queue, no `mapping_status` and nothing to poll. The image is checked
+  **inline on upload** — it decodes, it is inside the 64..1024 px band, something is
+  actually drawn — and the verdict is stored on the row. "No transparency at all" is
+  a **warning**, not an error: a deliberately square sticker is legal, it will just
+  paste a box over a child's colouring, and the operator is looking at a preview.
+  `SubmitPackVersion` branches on the kind for its second layer only; the structural
+  layer is shared and runs first, unchanged.
+- **Publish is still one code path.** `PublishAuthoredStickerSet` refuses with the
+  whole list in the operator's language, then hands a §7.2 directory to
+  `SubmitPackVersion` -> `PublishPackDirectory` (draft) -> `PublishPackVersion`.
+  There is no second publisher, which is what keeps "versions are monotonic and
+  immutable" a property rather than a promise.
+- **Deleting a set** follows BL-24's rule with more teeth: never published ->
+  deleted outright; published -> the pack is **RETIRED**. For a book that keeps a
+  shelf intact; for a sticker set it also keeps stickers on pages that are already
+  coloured, which would otherwise empty. `sticker_id` freezes the moment a version
+  exists (`STICKER_ID_FROZEN`), for the same reason `book_uid` never moved.
+- **Dashboard**: `admin/StickerSets.vue` + `admin/StickerSet.vue` and a sidebar
+  entry. Deliberately **no per-sticker editor screen** the way a page has one — a
+  sticker is an id and a picture, and the set screen shows every one of them at
+  once, which is how a sticker sheet is actually reviewed. The grid puts a
+  checkerboard behind each image, so a sticker with no transparency reads as the
+  mistake it is.
+- **Client**: `pack_shop` puts the kind on the card ("8 stickers", and a star in
+  the title, because the title is the only part a scanning eye lands on).
+  `PackInstaller` gained `installed_kind()` and needed **nothing else** — every step
+  it takes is about BYTES, which is exactly what §7.4 predicted when it said delta
+  updates "never cared what the files are". The rule that was already true and is
+  now load-bearing: nothing in the installer reads the payload, so a pack of a kind
+  this build has never heard of installs cleanly and is simply not offered.
+  `Backend.discover_visible_sticker_sets()` runs the sets through the same
+  entitlement filter the shelf runs books through — hide on POSITIVE revocation,
+  never delete.
+- **`tools/build_pack.gd --sticker-set`** builds a publishable sticker pack from a
+  `StickerSetDef`, refusing to mix `--book` and `--sticker-set` in one run (a
+  pack's kind is one value and the client branches on it). The free **Starter
+  Stickers** pack is built at `build/packs/starter-stickers/` — 8 stickers, 9 files,
+  128 KB, `kind: "sticker_set"`, `is_free: true`, ready for
+  `php artisan pack:publish build/packs/starter-stickers --free`. **Not published
+  and not deployed** by this entry.
+- Tests: pest **490 -> 517** (516 passed, 1 opt-in skip), pint and phpstan L7 clean.
+  New: `AdminStickerSetAuthoringTest` (19), `StickerPackDeliveryTest` (12),
+  `StickerSetsTest` (8, Inertia), `StickerValidationTest` (7).
+  `tests/Fixtures/packs/sticker-sheet` is a third fixture pack beside
+  `forest-friends` and `meadow-mates`: 64x64 discs on transparent backgrounds — a
+  shape *and* clear space around it, which is what `StickerValidation` looks at.
+  **dlc_smoke 99 -> 116** with the sticker-pack install path: the seeded sticker
+  pack is discovered and the `.incoming` one is not, the shelf ignores a sticker
+  pack entirely and the strip ignores a book pack, `installed_kind()` reads the
+  manifest, and the release-shaped ring is exactly the installed packs.
+- **Gotcha**: `backend_smoke` reads **178**, not the 180 recorded since BL-19/BL-25.
+  Verified by stashing this entry's work and re-running against the same live
+  server: the baseline is 178 too, so the 180 was stale before BL-36 ever started.
+- **Gotcha**: two runs of `backend_smoke` (or `sync_smoke`) inside a minute hit the
+  auth routes' `throttle:6,1` and the first register fails with the email "already
+  taken" — the throttled attempt had already created the account. `php artisan
+  cache:clear` on the dev server drops the rate-limiter buckets; the smoke's own
+  62-second wait handles it unattended.
+- Affected: `server/` — migrations (`packs.kind`, `sticker_sets`, `stickers`,
+  `authored_sticker_sets`, `authored_stickers`), `Pack`/`StickerSet`/`Sticker`/
+  `AuthoredStickerSet`/`AuthoredSticker` models, `PackManifest`,
+  `PackManifestValidator`, `StickerValidation` (new), `SubmitPackVersion`,
+  `PublishPackDirectory`, seven `Actions/Authoring/*StickerSet*` actions, four
+  controllers, four FormRequests, two resources, `ResolvesAuthoredStickerSets`,
+  both route files, two Vue pages, `AppSidebar.vue`, `config/coloringbook.php`,
+  `server/CLAUDE.md`; `godot/` — `pack_shop.gd`, `pack_installer.gd`, `backend.gd`,
+  `palette_child.gd`, `tools/build_pack.gd`, `dlc_smoke.gd`;
+  `docs/DLC_SERVER.md` §5/§7.2/§10.4/§11.
