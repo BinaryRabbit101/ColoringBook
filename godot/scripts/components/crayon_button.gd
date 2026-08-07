@@ -40,6 +40,13 @@ extends BaseButton
 ## the lift direction -- the headroom, the halo's flattened spread, the paddings --
 ## is expressed in canonical space and therefore follows for free.
 
+## [b]BL-35 gave the crayon a FINISH to advertise[/b] ([member finish]). Every box
+## now carries the same ten crayons and differs in how its paint LOOKS, so the
+## crayon has to say which box it came out of before anything is painted: a glow
+## crayon blooms and its tip is lit, a textured crayon has visible wax grain, a
+## glitter crayon has sparkles caught in it. All of it is drawn in the canonical
+## space above, from the same primitives -- the drawing code was not forked.
+
 ## Minimum touch target for a crayon (DESIGN.md 1 "large touch targets"); the
 ## global floor is 48 px, the crayon row is deliberately more generous.
 const MIN_TOUCH_TARGET := 64.0
@@ -106,6 +113,19 @@ var selected: bool = false:
 
 ## Index of this crayon in the [PaletteDef]'s colour list.
 var color_index: int = 0
+
+## The FINISH this crayon paints with (BL-35): a [BrushFinish] id. It is drawn --
+## a glow crayon glows in the box, a glitter crayon sparkles in it -- so a box of
+## magic crayons sells itself before the first stroke, which is the whole point of
+## having boxes. Drawn in the same CANONICAL space as everything else, so the
+## preview follows the crayon round the quarter turn for free (BL-21).
+var finish: StringName = BrushFinish.CLASSIC:
+	set(value):
+		var resolved := BrushFinish.resolve(value)
+		if finish == resolved:
+			return
+		finish = resolved
+		queue_redraw()
 
 ## Which way this crayon points (BL-21). Setting it also resizes the control's
 ## box, because a crayon lying on its side needs the long axis horizontal.
@@ -240,8 +260,13 @@ func _draw_crayon(box: Vector2) -> void:
 		Vector2(center_x - half, tip_base),
 	])
 
+	var centre := Vector2(center_x, (top + bottom) * 0.5)
 	if selected:
-		_draw_glow(silhouette, Vector2(center_x, (top + bottom) * 0.5))
+		_draw_glow(silhouette, centre)
+	# BL-35: a glow crayon carries its bloom whether or not it is the selection --
+	# the finish is what the box IS, not feedback about what was picked.
+	if finish == BrushFinish.GLOW:
+		_draw_finish_bloom(silhouette, centre)
 
 	# Body + tip in one silhouette, then shading and wrapper on top of it.
 	draw_colored_polygon(silhouette, crayon_color)
@@ -284,6 +309,17 @@ func _draw_crayon(box: Vector2) -> void:
 		Color(1.0, 1.0, 1.0, 0.34)
 	)
 
+	# BL-35 finish preview, over the wax and under the outline: the grain and the
+	# glitter are IN the crayon, the way they will be in the stroke.
+	var body_box := Rect2(center_x - half, body_top, body_width, body_height)
+	match finish:
+		BrushFinish.GRAIN:
+			_draw_finish_grain(body_box)
+		BrushFinish.GLITTER:
+			_draw_finish_glitter(Rect2(center_x - half, top, body_width, bottom - top))
+		BrushFinish.GLOW:
+			_draw_finish_hot_tip(center_x, top, tip_base, tip_width, half)
+
 	# Silhouette outline last, so nothing overdraws it. A selected crayon gets a
 	# bright rim just outside it as well (BL-15): the dark edge alone disappears
 	# against a dark crayon at arm's length.
@@ -310,6 +346,111 @@ func _draw_glow(silhouette: PackedVector2Array, center: Vector2) -> void:
 			),
 			Color(crayon_color.r, crayon_color.g, crayon_color.b, GLOW_ALPHA)
 		)
+
+
+# ======================================================= finish previews (BL-35) ==
+# Each of these draws the finish the way the STROKE will look, in canonical space,
+# from the same primitives the crayon itself is made of. There is no second drawing
+# path and no art asset: a crayon lying on its side in the landscape dock gets its
+# bloom and its sparkles rotated with it, because the quarter turn is already
+# applied to the canvas item before any of this runs (BL-21).
+
+## Layers of the glow finish's bloom, and how bright the innermost is.
+const FINISH_BLOOM_LAYERS := 7
+const FINISH_BLOOM_ALPHA := 0.13
+## Slanted flecks of the grain finish, and how far each one leans.
+const FINISH_GRAIN_FLECKS := 16
+const FINISH_GRAIN_SLANT := 0.34
+## Sparkles the glitter finish scatters over the crayon.
+const FINISH_SPARKLES := 5
+
+
+## The glow box's bloom: the selection halo's trick (scaled copies of the
+## silhouette) in a brighter colour and spreading evenly, so it reads as light
+## coming off the crayon rather than as "this one is picked".
+func _draw_finish_bloom(silhouette: PackedVector2Array, center: Vector2) -> void:
+	var hot := crayon_color.lightened(0.25)
+	for i in FINISH_BLOOM_LAYERS:
+		var spread := 0.06 + float(i) * 0.055
+		draw_colored_polygon(
+			_scaled(silhouette, center, Vector2(1.0 + spread, 1.0 + spread * 0.55)),
+			Color(hot.r, hot.g, hot.b, FINISH_BLOOM_ALPHA)
+		)
+
+
+## ...and its tip is lit, like the hot core the stroke paints down its middle.
+func _draw_finish_hot_tip(
+	center_x: float, top: float, tip_base: float, tip_width: float, half: float
+) -> void:
+	var hot := crayon_color.lightened(0.55)
+	draw_colored_polygon(
+		PackedVector2Array([
+			Vector2(center_x - tip_width * 0.5, top),
+			Vector2(center_x + tip_width * 0.5, top),
+			Vector2(center_x + half * 0.62, tip_base),
+			Vector2(center_x - half * 0.62, tip_base),
+		]),
+		Color(hot.r, hot.g, hot.b, 0.85)
+	)
+	draw_circle(Vector2(center_x, top + (tip_base - top) * 0.28), maxf(half * 0.16, 2.0),
+		Color(1.0, 1.0, 1.0, 0.7))
+
+
+## The textured box: slanted flecks of darker and lighter wax across the barrel,
+## the crayon-grain the stroke lays down. Deterministic from the fleck index, so a
+## crayon does not shimmer every time the row repaints.
+func _draw_finish_grain(body: Rect2) -> void:
+	if body.size.x <= 0.0 or body.size.y <= 0.0:
+		return
+	var inset := body.grow(-maxf(body.size.x * 0.10, 2.0))
+	if inset.size.x <= 0.0 or inset.size.y <= 0.0:
+		return
+	var dark := crayon_color.darkened(0.30)
+	var light := crayon_color.lightened(0.30)
+	for i in FINISH_GRAIN_FLECKS:
+		# Golden-ratio walk: even coverage without an RNG and without a table.
+		var u := fmod(float(i) * 0.6180339887, 1.0)
+		var v := fmod(float(i) * 0.2360679775 + 0.13, 1.0)
+		var fleck_width := inset.size.x * (0.22 + 0.30 * u)
+		var fleck_height := maxf(inset.size.y * 0.035, 2.0)
+		var x := inset.position.x + (inset.size.x - fleck_width) * v
+		var y := inset.position.y + (inset.size.y - fleck_height) * u
+		var slant := fleck_height * FINISH_GRAIN_SLANT * 3.0
+		draw_colored_polygon(
+			PackedVector2Array([
+				Vector2(x, y + slant),
+				Vector2(x + fleck_width, y),
+				Vector2(x + fleck_width, y + fleck_height),
+				Vector2(x, y + fleck_height + slant),
+			]),
+			Color(dark.r, dark.g, dark.b, 0.55) if i % 2 == 0 else Color(light.r, light.g, light.b, 0.45)
+		)
+
+
+## The loudest box: sparkles caught in the wax. Four-point stars, because a circle
+## reads as a bubble and a five-point star reads as a sticker.
+func _draw_finish_glitter(body: Rect2) -> void:
+	if body.size.x <= 0.0 or body.size.y <= 0.0:
+		return
+	for i in FINISH_SPARKLES:
+		var u := fmod(float(i) * 0.6180339887 + 0.21, 1.0)
+		var v := fmod(float(i) * 0.4142135624 + 0.07, 1.0)
+		var centre := body.position + Vector2(body.size.x * (0.18 + 0.64 * u), body.size.y * (0.10 + 0.80 * v))
+		var arm := maxf(body.size.x * (0.16 + 0.10 * v), 3.0)
+		draw_colored_polygon(
+			PackedVector2Array([
+				Vector2(centre.x, centre.y - arm),
+				Vector2(centre.x + arm * 0.26, centre.y - arm * 0.26),
+				Vector2(centre.x + arm, centre.y),
+				Vector2(centre.x + arm * 0.26, centre.y + arm * 0.26),
+				Vector2(centre.x, centre.y + arm),
+				Vector2(centre.x - arm * 0.26, centre.y + arm * 0.26),
+				Vector2(centre.x - arm, centre.y),
+				Vector2(centre.x - arm * 0.26, centre.y - arm * 0.26),
+			]),
+			Color(1.0, 1.0, 1.0, 0.92)
+		)
+		draw_circle(centre, arm * 0.18, Color(1.0, 1.0, 1.0, 1.0))
 
 
 ## [param polygon] scaled about [param center]. Keeps the tapered crayon shape.

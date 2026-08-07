@@ -1,0 +1,10 @@
+[gd_resource type="Resource" script_class="CrayonSetDef" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/resources/crayon_set_def.gd" id="1_crayon_set_def"]
+
+[resource]
+script = ExtResource("1_crayon_set_def")
+display_name = "Textured Wax"
+sort_order = 20
+colors = PackedColorArray()
+effect = &"grain"
