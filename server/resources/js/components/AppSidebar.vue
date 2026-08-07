@@ -36,6 +36,7 @@ const mainNavItems = computed<NavItem[]>(() => {
 
     if (page.props.auth?.user?.is_admin) {
         items.push(
+            { title: 'Books', href: '/admin/books', icon: BookOpen },
             { title: 'Packs', href: '/admin/packs', icon: Package },
             { title: 'Entitlements', href: '/admin/entitlements', icon: Gift },
         );

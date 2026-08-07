@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Controllers\Admin\BookController;
+use App\Http\Controllers\Admin\BookPageController;
 use App\Http\Controllers\Admin\EntitlementController;
 use App\Http\Controllers\Admin\PackController;
 use App\Http\Middleware\EnsureAdmin;
@@ -51,4 +53,36 @@ Route::middleware(['auth', EnsureAdmin::class])
 
         Route::get('entitlements', [EntitlementController::class, 'index'])->name('entitlements.index');
         Route::post('entitlements', [EntitlementController::class, 'store'])->name('entitlements.store');
+
+        /*
+        | Web authoring (BL-24, §10.3). Mirrors the token door in
+        | routes/api/admin.php route for route, plus the two GETs a browser
+        | needs and a script does not: the book screen and the page editor.
+        */
+        Route::get('books', [BookController::class, 'index'])->name('books.index');
+        Route::post('books', [BookController::class, 'store'])->name('books.store');
+
+        Route::prefix('books/{book}')
+            ->name('books.')
+            ->where(['book' => '[a-z0-9][a-z0-9._-]*'])
+            ->group(function (): void {
+                Route::get('/', [BookController::class, 'show'])->name('show');
+                Route::patch('/', [BookController::class, 'update'])->name('update');
+                Route::delete('/', [BookController::class, 'destroy'])->name('destroy');
+
+                Route::post('publish', [BookController::class, 'publish'])->name('publish');
+
+                Route::post('pages', [BookPageController::class, 'store'])->name('pages.store');
+
+                Route::prefix('pages/{index}')
+                    ->name('pages.')
+                    ->whereNumber('index')
+                    ->group(function (): void {
+                        Route::get('/', [BookPageController::class, 'show'])->name('show');
+                        Route::patch('/', [BookPageController::class, 'update'])->name('update');
+                        Route::delete('/', [BookPageController::class, 'destroy'])->name('destroy');
+                        Route::get('status', [BookPageController::class, 'status'])->name('status');
+                        Route::get('preview', [BookPageController::class, 'preview'])->name('preview');
+                    });
+            });
     });

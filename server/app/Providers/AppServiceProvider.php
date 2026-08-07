@@ -2,6 +2,8 @@
 
 namespace App\Providers;
 
+use App\Services\Mapping\GodotMappingRunner;
+use App\Services\Mapping\MappingRunner;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Support\Facades\Date;
@@ -16,7 +18,12 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // BL-24: the only seam between this application and the mapping
+        // pipeline. Real runs shell out to headless Godot; the test suite
+        // swaps in a fake so the gate stays green on a box with no engine.
+        // There is no PHP implementation of the pipeline and never will be
+        // (DLC_SERVER.md §10.1).
+        $this->app->bind(MappingRunner::class, GodotMappingRunner::class);
     }
 
     /**

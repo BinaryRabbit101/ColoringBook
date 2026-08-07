@@ -179,6 +179,64 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Headless Godot — the mapping pipeline (BL-24, §10.3)
+    |--------------------------------------------------------------------------
+    |
+    | Web-authored pages are mapped server-side by shelling out to headless
+    | Godot running the game repo's own `tools/generate_region_map.gd`. There is
+    | exactly one implementation of the pipeline and it is that script — never a
+    | PHP port — so the server's whole job is to lay the page art out in a
+    | scratch directory, run the binary, and read the artifacts back.
+    |
+    | `godot_binary` is null out of the box, which means "no mapping on this
+    | box": a page uploaded on a machine without the engine sits at
+    | `mapping_status = failed` and says so, instead of half-mapping. Point it
+    | at a **pinned** build (§10.3's operational note: an engine upgrade is a
+    | content-pipeline change — re-map a fixture page and diff the artifacts
+    | before trusting it).
+    |
+    | `godot_project` is the game project the script lives in. `server/` is a
+    | subdirectory of the game repo, so the default is the sibling `godot/`.
+    |
+    */
+
+    'godot_binary' => env('COLORINGBOOK_GODOT_BINARY'),
+
+    'authoring' => [
+        'godot_project' => env('COLORINGBOOK_GODOT_PROJECT', base_path('../godot')),
+        'mapping_script' => env('COLORINGBOOK_MAPPING_SCRIPT', 'tools/generate_region_map.gd'),
+
+        // A 2048² page is tens of seconds of flood fill and contour tracing;
+        // the ceiling is a runaway guard, not a budget.
+        'mapping_timeout_seconds' => (int) env('COLORINGBOOK_MAPPING_TIMEOUT_SECONDS', 600),
+
+        // The queue the per-page mapping job rides on. Give its worker a real
+        // memory limit — §10.3.
+        'queue' => env('COLORINGBOOK_MAPPING_QUEUE'),
+
+        // One page's art. Deliberately smaller than the pack-zip ceiling: this
+        // is a single PNG, not a whole release.
+        'max_image_kb' => (int) env('COLORINGBOOK_AUTHORING_MAX_IMAGE_KB', 32768),
+
+        /*
+        | The pipeline's own flag defaults, pinned here so a mapping run is
+        | reproducible from the server's config rather than from whichever
+        | version of the script happens to be checked out. A page may override
+        | any of them (`authored_pages.tuning`) — §10.3's "default tuning knobs
+        | with optional per-page overrides".
+        */
+        'tuning' => [
+            'line_alpha_min' => (float) env('COLORINGBOOK_MAPPING_LINE_ALPHA_MIN', 0.5),
+            'line_luminance_max' => (float) env('COLORINGBOOK_MAPPING_LINE_LUMINANCE_MAX', 0.75),
+            'dilate' => (int) env('COLORINGBOOK_MAPPING_DILATE', 1),
+            'min_area' => (int) env('COLORINGBOOK_MAPPING_MIN_AREA', 64),
+            'rdp' => (float) env('COLORINGBOOK_MAPPING_RDP', 1.5),
+            'giant_fraction' => (float) env('COLORINGBOOK_MAPPING_GIANT_FRACTION', 0.9),
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Paint layers
     |--------------------------------------------------------------------------
     |

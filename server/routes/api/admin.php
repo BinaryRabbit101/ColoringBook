@@ -1,6 +1,8 @@
 <?php
 
 use App\Http\Controllers\Api\V1\Admin\AssetController;
+use App\Http\Controllers\Api\V1\Admin\BookController;
+use App\Http\Controllers\Api\V1\Admin\BookPageController;
 use App\Http\Controllers\Api\V1\Admin\EntitlementController;
 use App\Http\Controllers\Api\V1\Admin\PackController;
 use App\Http\Middleware\EnsureAdmin;
@@ -25,6 +27,28 @@ use Illuminate\Support\Facades\Route;
 |   GET  .../preview/{book}/{page}                  one region-overlay PNG
 |   POST /admin/packs/{slug}/versions/{v}/publish   flips published_at
 |   POST /admin/entitlements                        promo grant / un-revoke by email
+|
+| Web authoring (BL-24, §10.3 and §11's web-authoring table) adds book and page
+| CRUD alongside the pack routes:
+|
+|   GET    /admin/books                             every authored book
+|   POST   /admin/books                             create a book + its one-book pack
+|   GET    /admin/books/{book}                      the book, with its pages
+|   PATCH  /admin/books/{book}                      retitle
+|   DELETE /admin/books/{book}                      delete, or retire once published
+|   GET    /admin/books/{book}/pages                the page list
+|   POST   /admin/books/{book}/pages                add a page (multipart or asset ulids)
+|   GET    /admin/books/{book}/pages/{index}        one page
+|   PATCH  /admin/books/{book}/pages/{index}        title / reorder / replace art
+|   DELETE /admin/books/{book}/pages/{index}        remove a page and close the gap
+|   GET    /admin/books/{book}/pages/{index}/status mapping state + §10.1 verdict
+|   GET    .../pages/{index}/preview                the region-overlay PNG
+|   POST   /admin/books/{book}/publish              build + validate + publish a version
+|
+| `{book}` is a `book_uid`: authored, slug-shaped, stable forever (§6.1).
+| `{index}` is the page's 0-based position in its book, as everywhere else on
+| this API. §11 lists one `preview`; it is a separate route here for the same
+| reason the pack preview is — a page list is JSON and an overlay is a PNG.
 |
 | ## Auth: two doors, one boolean
 |
@@ -74,4 +98,33 @@ Route::middleware(['auth:sanctum', 'abilities:'.config('coloringbook.admin.abili
             ->name('packs.versions.publish');
 
         Route::post('entitlements', EntitlementController::class)->name('entitlements.store');
+
+        // ------------------------------------------------- web authoring ---
+        Route::get('books', [BookController::class, 'index'])->name('books.index');
+        Route::post('books', [BookController::class, 'store'])->name('books.store');
+
+        Route::prefix('books/{book}')
+            ->name('books.')
+            ->where(['book' => '[a-z0-9][a-z0-9._-]*'])
+            ->group(function (): void {
+                Route::get('/', [BookController::class, 'show'])->name('show');
+                Route::patch('/', [BookController::class, 'update'])->name('update');
+                Route::delete('/', [BookController::class, 'destroy'])->name('destroy');
+
+                Route::post('publish', [BookController::class, 'publish'])->name('publish');
+
+                Route::get('pages', [BookPageController::class, 'index'])->name('pages.index');
+                Route::post('pages', [BookPageController::class, 'store'])->name('pages.store');
+
+                Route::prefix('pages/{index}')
+                    ->name('pages.')
+                    ->whereNumber('index')
+                    ->group(function (): void {
+                        Route::get('/', [BookPageController::class, 'show'])->name('show');
+                        Route::patch('/', [BookPageController::class, 'update'])->name('update');
+                        Route::delete('/', [BookPageController::class, 'destroy'])->name('destroy');
+                        Route::get('status', [BookPageController::class, 'status'])->name('status');
+                        Route::get('preview', [BookPageController::class, 'preview'])->name('preview');
+                    });
+            });
     });

@@ -110,6 +110,39 @@ class PackPreview
     }
 
     /**
+     * The same overlay for a display/ID-map pair that is not part of a release
+     * — BL-24's page editor, where the artifacts are `assets` rows belonging to
+     * an authored page and there is no `pack_versions` row to hang them off
+     * yet. Same compositor, same rules, no cache of its own (the caller knows
+     * what its cache key is; this class does not).
+     */
+    public function renderPair(string $displayBytes, string $idmapBytes): string
+    {
+        RegionImage::assertSupported();
+
+        $display = RegionImage::fromBytes($displayBytes);
+        $idmap = RegionImage::fromBytes($idmapBytes);
+
+        if ($display === null || $idmap === null) {
+            $display?->destroy();
+            $idmap?->destroy();
+
+            throw new ApiException(
+                'FILE_NOT_FOUND',
+                __('That page artwork could not be read.'),
+                Response::HTTP_NOT_FOUND,
+            );
+        }
+
+        try {
+            return $this->composite($display, $idmap);
+        } finally {
+            $display->destroy();
+            $idmap->destroy();
+        }
+    }
+
+    /**
      * @return array{0: string, 1: string} display path, ID-map path — both
      *                                     pack-relative
      */

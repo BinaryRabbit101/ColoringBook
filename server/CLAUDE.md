@@ -73,6 +73,7 @@ routes/api/auth.php      WP1 — register, token, refresh, /me, profiles
 routes/api/sync.php      WP2 (progress) + WP4 (paint)
 routes/api/catalog.php   WP3 — packs, manifest, download, entitlements
 routes/api/admin.php     WP5 — assets, pack versions, preview, publish
+                         WP14 — books/pages authoring, one-button publish
 ```
 
 Each file is owned by exactly one work package so parallel agents never edit
@@ -722,6 +723,232 @@ worktree, that is opcache's shared segment holding another checkout's
 compilation of the same Pint phar, not your code. `php -d opcache.enable_cli=0
 <composer> test` steps around it.
 
+## WP14 — web authoring: books, pages, one-button publish (BL-24)
+
+Design §10.3 (the authority), §10.1 (validation), §7.2/§7.3 (pack layout,
+immutability), §11's web-authoring route table. Routes live beside WP5's in
+`routes/api/admin.php` (token) and `routes/admin.php` (Inertia); it is the same
+single-operator tool, extended from an *upload door* into an *authoring
+surface*.
+
+The §10.1 decision — "the mapping pipeline stays a local dev tool" — is
+**amended, not reversed**. The dev-box run is still canonical for hand-tuned
+pages and `pack:publish` is untouched; what changed is that a book can now be
+built end to end in the browser, with the server running the same pipeline
+through the escape hatch §10.1 reserved.
+
+### The authoring data model, and why it is a second pair of tables
+
+`books` and `pages` cannot hold draft state. They are a **projection of the
+newest published release** — `PublishPackDirectory::rebuildCatalog()` drops and
+recreates them on every publish, deliberately, so that progress and paint (which
+key off `book_uid` and page index, never these row ids) are unaffected. A page
+uploaded but not yet mapped, a title changed since the last release, a per-page
+tuning override: none of it can live there without being deleted by the next
+publish.
+
+So authoring gets its own tables and the two stay visibly separate:
+
+```
+authored_books   id, ulid, book_uid (unique), pack_id →packs, title, blurb
+authored_pages   id, ulid, authored_book_id, page_index, title,
+                 display_asset_id  →assets      the operator's upload
+                 mask_asset_id     →assets nullable   the artist's original
+                 idmap_asset_id    →assets nullable   ┐
+                 regions_asset_id  →assets nullable   │ derived: cleared and
+                 mask_artifact_asset_id →assets nullable  recomputed on every
+                 image_w, image_h, region_count       ┘ art or tuning change
+                 mapping_status, mapping_error, mapping_log, mapped_at
+                 validation_errors json, validation_warnings json
+                 tuning json
+                 UNIQUE(authored_book_id, page_index)
+```
+
+- **The workspace is draft state; the catalog is what players have.** Editing an
+  authored book changes nothing anyone can see until publish.
+- **One book ↔ one pack, `packs.slug = book_uid`.** Packs stay the delivery and
+  entitlement unit and the game client did not move an inch; the operator thinks
+  in books. The pack is created *with* the book (not lazily at publish) so the
+  slug — a pack's permanent address in every URL the game builds — is reserved
+  the moment the uid is.
+- **`book_uid` is checked three ways** on creation: unique in `authored_books`
+  (no two drafts), unique in `books` (no published release owns it — uids are
+  never reused, §6.1) and unique as a `packs.slug`.
+- **The two mask columns are BL-9 and BL-12 respectively.** `mask_asset_id` is
+  the artist's print-size original and the *mapping source* when present;
+  `mask_artifact_asset_id` is the pipeline's display-resolution resample and the
+  one that ships as `page_NN_mask.png`. No mask at all is a normal page: the
+  display image maps itself and no mask file appears in the pack.
+- **Derived columns are nullable on purpose.** "Uploaded, not mapped yet" is the
+  normal state of a page for as long as the queue takes, and a defaulted ID map
+  is how a half-mapped page gets published.
+
+`page_index` is 0-based like every other page index on this API; the *file* stem
+is 1-based (`page_01` for index 0), which `AuthoredPage::fileStem()` is the only
+place that knows — the same rule `PaintStorage` follows on the sync side.
+
+### The mapping job, and the one seam
+
+`App\Jobs\MapAuthoredPage` (queued; `tries = 1`, because a drawing with a gap in
+it does not map better on the second attempt):
+
+1. Stage a scratch directory — display at `page_01.png`, and **the mask at
+   `source/mask.png`, never at `page_01_mask.png`**, which is the path the
+   pipeline writes its own resample to.
+2. `App\Services\Mapping\MappingRunner::run()`.
+3. Store `page_01_idmap.png` / `page_01_regions.json` (+ the resampled mask) as
+   content-addressed assets, via `StoreAssetFile`.
+4. Run the existing `PackValidation` over the page and store the verdict.
+
+**Nothing in the job throws on a bad page.** A failed run is a state on the row:
+the queue retrying a gap in the line art would produce the same failure three
+times and lose the message.
+
+`MappingRunner` is the **only** seam between this application and the pipeline,
+and it exists for exactly one reason: a shell-out is not testable on a box with
+no engine. There is no PHP mapping code here and there must never be — §10.1
+spends four paragraphs on why, and a second implementation that drifts by one
+anti-aliasing threshold produces ID maps that hit-test differently from every
+page ever shipped.
+
+- `GodotMappingRunner` builds
+  `<godot> --headless --path <project> --script tools/generate_region_map.gd --
+  <source> [--display <page>] [flags]`. The positional argument is the **mapping
+  source** (the mask when there is one); absolute paths pass through the
+  script's `res://` normalisation untouched, which is what lets the scratch
+  directory live outside the game repo. Every tunable is passed explicitly, so a
+  run is reproducible from the summary the pipeline prints.
+- A missing or unconfigured binary is a **failed run with a sentence**, not an
+  exception. A box with no engine shows "no headless Godot is configured here"
+  on the page; it does not 500 and leave a row stuck at `running`.
+- `Tests\Support\FakeMappingRunner` drops pre-baked `tests/Fixtures/pages/<case>`
+  artifacts into the paths a real run would have written. Bind it with
+  `AuthorsBooks::fakeMapping()` **before** creating a page —
+  `QUEUE_CONNECTION=sync` means the job runs inline, which is deliberate: a page
+  that came back from an endpoint has really been through staging → run → store
+  → validate.
+
+Config (`config/coloringbook.php`): `godot_binary` (top level, **null by
+default**), plus `authoring.godot_project` (defaults to the sibling `../godot`),
+`authoring.mapping_script`, `authoring.mapping_timeout_seconds`,
+`authoring.queue`, `authoring.max_image_kb`, and `authoring.tuning` — the
+pipeline's own flag defaults, pinned here so a run is reproducible from the
+server's config rather than from whichever version of the script is checked out.
+A page may override any knob (`authored_pages.tuning`); the names are the
+pipeline's own, so a page tuned in the browser can be re-run by hand on the dev
+box with the same flags.
+
+### Publish is one button and still one code path
+
+`App\Actions\Authoring\PublishAuthoredBook` refuses while any page is unmapped
+or failing §10.1 — with the *whole* list, in the operator's language — then
+writes a §7.2 directory from the book's current pages and hands it to
+`SubmitPackVersion` (structural + pixel validation, then `PublishPackDirectory`
+as a draft) followed by `PublishPackVersion`. **There is no second publisher.**
+Every `pack_versions` row in this application, from `pack:publish` to the admin
+zip upload to this button, comes out of `PublishPackDirectory`.
+
+Validating again at publish, over artifacts this server generated and already
+checked, is not ceremony: assets can have been replaced, pruned or re-mapped
+since, and the release is immutable the moment it exists. Cheap check before
+irreversible act.
+
+The pack cover and the book cover are both page one's display art — a one-book
+pack has nothing else to be a cover, and content addressing means one blob
+wearing two `assets.kind` hats costs one file. Edits after a publish accumulate
+as draft state until the button is pressed again, which is v2, never a rewrite
+of v1 (§7.3).
+
+### Deleting a book: the one rule that is not obvious
+
+- **Never published → deleted outright**, pack row, versions, catalog rows,
+  entitlements and the `packs/<slug>/` directory. Nobody owns it, and leaving a
+  dead slug behind would reserve a `book_uid` for a mistake forever.
+- **Published → the pack is retired**, and only the authoring workspace goes.
+  `Pack::scopeDownloadable()` includes `retired` precisely so delisting never
+  takes a book off a child's shelf (§7.3). The uid stays claimed, which is
+  correct.
+
+Assets are never deleted either way: they are shared by digest, and a published
+release may be standing on the same bytes.
+
+### The surface
+
+```
+GET    /admin/books                              every authored book
+POST   /admin/books                              create a book + its one-book pack
+GET    /admin/books/{book}                       the book, with its pages
+PATCH  /admin/books/{book}                       retitle (never the uid)
+DELETE /admin/books/{book}                       delete, or retire once published
+GET    /admin/books/{book}/pages                 the page list       (token door only)
+POST   /admin/books/{book}/pages                 add a page
+GET    /admin/books/{book}/pages/{index}         one page / the editor
+PATCH  /admin/books/{book}/pages/{index}         title / reorder / replace art / tuning
+DELETE /admin/books/{book}/pages/{index}         remove and close the gap
+GET    /admin/books/{book}/pages/{index}/status  mapping state + §10.1 verdict (JSON)
+GET    /admin/books/{book}/pages/{index}/preview the region-overlay PNG
+POST   /admin/books/{book}/publish               build + validate + publish
+```
+
+Both doors, same actions, same FormRequests — the WP5 pattern. Art arrives
+either as multipart (`display`, `mask`) or as `display_asset_ulid` /
+`mask_asset_ulid` naming rows already uploaded to `POST /admin/assets`; both
+converge in `App\Concerns\ResolvesAuthoringAssets`. `PATCH` carries four
+unrelated edits, so every field is `sometimes` and `remove_mask` is a separate
+boolean — an absent file field and a deliberately cleared one look identical in
+a multipart body.
+
+Codes this package adds: `BOOK_NOT_PUBLISHABLE` (422, `details.errors` carrying
+every reason), `PAGE_NOT_MAPPED` (404, asking for the overlay of a page that has
+no ID map yet).
+
+### Things that will bite
+
+- **Reordering renumbers the whole book.** `(authored_book_id, page_index)` is
+  unique and SQLite checks unique indexes per statement, so
+  `UpdateAuthoredPage::moveTo()` is a two-phase shuffle: everything is pushed
+  into a range nothing occupies, then written back in the new order. A straight
+  swap collides on the way past itself. Deleting a page compacts the same way —
+  a hole at index 2 would publish a manifest the client reads as a book with a
+  missing page.
+- **Anything that changes the mapping clears the derived columns and re-queues**
+  (new display, new mask, mask removed, tuning moved). Leaving yesterday's ID
+  map beside today's art is the exact failure `PackValidation`'s bijection check
+  exists to catch, and it would be this application that created it.
+- A reorder moves a page out from under its own URL, so the web controller's
+  redirect follows it to wherever it landed.
+- `PackPreview::renderPair()` is the authoring-side entry point: same
+  compositor, same nearest-neighbour ID-map rule, no cache of its own.
+  `AuthoredPagePreview` caches on the packs disk under the two artifacts'
+  digests, so a re-map is a different key and there is no invalidation step to
+  forget.
+
+### Testing
+
+`Tests\Concerns\AuthorsBooks` — `fakeMapping()`, `pageUpload()`, `authorBook()`.
+`fakePackStorage()` first, as always.
+
+- `tests/Feature/Api/AdminBookAuthoringTest.php` — the flow through the token
+  door, including "a masked page maps from the mask", "a giant region is
+  reported in plain language", "publishing refuses while a page is failing" and
+  "publishing again is a new immutable version".
+- `tests/Feature/Admin/AuthoringPagesTest.php` — the Inertia half: the 404 for a
+  parent, and a refused publish bouncing with the whole list.
+- `tests/Feature/Admin/GodotMappingRunnerTest.php` — the command line, with
+  `Process::fake()`.
+- `tests/Feature/Admin/MappingPipelineIntegrationTest.php` — **opt-in**, skipped
+  unless `COLORINGBOOK_GODOT_BINARY` names a real engine. It is also the check
+  §10.3 asks for when the pinned engine moves:
+
+  ```
+  COLORINGBOOK_GODOT_BINARY="…/Godot_v4.5.1-stable_win64.exe" \
+      php artisan test --filter=MappingPipelineIntegrationTest
+  ```
+
+  (The 16×16 page fixtures need `min_area` 4 and `dilate` 0 — the shipped
+  defaults would drop 7×7 quadrants as specks. Per-page tuning is what the
+  overrides are for.)
+
 ## WP8 — Dusk browser tests
 
 `laravel/dusk` v8.6 (`php-webdriver/webdriver` 1.16) covers the human-facing
@@ -811,6 +1038,14 @@ through the real `PublishPackDirectory` as an unpublished draft.
 | `AccountDeletionTest` | Wrong password deletes nothing; the right one hard-deletes the household, its paint blobs included, and nobody else's. |
 | `PicturesTest` | A contested page is listed under the right shelf; restore swaps the two versions on disk and in the database; twice puts it back. |
 | `AdminTest` | Non-admin: no sidebar entry and a 404. Admin: pack list, create a draft, publish a version, grant a promo entitlement, unknown email is a field error. |
+| `AuthoringTest` | WP14: non-admin sees no Books entry and gets a 404; the book list, creating a book (one-book draft pack, slug = uid), the page editor rendering the region overlay, a giant region saying "a line has a gap", one-button publish, and the button disabled on a book that cannot publish. |
+
+`AuthoringTest` seeds pages **already mapped** (`SeedsBrowserFixtures::seedAuthoredBook()`).
+The mapping job shells out inside the `php artisan serve` process, which has no
+`MappingRunner` fake to bind and deliberately no engine in `.env.dusk.local`, so
+the pipeline is covered by the opt-in integration test instead. `route()` hands
+back absolute URLs, so the preview `<img>` is asserted with a `src$=` suffix
+match, not an equality one.
 
 Two assertions that look obvious and are wrong, both learned the hard way:
 
