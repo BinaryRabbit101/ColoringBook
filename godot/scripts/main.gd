@@ -17,6 +17,17 @@ extends Control
 ## the title now goes straight to the shelf, and there is one palette for everyone
 ## (DESIGN.md 1).
 ##
+## [b]BL-27 removed the tap on the splash[/b]: [TitleScreen] plays its opening beat
+## and emits [signal TitleScreen.start_requested] by itself. Nothing changed here --
+## main was never waiting for a tap, it was waiting for the signal.
+##
+## [b]BL-30 gave the swap layer a second way to dress a swap[/b]. Every screen
+## change is still cover / swap / uncover; [enum Transition] only picks what does
+## the covering, and [BookOpenTransition] is the one that makes the shelf -> page
+## step feel like opening a book instead of a cut. That transition belongs HERE and
+## nowhere else: the shelf must not know what is behind a book and the page must not
+## know where it was opened from.
+##
 ## [b]There is no completion screen[/b] (BL-11, DESIGN.md 2). Finishing a page --
 ## including the last one -- is celebrated on the coloring page itself and takes
 ## the player nowhere; [signal ColoringPage.back_requested] is the only exit from
@@ -94,6 +105,28 @@ const PACK_SHOP_SCENE: PackedScene = preload("res://scenes/components/pack_shop.
 const FADE_OUT_SECONDS := 0.12
 const FADE_IN_SECONDS := 0.13
 
+## How a screen swap is dressed. Every swap is the same three steps -- cover, swap,
+## uncover -- and this only picks what does the covering (see [method _cover_screen]).
+enum Transition {
+	## The default: a short dip through black.
+	FADE,
+	## BL-30: a book leaps off the shelf, fills the screen and its cover swings open
+	## on the page.
+	BOOK_OPEN,
+	## The same in reverse, for leaving a book: the cover swings shut over the page
+	## and the book drops back onto the shelf.
+	BOOK_CLOSE,
+}
+
+## BL-30 timings. The whole opening runs in a bit over half a second: long enough
+## to read as a book being opened, short enough that a child who wants to colour is
+## not being shown an animation.
+const BOOK_COVER_SECONDS := 0.24
+const BOOK_OPEN_SECONDS := 0.34
+## Shutting is quicker than opening -- going back is not the moment worth savouring.
+const BOOK_SHUT_SECONDS := 0.22
+const BOOK_RETURN_SECONDS := 0.24
+
 
 ## The settings gear, drawn from primitives so the shell ships no icon assets.
 ## Sits on a dark disc so it reads over both the shelf and a white page.
@@ -146,6 +179,202 @@ class GearButton extends Button:
 		draw_circle(center, body * 0.42, Color(0.156863, 0.141176, 0.129412))
 
 
+## The book that opens between the shelf and the page (BL-30).
+##
+## [b]It lives here, in the swap layer[/b], and not in either screen: the shelf
+## must not know what is behind a book and the coloring page must not know what it
+## was reached from -- that is the whole reason main exists. It is also why the
+## book is a GENERIC book rather than the cover of the one that was tapped: this
+## node is handed a [BookDef] and a [PackedScene], never a cell's rectangle.
+##
+## [b]Drawn from primitives[/b], like [GearButton] and everything else in the
+## shell, so the transition ships no art. Two numbers describe the whole thing:
+##
+## [codeblock]
+## closed_amount  0 a small book at the centre of the screen .. 1 it fills the screen
+## opened_amount  0 the cover is shut ................ 1 it has swung right open
+## [/codeblock]
+##
+## The two phases hand over SEAMLESSLY at [code]closed_amount == 1[/code] /
+## [code]opened_amount == 0[/code]: both draw the same full-screen flat cover, which
+## is what lets the screen swap happen invisibly in between them.
+class BookOpenTransition extends Control:
+	## A warm crayon-box red, in the family the shell already uses.
+	const COVER := Color(0.647059, 0.286275, 0.239216)
+	const SPINE := Color(0.478431, 0.196078, 0.164706)
+	const COVER_EDGE := Color(0.352941, 0.145098, 0.117647)
+	## The same paper as the title screen's sheet.
+	const PAGE := Color(0.988235, 0.976471, 0.956863)
+	## Roughly the size a book takes up on the shelf, so it reads as one leaping out.
+	const START_SCALE := 0.22
+	const CORNER_RADIUS := 26
+	const SHADOW_SIZE := 30
+	## How deeply the cover's free edge pinches vertically as it swings, which is
+	## what sells the rotation without any 3D.
+	const SWING_PINCH := 0.10
+	## How far across the uncovered page the standing cover throws its shadow.
+	const SWING_SHADOW := 0.14
+	## Strokes in the doodle on the cover.
+	const DOODLE_LANES := 3
+	const DOODLE_STEPS := 12
+
+	var closed_amount := 0.0
+	var opened_amount := 0.0
+
+	var _cover_style := StyleBoxFlat.new()
+	var _page_style := StyleBoxFlat.new()
+	var _doodle_colors := PackedColorArray()
+
+	func _init() -> void:
+		visible = false
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_cover_style.bg_color = COVER
+		_cover_style.border_color = COVER_EDGE
+		_cover_style.set_border_width_all(3)
+		_cover_style.shadow_color = Color(0.0, 0.0, 0.0, 0.45)
+		_cover_style.shadow_offset = Vector2(0.0, 10.0)
+		_page_style.bg_color = PAGE
+
+	## The crayon scribble on the cover takes its colours from the live palette, the
+	## same way the title screen's lettering does. Injected rather than read off the
+	## autoload so the class stays a plain drawing.
+	func set_doodle_colors(colors: PackedColorArray) -> void:
+		_doodle_colors = colors
+		queue_redraw()
+
+	func begin(closed: float, opened: float) -> void:
+		closed_amount = closed
+		opened_amount = opened
+		modulate.a = 1.0
+		visible = true
+		mouse_filter = Control.MOUSE_FILTER_STOP
+		queue_redraw()
+
+	func finish() -> void:
+		visible = false
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		modulate.a = 1.0
+		closed_amount = 0.0
+		opened_amount = 0.0
+
+	func set_closed(value: float) -> void:
+		closed_amount = value
+		queue_redraw()
+
+	func set_opened(value: float) -> void:
+		opened_amount = value
+		queue_redraw()
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_RESIZED:
+			queue_redraw()
+
+	func _draw() -> void:
+		if size.x <= 4.0 or size.y <= 4.0:
+			return
+		if opened_amount <= 0.0:
+			_draw_shut_book()
+		else:
+			_draw_swinging_cover()
+
+	## Phase 1: a shut book, somewhere between shelf-sized and screen-sized.
+	func _draw_shut_book() -> void:
+		var box := size * lerpf(START_SCALE, 1.0, closed_amount)
+		var rect := Rect2(((size - box) * 0.5).floor(), box)
+		# Everything that makes it read as an OBJECT -- rounded corners, its shadow,
+		# the page edges down its open side -- is gone by the time it fills the
+		# screen, which is what makes the hand-off to phase 2 invisible.
+		var object_ness := clampf(1.0 - closed_amount, 0.0, 1.0)
+		var lip := maxf(box.x * 0.025, 2.0) * object_ness
+		_page_style.set_corner_radius_all(int(CORNER_RADIUS * object_ness * 0.5))
+		_page_style.draw(
+			get_canvas_item(),
+			Rect2(rect.position + Vector2(lip, lip), rect.size - Vector2(0.0, lip * 2.0))
+		)
+		_cover_style.set_corner_radius_all(int(CORNER_RADIUS * object_ness))
+		_cover_style.shadow_size = int(SHADOW_SIZE * object_ness)
+		_cover_style.draw(get_canvas_item(), rect)
+		_draw_spine(rect.position.x, rect.size.y * 0.5 + rect.position.y, rect.size,
+			CORNER_RADIUS * object_ness, SPINE)
+		_draw_doodle(rect.position, rect.size.x, 0.0, rect.size.y, 1.0)
+
+	## Phase 2: the cover swings away to the left on its spine, uncovering a white
+	## page spread that then fades into the real screen behind this overlay.
+	func _draw_swinging_cover() -> void:
+		var o := clampf(opened_amount, 0.0, 1.0)
+		draw_rect(
+			Rect2(Vector2.ZERO, size),
+			Color(PAGE.r, PAGE.g, PAGE.b, 1.0 - smoothstep(0.55, 1.0, o))
+		)
+		var edge_x := size.x * (1.0 - o)
+		if edge_x <= 1.0:
+			return
+		var pinch := size.y * SWING_PINCH * sin(PI * o)
+		# The shadow the standing cover throws across what it has uncovered.
+		var reach := minf(size.x * SWING_SHADOW, size.x - edge_x)
+		if reach > 1.0:
+			var dark := Color(0.117647, 0.086275, 0.070588, 0.38 * sin(PI * o))
+			var clear := Color(dark.r, dark.g, dark.b, 0.0)
+			draw_polygon(
+				PackedVector2Array([
+					Vector2(edge_x, 0.0),
+					Vector2(edge_x + reach, 0.0),
+					Vector2(edge_x + reach, size.y),
+					Vector2(edge_x, size.y),
+				]),
+				PackedColorArray([dark, clear, clear, dark])
+			)
+		# Lit across its face as it turns: both tints are zero at o == 0, so the
+		# first frame of the swing is pixel-identical to the last frame of phase 1.
+		var turn := smoothstep(0.0, 0.25, o)
+		var hinge_side := COVER.darkened(0.30 * turn + 0.35 * o)
+		var free_side := COVER.lightened(0.12 * turn)
+		draw_polygon(
+			PackedVector2Array([
+				Vector2(0.0, 0.0),
+				Vector2(edge_x, pinch),
+				Vector2(edge_x, size.y - pinch),
+				Vector2(0.0, size.y),
+			]),
+			PackedColorArray([hinge_side, free_side, free_side, hinge_side])
+		)
+		draw_line(
+			Vector2(edge_x, pinch), Vector2(edge_x, size.y - pinch), COVER_EDGE, 4.0, true
+		)
+		_draw_spine(0.0, size.y * 0.5, Vector2(edge_x, size.y), 0.0, SPINE.darkened(0.25 * o))
+		_draw_doodle(Vector2.ZERO, edge_x, pinch, size.y - pinch, 1.0 - turn)
+
+	## The dark strip down the bound edge. Inset by the corner radius so it cannot
+	## poke out of the cover's rounded corners while the book is still small.
+	func _draw_spine(
+		left: float, middle_y: float, box: Vector2, corner: float, tint: Color
+	) -> void:
+		var width := maxf(box.x * 0.055, 3.0)
+		var height := maxf(box.y - corner * 2.0, 0.0)
+		if width <= 0.0 or height <= 0.0:
+			return
+		draw_rect(Rect2(Vector2(left, middle_y - height * 0.5), Vector2(width, height)), tint)
+
+	## Three wax strokes across the cover, in palette colours -- the same crayon
+	## language as the title screen's underline, so the book looks like one of ours.
+	## Mapped through the caller's box, which is how it swings with the cover.
+	func _draw_doodle(
+		origin: Vector2, span_x: float, top: float, bottom: float, alpha: float
+	) -> void:
+		if _doodle_colors.is_empty() or alpha <= 0.01 or span_x <= 8.0 or bottom - top <= 8.0:
+			return
+		var thickness := maxf((bottom - top) * 0.014, 2.0)
+		for lane in DOODLE_LANES:
+			var points := PackedVector2Array()
+			for i in DOODLE_STEPS + 1:
+				var u := lerpf(0.22, 0.84, float(i) / float(DOODLE_STEPS))
+				var v := 0.34 + float(lane) * 0.15 \
+					+ sin(float(i) * 0.9 + float(lane) * 1.7) * 0.03
+				points.append(origin + Vector2(u * span_x, lerpf(top, bottom, v)))
+			var tint: Color = _doodle_colors[lane % _doodle_colors.size()]
+			draw_polyline(points, Color(tint.r, tint.g, tint.b, alpha), thickness, true)
+
+
 @onready var _safe_area: SafeArea = $SafeArea
 @onready var _host: Control = $SafeArea/ScreenHost
 @onready var _overlays: Control = $SafeArea/Overlays
@@ -162,6 +391,9 @@ var quit_on_close_request := true:
 			get_tree().auto_accept_quit = not value
 
 var _gear: GearButton
+## BL-30: the book that opens between the shelf and the page. Built here, on top of
+## [member _fade], because a transition has to cover the overlays too.
+var _book_transition: BookOpenTransition
 ## WP10: the shelf's DLC entry point. An overlay button, not part of the shelf
 ## scene, and visible only when the shelf is up AND somebody is signed in.
 var _more_books: Button
@@ -181,6 +413,7 @@ func _ready() -> void:
 	get_tree().auto_accept_quit = not quit_on_close_request
 	_build_gear()
 	_build_more_books()
+	_build_book_transition()
 	# The shelf re-filters and rescans when the account or the installed packs
 	# change. Nothing here awaits anything (DLC_SERVER.md 8.2) -- these are
 	# notifications that arrive, not requests this node makes.
@@ -252,10 +485,14 @@ func show_title() -> Control:
 	return await _show_screen(TITLE_SCENE, SCREEN_TITLE)
 
 
-func show_book_select() -> Control:
+## [param transition] is how the swap is dressed; leaving a book passes
+## [constant Transition.BOOK_CLOSE] so the shelf is reached the same way it was
+## left (BL-30).
+func show_book_select(transition: Transition = Transition.FADE) -> Control:
 	GameState.clear_book()
-	return await _show_screen(BOOK_SELECT_SCENE, SCREEN_BOOK_SELECT, func(screen: Control) -> void:
-		_populate_shelf(screen as BookSelect)
+	return await _show_screen(BOOK_SELECT_SCENE, SCREEN_BOOK_SELECT, transition,
+		func(screen: Control) -> void:
+			_populate_shelf(screen as BookSelect)
 	)
 
 
@@ -278,17 +515,27 @@ func open_book(book: BookDef) -> Control:
 	if book == null:
 		return null
 	var start_index := GameState.get_resume_index(book)
-	return await _show_screen(COLORING_PAGE_SCENE, SCREEN_COLORING, func(screen: Control) -> void:
-		(screen as ColoringPage).load_book(book, start_index)
+	# BL-30: tapping a book on the shelf now OPENS it rather than cutting to it.
+	return await _show_screen(COLORING_PAGE_SCENE, SCREEN_COLORING, Transition.BOOK_OPEN,
+		func(screen: Control) -> void:
+			(screen as ColoringPage).load_book(book, start_index)
 	)
 
 
 # --------------------------------------------------------------- screen swap --
 
-## Fades out, frees the old screen, instantiates and wires the new one, runs
-## [param setup] on it, then fades back in. [param setup] runs BEFORE the fade-in
-## so a page loads behind the black, not in front of the player.
-func _show_screen(scene: PackedScene, id: String, setup: Callable = Callable()) -> Control:
+## Covers the screen, frees the old one, instantiates and wires the new one, runs
+## [param setup] on it, then uncovers. [param setup] runs BEHIND the cover, so a
+## page loads out of sight rather than in front of the player.
+##
+## [param transition] only chooses what does the covering (BL-30): the three steps,
+## the transition guard and the overlay bookkeeping are the same whichever it is.
+func _show_screen(
+	scene: PackedScene,
+	id: String,
+	transition: Transition = Transition.FADE,
+	setup: Callable = Callable()
+) -> Control:
 	if _transitioning:
 		push_warning("Main: ignoring a request for '%s' during a transition." % id)
 		return null
@@ -296,7 +543,7 @@ func _show_screen(scene: PackedScene, id: String, setup: Callable = Callable()) 
 	_close_overlays()
 	_gear.visible = false
 	_more_books.visible = false
-	await _fade_to(1.0, FADE_OUT_SECONDS)
+	await _cover_screen(transition)
 
 	for child in _host.get_children():
 		_host.remove_child(child)
@@ -312,7 +559,7 @@ func _show_screen(scene: PackedScene, id: String, setup: Callable = Callable()) 
 		setup.call(screen)
 
 	await get_tree().process_frame
-	await _fade_to(0.0, FADE_IN_SECONDS)
+	await _uncover_screen(transition)
 	# The gear is an OVERLAY on the shelf, which is how book_select.tscn stayed
 	# frozen while still growing a settings entry point.
 	_gear.visible = id == SCREEN_BOOK_SELECT
@@ -347,6 +594,87 @@ func _fade_to(target_alpha: float, seconds: float) -> void:
 		_fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 
+# ------------------------------------------------------------ BL-30: the book --
+
+func _build_book_transition() -> void:
+	_book_transition = BookOpenTransition.new()
+	_book_transition.name = "BookTransition"
+	add_child(_book_transition)
+	_book_transition.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var palette := GameState.get_active_palette()
+	if palette != null:
+		var colors := PackedColorArray()
+		# Spread across the box rather than the first three, so the cover doodle is
+		# three DIFFERENT crayons.
+		for lane in BookOpenTransition.DOODLE_LANES:
+			colors.append(palette.get_color((lane * 3 + 1) % maxi(palette.color_count(), 1)))
+		_book_transition.set_doodle_colors(colors)
+
+
+## Hides the outgoing screen the way [param transition] asks for.
+func _cover_screen(transition: Transition) -> void:
+	match transition:
+		Transition.BOOK_OPEN:
+			await _book_leaps_out()
+		Transition.BOOK_CLOSE:
+			await _book_shuts()
+		_:
+			await _fade_to(1.0, FADE_OUT_SECONDS)
+
+
+## Reveals the incoming screen, undoing whatever [method _cover_screen] did.
+func _uncover_screen(transition: Transition) -> void:
+	match transition:
+		Transition.BOOK_OPEN:
+			await _book_cover_opens()
+		Transition.BOOK_CLOSE:
+			await _book_goes_back_on_the_shelf()
+		_:
+			await _fade_to(0.0, FADE_IN_SECONDS)
+
+
+## A book the size of a shelf cell gathers itself and flies at the screen.
+## TRANS_BACK/EASE_IN is the anticipation: it dips smaller before it leaps.
+func _book_leaps_out() -> void:
+	_book_transition.begin(0.0, 0.0)
+	var tween := create_tween()
+	tween.tween_method(_book_transition.set_closed, 0.0, 1.0, BOOK_COVER_SECONDS) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+	await tween.finished
+
+
+## ...and its cover swings open on the page that loaded behind it.
+func _book_cover_opens() -> void:
+	var tween := create_tween()
+	tween.tween_method(_book_transition.set_opened, 0.0, 1.0, BOOK_OPEN_SECONDS) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	await tween.finished
+	_book_transition.finish()
+
+
+## Leaving a book: the cover swings back over the page.
+func _book_shuts() -> void:
+	_book_transition.begin(1.0, 1.0)
+	var tween := create_tween()
+	tween.tween_method(_book_transition.set_opened, 1.0, 0.0, BOOK_SHUT_SECONDS) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	await tween.finished
+
+
+## ...and the shut book drops away to the middle of the shelf. It fades out over
+## the tail of the shrink, because a book that reached shelf size and then vanished
+## would pop -- and this node has no idea which cell it belongs on.
+func _book_goes_back_on_the_shelf() -> void:
+	var tween := create_tween()
+	tween.tween_method(_book_transition.set_closed, 1.0, 0.0, BOOK_RETURN_SECONDS) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	tween.parallel().tween_property(
+		_book_transition, "modulate:a", 0.0, BOOK_RETURN_SECONDS * 0.65
+	).set_delay(BOOK_RETURN_SECONDS * 0.35)
+	await tween.finished
+	_book_transition.finish()
+
+
 # =============================================================== screen hooks ==
 
 ## BL-20: the title goes straight to the shelf. There is nothing to choose first.
@@ -359,9 +687,9 @@ func _on_book_chosen(book: BookDef) -> void:
 
 
 ## The page already flushed its paint in [method ColoringPage._on_back_pressed];
-## all that is left is the screen swap.
+## all that is left is the screen swap -- shutting the book the player opened.
 func _on_coloring_back() -> void:
-	await show_book_select()
+	await show_book_select(Transition.BOOK_CLOSE)
 
 
 # ================================================================== overlays ==
@@ -618,6 +946,12 @@ func get_account_panel() -> AccountPanel:
 
 func get_pack_shop() -> PackShop:
 	return _pack_shop if is_instance_valid(_pack_shop) else null
+
+
+## BL-30's book-opening overlay. Tests read it to prove the transition is main's
+## and that it hands input back when it is done.
+func get_book_transition() -> BookOpenTransition:
+	return _book_transition
 
 
 ## The notch-safe wrapper both the screen host and the overlays live inside

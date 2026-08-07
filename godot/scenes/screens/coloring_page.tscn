@@ -1,4 +1,4 @@
-[gd_scene load_steps=14 format=3]
+[gd_scene load_steps=10 format=3]
 
 [ext_resource type="Script" path="res://scripts/screens/coloring_page.gd" id="1_coloring_page"]
 [ext_resource type="PackedScene" path="res://scenes/components/page_view.tscn" id="2_page_view"]
@@ -7,30 +7,18 @@
 [ext_resource type="Script" path="res://scripts/components/history_button.gd" id="5_history"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_toolbar"]
-bg_color = Color(0.184314, 0.164706, 0.152941, 1)
-border_width_bottom = 3
-border_color = Color(0.301961, 0.266667, 0.239216, 1)
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_back"]
-bg_color = Color(0.352941, 0.309804, 0.278431, 1)
-corner_radius_top_left = 12
-corner_radius_top_right = 12
-corner_radius_bottom_right = 12
-corner_radius_bottom_left = 12
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_nav_off"]
-bg_color = Color(0.219608, 0.203922, 0.192157, 1)
-corner_radius_top_left = 12
-corner_radius_top_right = 12
-corner_radius_bottom_right = 12
-corner_radius_bottom_left = 12
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_save"]
-bg_color = Color(0.223529, 0.427451, 0.309804, 1)
-corner_radius_top_left = 12
-corner_radius_top_right = 12
-corner_radius_bottom_right = 12
-corner_radius_bottom_left = 12
+content_margin_left = 16.0
+content_margin_top = 8.0
+content_margin_right = 16.0
+content_margin_bottom = 10.0
+bg_color = Color(0.192157, 0.168627, 0.145098, 1)
+border_width_bottom = 5
+border_color = Color(0.435294, 0.352941, 0.258824, 1)
+corner_radius_bottom_right = 18
+corner_radius_bottom_left = 18
+shadow_color = Color(0, 0, 0, 0.298039)
+shadow_size = 8
+shadow_offset = Vector2(0, 3)
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_scrim"]
 bg_color = Color(0.0392157, 0.0313726, 0.027451, 0.65)
@@ -49,24 +37,24 @@ corner_radius_bottom_left = 20
 shadow_color = Color(0, 0, 0, 0.470588)
 shadow_size = 24
 
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_danger"]
-bg_color = Color(0.588235, 0.180392, 0.156863, 1)
-corner_radius_top_left = 12
-corner_radius_top_right = 12
-corner_radius_bottom_right = 12
-corner_radius_bottom_left = 12
-
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_toast"]
-bg_color = Color(0.121569, 0.196078, 0.152941, 0.882353)
-border_width_left = 2
-border_width_top = 2
-border_width_right = 2
-border_width_bottom = 2
-border_color = Color(0.376471, 0.639216, 0.470588, 1)
-corner_radius_top_left = 14
-corner_radius_top_right = 14
-corner_radius_bottom_right = 14
-corner_radius_bottom_left = 14
+content_margin_left = 22.0
+content_margin_top = 10.0
+content_margin_right = 22.0
+content_margin_bottom = 12.0
+bg_color = Color(0.129412, 0.223529, 0.168627, 0.921569)
+border_width_left = 3
+border_width_top = 3
+border_width_right = 3
+border_width_bottom = 5
+border_color = Color(0.376471, 0.784314, 0.501961, 1)
+corner_radius_top_left = 22
+corner_radius_top_right = 22
+corner_radius_bottom_right = 22
+corner_radius_bottom_left = 22
+shadow_color = Color(0, 0, 0, 0.352941)
+shadow_size = 10
+shadow_offset = Vector2(0, 4)
 
 [node name="ColoringPage" type="Control"]
 anchors_preset = 15
@@ -104,45 +92,32 @@ theme_override_styles/panel = SubResource("StyleBoxFlat_toolbar")
 
 [node name="Row" type="HBoxContainer" parent="Ui/Toolbar"]
 layout_mode = 2
-theme_override_constants/separation = 16
+theme_override_constants/separation = 14
 
 [node name="BackButton" type="Button" parent="Ui/Toolbar/Row"]
-custom_minimum_size = Vector2(132, 56)
+custom_minimum_size = Vector2(136, 56)
 layout_mode = 2
 size_flags_vertical = 4
 focus_mode = 0
-theme_override_colors/font_color = Color(0.972549, 0.94902, 0.905882, 1)
 theme_override_font_sizes/font_size = 24
-theme_override_styles/normal = SubResource("StyleBoxFlat_back")
-theme_override_styles/hover = SubResource("StyleBoxFlat_back")
-theme_override_styles/pressed = SubResource("StyleBoxFlat_back")
 text = "< Books"
+tooltip_text = "Back to the bookshelf"
 
 [node name="SaveButton" type="Button" parent="Ui/Toolbar/Row"]
-custom_minimum_size = Vector2(120, 56)
+custom_minimum_size = Vector2(118, 56)
 layout_mode = 2
 size_flags_vertical = 4
 focus_mode = 0
-theme_override_colors/font_color = Color(0.898039, 0.968627, 0.913725, 1)
 theme_override_font_sizes/font_size = 24
-theme_override_styles/normal = SubResource("StyleBoxFlat_save")
-theme_override_styles/hover = SubResource("StyleBoxFlat_save")
-theme_override_styles/pressed = SubResource("StyleBoxFlat_save")
-theme_override_styles/disabled = SubResource("StyleBoxFlat_nav_off")
 text = "Save"
 tooltip_text = "Save this page now"
 
 [node name="ResetButton" type="Button" parent="Ui/Toolbar/Row"]
-custom_minimum_size = Vector2(148, 56)
+custom_minimum_size = Vector2(150, 56)
 layout_mode = 2
 size_flags_vertical = 4
 focus_mode = 0
-theme_override_colors/font_color = Color(0.972549, 0.847059, 0.827451, 1)
 theme_override_font_sizes/font_size = 24
-theme_override_styles/normal = SubResource("StyleBoxFlat_danger")
-theme_override_styles/hover = SubResource("StyleBoxFlat_danger")
-theme_override_styles/pressed = SubResource("StyleBoxFlat_danger")
-theme_override_styles/disabled = SubResource("StyleBoxFlat_nav_off")
 text = "Start over"
 tooltip_text = "Clear this page and start it again"
 
@@ -182,13 +157,7 @@ layout_mode = 2
 size_flags_vertical = 4
 focus_mode = 0
 disabled = true
-theme_override_colors/font_color = Color(0.972549, 0.94902, 0.905882, 1)
-theme_override_colors/font_disabled_color = Color(0.407843, 0.380392, 0.356863, 1)
-theme_override_font_sizes/font_size = 28
-theme_override_styles/normal = SubResource("StyleBoxFlat_back")
-theme_override_styles/hover = SubResource("StyleBoxFlat_back")
-theme_override_styles/pressed = SubResource("StyleBoxFlat_back")
-theme_override_styles/disabled = SubResource("StyleBoxFlat_nav_off")
+theme_override_font_sizes/font_size = 30
 text = "‹"
 tooltip_text = "Previous page"
 
@@ -208,13 +177,7 @@ layout_mode = 2
 size_flags_vertical = 4
 focus_mode = 0
 disabled = true
-theme_override_colors/font_color = Color(0.972549, 0.94902, 0.905882, 1)
-theme_override_colors/font_disabled_color = Color(0.407843, 0.380392, 0.356863, 1)
-theme_override_font_sizes/font_size = 28
-theme_override_styles/normal = SubResource("StyleBoxFlat_back")
-theme_override_styles/hover = SubResource("StyleBoxFlat_back")
-theme_override_styles/pressed = SubResource("StyleBoxFlat_back")
-theme_override_styles/disabled = SubResource("StyleBoxFlat_nav_off")
+theme_override_font_sizes/font_size = 30
 text = "›"
 tooltip_text = "Next page"
 
@@ -279,6 +242,15 @@ text = "This looks fantastic!"
 horizontal_alignment = 1
 vertical_alignment = 1
 autowrap_mode = 3
+
+[node name="Effects" type="Control" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
 
 [node name="PageFlip" parent="." instance=ExtResource("3_page_flip")]
 layout_mode = 1
@@ -380,20 +352,12 @@ alignment = 1
 custom_minimum_size = Vector2(250, 64)
 layout_mode = 2
 focus_mode = 0
-theme_override_colors/font_color = Color(0.988235, 0.909804, 0.898039, 1)
 theme_override_font_sizes/font_size = 24
-theme_override_styles/normal = SubResource("StyleBoxFlat_danger")
-theme_override_styles/hover = SubResource("StyleBoxFlat_danger")
-theme_override_styles/pressed = SubResource("StyleBoxFlat_danger")
 text = "Yes, start over"
 
 [node name="CancelButton" type="Button" parent="ResetConfirm/Center/Panel/Margin/Column/Row"]
 custom_minimum_size = Vector2(250, 64)
 layout_mode = 2
 focus_mode = 0
-theme_override_colors/font_color = Color(0.972549, 0.94902, 0.905882, 1)
 theme_override_font_sizes/font_size = 24
-theme_override_styles/normal = SubResource("StyleBoxFlat_back")
-theme_override_styles/hover = SubResource("StyleBoxFlat_back")
-theme_override_styles/pressed = SubResource("StyleBoxFlat_back")
 text = "Keep colouring"

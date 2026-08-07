@@ -91,7 +91,7 @@ layout_mode = 2
 mouse_filter = 2
 theme_override_colors/font_color = Color(0.415686, 0.360784, 0.301961, 1)
 theme_override_font_sizes/font_size = 28
-text = "tap anywhere to start"
+text = "let's color!"
 horizontal_alignment = 1
 
 [node name="Crayons" type="Control" parent="."]

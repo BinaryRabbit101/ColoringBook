@@ -58,6 +58,11 @@ const KEY_PAGE_COUNT := "page_count"
 ## rather than two things once.
 const SIGNED_OUT_HINT := "A grown-up needs to sign in to add a book."
 
+## The crayon that draws a download (BL-31). Preloaded into a constant rather than
+## reached through a [code]class_name[/code]: the type then resolves without the
+## editor having rebuilt its global-class cache.
+const WaxProgress := preload("res://scripts/components/wax_progress.gd")
+
 @onready var _scrim: Button = $Scrim
 @onready var _list: VBoxContainer = $Center/Panel/Margin/Column/Scroll/List
 @onready var _status: Label = $Center/Panel/Margin/Column/Status
@@ -244,6 +249,12 @@ func get_close_button() -> Button:
 ## The confirm step is a mode of the row rather than a dialog -- the same pattern
 ## [SettingsPanel] uses for erase, and for the same reasons (popups behave badly on
 ## mobile, and a destructive-or-expensive action should never be one tap away).
+##
+## [b]While it downloads[/b] the row grows a crayon strip ([WaxProgress], BL-31)
+## instead of a bare bar. The strip is fed the same bytes the label is -- it is a
+## second rendering of [method get_progress_ratio], not a second source of truth --
+## and it is driven entirely from [method _set_state], so the state machine above
+## is exactly what it was before the animation existed.
 class PackRow extends PanelContainer:
 	## The grown-up said yes to the download.
 	signal download_requested()
@@ -262,7 +273,7 @@ class PackRow extends PanelContainer:
 	var _detail: Label
 	var _action: Button
 	var _cancel: Button
-	var _bar: ProgressBar
+	var _wax: WaxProgress
 
 	func _init(data: Dictionary) -> void:
 		_data = data
@@ -309,13 +320,9 @@ class PackRow extends PanelContainer:
 		_action.pressed.connect(_on_action_pressed)
 		row.add_child(_action)
 
-		_bar = ProgressBar.new()
-		_bar.name = "ProgressBar"
-		_bar.custom_minimum_size = Vector2(0, 14)
-		_bar.show_percentage = false
-		_bar.max_value = 1.0
-		_bar.visible = false
-		column.add_child(_bar)
+		_wax = WaxProgress.new()
+		_wax.name = "WaxProgress"
+		column.add_child(_wax)
 
 		_set_state(_initial_state())
 
@@ -346,8 +353,14 @@ class PackRow extends PanelContainer:
 	func get_detail_text() -> String:
 		return _detail.text
 
+	## The real ratio, as the last [method set_downloading] computed it -- never the
+	## eased one the strip happens to be drawing this frame.
 	func get_progress_ratio() -> float:
-		return float(_bar.value)
+		return _wax.get_ratio()
+
+	## The download strip, so a harness can look at what the row is showing.
+	func get_progress_strip() -> WaxProgress:
+		return _wax
 
 	## Drives the row straight to its confirm step, then to the download. Public so
 	## a harness exercises the SAME path a tap does.
@@ -365,7 +378,10 @@ class PackRow extends PanelContainer:
 		if _state != STATE_DOWNLOADING:
 			_set_state(STATE_DOWNLOADING)
 		var known := total if total > 0 else get_bytes()
-		_bar.value = clampf(float(downloaded) / float(known), 0.0, 1.0) if known > 0 else 0.0
+		# A negative ratio is "nobody told us how big this is": the strip scribbles
+		# gently rather than claiming a percentage it does not have.
+		_wax.set_progress(
+			clampf(float(downloaded) / float(known), 0.0, 1.0) if known > 0 else -1.0)
 		_detail.text = "Downloading… %s of %s" % [format_bytes(downloaded), format_bytes(known)]
 
 	func set_installed_version(version: int) -> void:
@@ -378,8 +394,9 @@ class PackRow extends PanelContainer:
 		_set_state(STATE_FAILED)
 
 	func _set_state(state: String) -> void:
+		var previous := _state
 		_state = state
-		_bar.visible = state == STATE_DOWNLOADING
+		_update_strip(previous, state)
 		_cancel.visible = state == STATE_CONFIRM
 		_action.disabled = state in [STATE_INSTALLED, STATE_DOWNLOADING, STATE_BLOCKED]
 		match state:
@@ -404,6 +421,27 @@ class PackRow extends PanelContainer:
 			_:
 				_action.text = "Get" if bool(_data.get(KEY_IS_FREE, false)) else "Get"
 				_detail.text = _describe()
+
+	## The animation, hung off the state machine rather than woven into it (BL-31).
+	## Three transitions are all it knows: a download starting, a download that
+	## ENDED WELL, and everything else, which is the strip going away.
+	func _update_strip(previous: String, state: String) -> void:
+		if state == STATE_DOWNLOADING:
+			_wax.begin(_crayon_color())
+		elif previous == STATE_DOWNLOADING and state == STATE_INSTALLED:
+			# The one moment in this overlay worth a little noise. The strip hides
+			# itself when the confetti has landed.
+			_wax.celebrate()
+		elif not _wax.is_celebrating():
+			_wax.stop()
+
+	## The crayon this pack gets, picked from the slug so a given book always
+	## downloads in the same colour.
+	func _crayon_color() -> Color:
+		var crayons: Array[Color] = WaxProgress.CRAYON_COLORS
+		if crayons.is_empty():
+			return Color(0.929412, 0.352941, 0.278431)
+		return crayons[absi(get_slug().hash()) % crayons.size()]
 
 	## Blurb, page count and size, in the row's resting state.
 	func _describe() -> String:

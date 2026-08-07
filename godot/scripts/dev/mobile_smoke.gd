@@ -132,6 +132,12 @@ func _run() -> void:
 	_delete_recursive(TEST_ROOT)
 	GameState.set_save_root(TEST_SAVE_ROOT)
 	print("   save root: %s" % ProjectSettings.globalize_path(GameState.get_save_path()))
+	# BL-27: left alone, the splash plays its beat and walks itself to the shelf.
+	# Every check here that boots main.tscn needs the title to STAY until it has
+	# measured it (check e resizes the window under it; check f moves it inside the
+	# safe area), so the auto-start is off and the taps below drive the flow.
+	# shell_smoke's check (a2) is what proves the auto-start still works.
+	TitleScreen.autostart_enabled = false
 
 	_test_book = load(TEST_BOOK_PATH) as BookDef
 	_coyote_book = load(COYOTE_BOOK_PATH) as BookDef
@@ -745,6 +751,8 @@ func _check_portrait() -> void:
 		title.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 		await _settle_layout()
 
+		# BL-27: with the auto-start held off for this harness, the tap is what moves
+		# it on -- in the game the same tap only skips ahead of the opening beat.
 		title.get_tap_button().pressed.emit()
 
 	# --- the shelf (BL-20: the title's tap lands here, with nothing in between) --

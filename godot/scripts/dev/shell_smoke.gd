@@ -43,6 +43,8 @@ extends Control
 ## Exit code is 0 only if every check passes.
 
 const MAIN_SCENE := preload("res://scenes/main.tscn")
+## BL-27's check (a2) puts a splash up on its own, outside main.tscn's flow.
+const TITLE_SCENE := preload("res://scenes/screens/title_screen.tscn")
 const BOOK_PATH := "res://resources/books/test_book/book.tres"
 ## What the save file keys that book by since schema v2 (WP7): its authored
 ## [member BookDef.book_uid], not the path it is loaded from.
@@ -104,6 +106,7 @@ func _run() -> void:
 		return
 
 	await _check_boot_and_navigation()
+	await _check_splash_starts_itself()
 	await _check_paint_and_save()
 	await _check_resume()
 	await _check_manual_save_and_restart()
@@ -158,6 +161,12 @@ func _check_boot_and_navigation() -> void:
 		% ProjectSettings.get_setting("application/run/main_scene", "unset")
 	)
 
+	# BL-27: the splash carries itself to the shelf after its opening beat. This
+	# harness holds it still instead -- otherwise the title would walk off midway
+	# through the assertions below and title.png would catch an animation in flight.
+	# The auto-start is proved on its own, in check (a2).
+	TitleScreen.autostart_enabled = false
+
 	_main = MAIN_SCENE.instantiate() as Main
 	_main.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	# M6: main quits the game itself on a close request so it can drain in-flight
@@ -177,7 +186,8 @@ func _check_boot_and_navigation() -> void:
 	await _settle_layout()
 	await _screenshot("title.png")
 
-	# --- tap to start: BL-20 put the shelf directly behind the title ---------
+	# --- to the shelf: BL-20 put it directly behind the title, BL-27 made the tap
+	# a SKIP rather than a gate -- either way the next thing is the shelf ------
 	title.get_tap_button().pressed.emit()
 	var reached_shelf := await _wait_for_screen(Main.SCREEN_BOOK_SELECT)
 	_expect(reached_shelf,
@@ -225,6 +235,55 @@ func _check_boot_and_navigation() -> void:
 	_expect(coloring != null and coloring.get_page_label_text() == "1/2",
 		"the page label reads 1/2 ('%s')" % (coloring.get_page_label_text() if coloring else "-"))
 	_expect(not _main.get_gear_button().visible, "the gear is hidden while a page is open")
+
+
+# ================================== a2: BL-27, the splash is not a door anymore ==
+# Driven OUTSIDE main.tscn, on a splash of its own: check (a) deliberately holds the
+# real one still (see the autostart_enabled note there), and what has to be proved
+# here is precisely the thing that check turns off.
+
+func _check_splash_starts_itself() -> void:
+	print("\n-- check a2: the splash carries itself to the shelf (BL-27) --")
+	var restore := TitleScreen.autostart_enabled
+	TitleScreen.autostart_enabled = true
+
+	# --- nothing touches it -----------------------------------------------------
+	var splash := TITLE_SCENE.instantiate() as TitleScreen
+	splash.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var asked := [0]
+	splash.start_requested.connect(func() -> void: asked[0] += 1)
+	_host.add_child(splash)
+	_expect(splash.is_intro_playing(), "the splash starts its opening beat by itself")
+	_expect(asked[0] == 0, "...and asks for nothing while it is still playing")
+	var started := await _wait_until(
+		func() -> bool: return asked[0] > 0, TitleScreen.INTRO_SECONDS + 3.0
+	)
+	_expect(started, "start_requested arrived with NOTHING having tapped it")
+	_expect(not splash.is_intro_playing(), "...once the beat was over, not before")
+	_expect(splash.get_crayon_count() == TitleScreen.CRAYON_COUNT,
+		"every crayon landed on the shelf (%d)" % splash.get_crayon_count())
+	splash.get_tap_button().pressed.emit()
+	_expect(asked[0] == 1, "a late tap cannot ask a second time (%d)" % asked[0])
+	_host.remove_child(splash)
+	splash.queue_free()
+
+	# --- a tap during the beat skips to the end ---------------------------------
+	var impatient := TITLE_SCENE.instantiate() as TitleScreen
+	impatient.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var early := [0]
+	impatient.start_requested.connect(func() -> void: early[0] += 1)
+	_host.add_child(impatient)
+	await get_tree().process_frame
+	_expect(impatient.is_intro_playing(), "a second splash is mid-beat")
+	impatient.get_tap_button().pressed.emit()
+	_expect(early[0] == 1, "tapping mid-beat starts immediately (%d)" % early[0])
+	_expect(not impatient.is_intro_playing(),
+		"...by ending the beat rather than racing it to the finish")
+	_host.remove_child(impatient)
+	impatient.queue_free()
+
+	TitleScreen.autostart_enabled = restore
+	await get_tree().process_frame
 
 
 # ================================================ b: paint, leave, save file ==

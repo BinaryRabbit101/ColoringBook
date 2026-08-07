@@ -127,6 +127,40 @@ extends Control
 ## (BL-15's "now painting with" chip lived here between BL-15 and BL-16, which
 ## deleted it: the bigger pick bubble and the louder selected states in the palette
 ## do that job, and the chip was a third opinion nobody was looking at.)
+##
+## [b]Toolbar polish and action feedback (BL-29)[/b] -- presentation only. Nothing
+## in this section touches the painting stack, the save timing, the undo stacks or
+## the confirm overlay's logic; it hangs animations off signals and button presses
+## that were already there.
+##
+## 1. [b]The toolbar is a box of crayons.[/b] [ToolbarStyle] owns the family look --
+##    a fat rounded slab with a darker wax lip and a soft shadow -- and every button
+##    up there is that one shape in a different crayon-box hue. The two controls that
+##    draw their own faces ([PadlockButton], [HistoryButton]) borrow the same plate,
+##    so a drawn glyph and a themed label sit on identical furniture.
+## 2. [b]Every press answers[/b] ([PopFeedback]): the slab squashes under the finger
+##    and springs back on release, through [member Control.scale] about the control's
+##    own centre -- which a [BoxContainer] never touches, so a bouncing button cannot
+##    disturb the row or the touch rectangles the harnesses measure.
+## 3. [b]Save is a little event[/b]: the button pops and a few sparks drift up out of
+##    the "Saved!" toast, which now arrives with a bounce instead of a fade
+##    ([method _play_save_flourish]). It is hung on the TOAST, so every path that
+##    says "Saved!" -- the button, a deferred manual save, an autosave that announces
+##    itself -- gets it, and the silent interval autosave stays silent.
+## 4. [b]Start over gets a fresh sheet[/b] ([FreshSheetWipe]): clean paper sweeps
+##    across the page area with a shadow running ahead of it, flashes white as it
+##    lands and fades to reveal the blank page. It plays from
+##    [method restart_current_page], so the confirm overlay is untouched and the
+##    wipe follows the clear however it was asked for.
+## 5. [b]Undo and redo feel connected to the paint.[/b] The button pops, tips and
+##    throws sparks the instant it is pressed (the button's own job, in
+##    [method HistoryButton.play_press]), and this screen adds a second, smaller
+##    burst on [signal history_applied] -- the moment the stroke has actually gone or
+##    come back, a couple of frames later.
+##
+## All of it is hosted on the [code]Effects[/code] overlay, which is
+## [constant Control.MOUSE_FILTER_IGNORE] and empty except while something is
+## playing; every effect frees itself and nothing in the screen waits on one.
 
 ## The player asked to leave the book. The ONLY way out of a book (BL-11).
 signal back_requested()
@@ -192,6 +226,37 @@ const UNDO_DEPTH := 50
 ## generous for the deepest legal history, and still a bound rather than a hang.
 const MAX_REPLAY_WAIT_FRAMES := 240
 
+# --- BL-29 feedback ---------------------------------------------------------
+# Referenced through preloads rather than by global class name: a new class_name
+# script is invisible to a CLI run until the project is re-imported, and a screen
+# this central must not be the thing that discovers a stale registry.
+const TOOLBAR_STYLE := preload("res://scripts/components/toolbar_style.gd")
+const POP := preload("res://scripts/components/pop_feedback.gd")
+const SPARKLES := preload("res://scripts/components/sparkle_burst.gd")
+const FRESH_SHEET := preload("res://scripts/components/fresh_sheet_wipe.gd")
+
+## Seconds the Start-over sweep takes, end to end.
+const FRESH_SHEET_SECONDS := 0.72
+## Sparks thrown by a save: gold, leaf and paper-white, so they read against both
+## the green toast and the dark toolbar. Typed [Array]s, not [PackedColorArray]s --
+## only the former can be a [code]const[/code].
+const SAVE_SPARKS: Array[Color] = [
+	Color(1.0, 0.870588, 0.376471),
+	Color(0.615686, 0.933333, 0.596078),
+	Color(1.0, 0.996078, 0.945098),
+]
+## Sparks thrown by undo/redo: the history buttons' own teal, plus cream.
+const HISTORY_SPARKS: Array[Color] = [
+	Color(0.427451, 0.909804, 0.941176),
+	Color(1.0, 0.996078, 0.945098),
+]
+## Sparks over a freshly cleared page: paper-white and a little gold.
+const FRESH_SPARKS: Array[Color] = [
+	Color(1.0, 0.996078, 0.949020),
+	Color(1.0, 0.913725, 0.607843),
+	Color(0.850980, 0.945098, 1.0),
+]
+
 @onready var _page_view: PageView = $Ui/Body/PageView
 @onready var _ui: VBoxContainer = $Ui
 ## Page + palette. Vertical in portrait (crayons under the canvas), horizontal in
@@ -209,6 +274,10 @@ const MAX_REPLAY_WAIT_FRAMES := 240
 @onready var _lock_button: PadlockButton = $Ui/Toolbar/Row/LockButton
 @onready var _undo_button: HistoryButton = $Ui/Toolbar/Row/UndoButton
 @onready var _redo_button: HistoryButton = $Ui/Toolbar/Row/RedoButton
+## Where BL-29's transient effects live: a full-rect, input-transparent overlay a
+## [SparkleBurst] or a [FreshSheetWipe] can be parented to. A plain [Control] on
+## purpose -- a container would try to lay the effects out as if they were UI.
+@onready var _effects: Control = $Effects
 @onready var _celebration: Control = $Celebration
 @onready var _celebration_message: Label = $Celebration/Message
 @onready var _confetti: CPUParticles2D = $Celebration/Confetti
@@ -313,6 +382,12 @@ func _ready() -> void:
 	_lock_button.pressed.connect(_on_lock_pressed)
 	_undo_button.pressed.connect(_on_undo_pressed)
 	_redo_button.pressed.connect(_on_redo_pressed)
+	# BL-29: the crayon-slab look and the press bounce, applied to the whole family
+	# in one place. Nothing below this line changes what a button DOES.
+	_style_toolbar()
+	# ...and the second half of the undo/redo answer: the button reacts to the press
+	# itself, this reacts to the stroke having actually gone (or come back).
+	history_applied.connect(_on_history_applied_feedback)
 	# BL-10: a press the lock refused. The page cannot show why; the padlock can.
 	_page_view.paint_blocked.connect(_on_paint_blocked)
 	_page_view.stroke_ended.connect(_on_stroke_ended)
@@ -568,10 +643,19 @@ func _set_nav_enabled(enabled: bool) -> void:
 
 ## Portrait toolbar: five controls do not fit across a 720 px phone, and the page
 ## title is the one that carries no action, so it is what goes.
+##
+## BL-29 gave the buttons a wax lip and a drop shadow, which want a little air
+## around them -- so the row also tightens its gaps when it narrows, rather than
+## letting the extra weight push a control off the end. The controls themselves
+## never shrink: the 48 px touch floor is not negotiable (DESIGN.md 3.5).
 func _apply_toolbar_layout() -> void:
 	if not is_instance_valid(_title_label):
 		return
-	_title_label.visible = size.x >= NARROW_TOOLBAR_WIDTH
+	var narrow := size.x < NARROW_TOOLBAR_WIDTH
+	_title_label.visible = not narrow
+	var row := _title_label.get_parent() as HBoxContainer
+	if row != null:
+		row.add_theme_constant_override("separation", 8 if narrow else 14)
 
 
 ## True when the screen is wider than it is tall. [b]Aspect, not width[/b]
@@ -807,7 +891,7 @@ func save_page_now(manual: bool = false) -> bool:
 		# press, so "Save" is never a no-op the player cannot see.
 		if manual:
 			GameState.save_now()
-			_show_toast("Saved!")
+			_show_toast("Saved!", true)
 			page_saved.emit(GameState.current_page_index, true)
 		return false
 
@@ -823,7 +907,7 @@ func save_page_now(manual: bool = false) -> bool:
 		GameState.save_now()
 		page_saved.emit(page_index, manual)
 	if manual:
-		_show_toast("Saved!" if written else "Nothing to save")
+		_show_toast("Saved!" if written else "Nothing to save", written)
 	return written
 
 
@@ -1136,6 +1220,11 @@ func restart_current_page() -> bool:
 	GameState.erase_page_progress(_book, page_index)
 	_build_coverage()
 	_refresh_nav()
+	# BL-29: the sweep goes over the page AFTER it has been wiped, so what the sheet
+	# uncovers is the real, already-blank page. It is pure decoration -- nothing here
+	# waits for it, and a child who starts colouring mid-sweep paints on the live
+	# page underneath.
+	_play_fresh_sheet()
 	_show_toast("Page cleared")
 	page_restarted.emit(page_index)
 	return true
@@ -1145,7 +1234,12 @@ func restart_current_page() -> bool:
 
 ## A small, short-lived message over the page ("Saved!", "Page cleared"). The
 ## whole of the UI feedback this screen owns -- everything else is the page.
-func _show_toast(text: String) -> void:
+##
+## [param flourish] adds BL-29's save celebration on top: the toast bounces in
+## instead of fading, the Save button pops, and a few sparks drift up. It is opt-in
+## per call site rather than keyed off the text, so "Page locked" stays a plain
+## label and a future message can choose either.
+func _show_toast(text: String, flourish: bool = false) -> void:
 	if not is_instance_valid(_toast):
 		return
 	_toast_label.text = text
@@ -1160,7 +1254,95 @@ func _show_toast(text: String) -> void:
 	_toast_tween.tween_callback(func() -> void:
 		if is_instance_valid(_toast):
 			_toast.visible = false
+			POP.reset(_toast)
 	)
+	if flourish:
+		_play_save_flourish()
+
+
+# ------------------------------------------------------- BL-29: action feedback --
+# Everything from here to the end of the section is presentation. It reads the
+# toolbar and the effects overlay and writes nothing else -- no state, no timing,
+# no gate. Each effect frees itself and nothing waits on one.
+
+## Dresses the toolbar (and the confirm overlay's two buttons) in the crayon-slab
+## family and gives every one of them the press bounce.
+##
+## Hues are assigned by JOB, not by position: leaving is blue, saving is green,
+## the destructive one is crayon red, the two page arrows share violet and the two
+## history arrows share teal -- so a pair always looks like a pair, and the two
+## kinds of arrow are never confused for each other.
+func _style_toolbar() -> void:
+	TOOLBAR_STYLE.apply(_back_button, TOOLBAR_STYLE.BLUE)
+	TOOLBAR_STYLE.apply(_save_button, TOOLBAR_STYLE.GREEN)
+	TOOLBAR_STYLE.apply(_reset_button, TOOLBAR_STYLE.RED)
+	TOOLBAR_STYLE.apply(_prev_button, TOOLBAR_STYLE.VIOLET)
+	TOOLBAR_STYLE.apply(_next_button, TOOLBAR_STYLE.VIOLET)
+	TOOLBAR_STYLE.apply(_reset_confirm_button, TOOLBAR_STYLE.RED)
+	TOOLBAR_STYLE.apply(_reset_cancel_button, TOOLBAR_STYLE.SLATE)
+	# The padlock and the two history arrows dress and bounce themselves -- they
+	# draw their own faces, so the plate is part of their _draw, not a theme.
+	var slabs: Array[Button] = [
+		_back_button, _save_button, _reset_button, _prev_button, _next_button,
+		_reset_confirm_button, _reset_cancel_button,
+	]
+	for button in slabs:
+		POP.attach(button)
+
+
+## The save celebration: the button pops, the toast bounces in, and a handful of
+## sparks drift up out of it. Deliberately small -- this fires as often as every
+## 45 seconds' worth of colouring, and a save that demands attention is a stutter.
+func _play_save_flourish() -> void:
+	if not is_inside_tree() or not is_instance_valid(_effects):
+		return
+	if is_instance_valid(_save_button):
+		POP.pop(_save_button, 0.18, 0.32)
+		SPARKLES.burst(_effects, _effects_point(_save_button), SAVE_SPARKS, 7, 44.0, 34.0, 0.6)
+	if is_instance_valid(_toast):
+		POP.pop_in(_toast, 0.84, 0.34)
+		# From the toast's top edge, so the stars leave the words rather than
+		# crossing them.
+		var from := _effects_point(_toast) - Vector2(0.0, _toast.size.y * 0.35)
+		SPARKLES.burst(_effects, from, SAVE_SPARKS, 9, 66.0, 74.0, 0.85)
+
+
+## A clean sheet of paper sweeping over the page area (BL-29). Called by
+## [method restart_current_page] once the paint is actually gone -- the sheet covers
+## the frame the picture disappeared on and leaves a blank page behind it.
+func _play_fresh_sheet() -> void:
+	if not is_inside_tree() or not is_instance_valid(_effects) or not is_instance_valid(_page_view):
+		return
+	var rect := _page_view.get_global_rect()
+	rect.position -= _effects.get_global_rect().position
+	FRESH_SHEET.play(_effects, rect, FRESH_SHEET_SECONDS)
+	# Added AFTER the sheet, so they draw on top of it (depth is tree order in the
+	# effects overlay) and read as the page being dusted off.
+	SPARKLES.burst(
+		_effects, rect.get_center(), FRESH_SPARKS, 12, 96.0, minf(rect.size.x * 0.3, 220.0), 0.95
+	)
+
+
+## The stroke has actually vanished (or come back). [HistoryButton] already answered
+## the press; this answers the RESULT, a couple of frames later, which is what ties
+## the button to the paint instead of to the finger.
+func _on_history_applied_feedback(undone: bool) -> void:
+	var button: HistoryButton = _undo_button if undone else _redo_button
+	if not is_inside_tree() or not is_instance_valid(button) or not is_instance_valid(_effects):
+		return
+	POP.pop(button, 0.12, 0.26)
+	SPARKLES.burst(_effects, _effects_point(button), HISTORY_SPARKS, 6, 40.0, 32.0, 0.55)
+
+
+## A control's centre, in the effects overlay's coordinates.
+func _effects_point(control: Control) -> Vector2:
+	return control.get_global_rect().get_center() - _effects.get_global_rect().position
+
+
+## The overlay BL-29's effects are parented to. Tests assert it cannot take input;
+## the game only ever adds self-freeing children to it.
+func get_effects_layer() -> Control:
+	return _effects
 
 
 func get_toast_text() -> String:

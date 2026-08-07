@@ -1414,3 +1414,145 @@ AND every update. Implement the update path as a per-file delta:
   database. A fresh database needs the fixture published twice before
   `backend_smoke` check (m) can run; it fails with the two commands in its doc
   comment rather than skipping quietly.
+
+### BL-27: Splash goes straight to the shelf — `done`
+Playtest feedback (2026-08-07): the title screen's "tap anywhere to start" was
+a gate with nothing behind it. The splash now plays a short joyful beat and
+carries the player straight to the bookshelf with no tap required.
+- Done 2026-08-07. The intro is a ~1.95 s beat: paper springs up → the 12
+  title letters pop in one at a time, unwinding a small twist as they land →
+  crayons slide up from below the shelf, centre first, fanning open → the
+  scribble draws itself lane by lane → the hint ("let's color!") fades in →
+  short hold → `start_requested` emits by itself. One ease-out-back curve
+  (overshoot 1.9) drives every pop so the splash moves as one hand. A tap
+  during the beat skips to the finished frame and emits immediately; the
+  signal fires exactly once either way.
+- **Gotcha: the beat is a pure function of time applied per `_process` frame,
+  not tweens** — `_apply_responsive_layout()` rebuilds the lettering when the
+  font size changes (all but guaranteed on the first layout pass), and a tween
+  holding a freed Label is a crash. Scale/rotation on container-managed nodes
+  are written with `set_deferred` because `fit_child_in_rect` resets both.
+- Harness hook: static `TitleScreen.autostart_enabled` (a static because the
+  harness must decide before `Main._ready()` instantiates the title);
+  shell/mobile/backend smokes set it false. New shell_smoke check (a2) proves
+  an untouched splash emits on its own, only after the beat, exactly once.
+- New API: `skip_intro()`, `is_intro_playing()`; `get_tap_button()` etc.
+  unchanged. Signal-up architecture untouched — main still just listens.
+
+### BL-28: The bookshelf should look like a bookshelf — `done`
+Playtest feedback (2026-08-07): the shelf was a grid of dark cards on a flat
+colour; the cells read as UI cards, not books. Both halves rebuilt,
+primitive-drawn (no PNG art):
+- Done 2026-08-07. **The room** (`shelf_backdrop.gd`, new): warm gradient wall
+  (#FBE5C2→#EEB78A), light pool, seeded pastel wallpaper dots (deterministic —
+  screenshots stay stable), skirting board, plank floor with seams and sheen,
+  warm vignette. The header became a cream sign panel. **The bookcase**
+  (`shelf_boards.gd`, new): a carcass drawn behind the grid — back panel with
+  grain, one lit plank per grid row at the row's exact bottom edge, contact
+  shadows under each book, top rail, plinth, end uprights. The case stands on
+  the floor (SHRINK_END) instead of floating. **The books** (`book_cell.gd`):
+  styleboxes emptied (the Button is input-surface only); an inner BookArt
+  draws stacked page edges 9 px proud of the open side, a rounded cover, a
+  21 px spine with hinge crease and binding ribs, gloss, and silhouette
+  outline. Cover colour = `book.get_uid().hash()` into an 8-colour table —
+  deterministic, no authoring step. Hover tips the book out (−9 px, ±2.2°,
+  ×1.035); press pushes it in.
+- **The boards follow the layout; they are not the layout.** `ShelfBoards` is
+  the grid's sibling in a shared `MarginContainer`, reads cell rects back
+  after every `sort_children`, draws one plank per row — column count, book
+  count and window size need no plumbing. With no rows it draws two bare
+  shelves so "no books yet" still shows furniture.
+- **Gotcha: the hover lift lives on an inner Body child** — tweening the cell
+  itself would move `size`/`global_position` and break harness measurements;
+  hover sets `z_index`, never `move_to_front` (which changes the grid slot).
+- **Gotcha: `_relayout_columns` must subtract the carcass frame (−48)** or a
+  1264 px viewport fits 5 columns exactly and the frame has nowhere to go.
+- Public API, `MAX_COLUMNS`, `CELL_*`, empty-shelf strings all unchanged.
+
+### BL-29: Page toolbar polish + action feedback — `done`
+Playtest feedback (2026-08-07): the top-of-page buttons were plain and the big
+verbs (save, start over, undo/redo) gave no ceremony.
+- Done 2026-08-07. **`ToolbarStyle` (new) is the family, not a theme**: one
+  slab shape (20 px corners, 5 px darker wax lip, drop shadow) in crayon-box
+  hues assigned by job — Back blue, Save green, Start over red, page arrows
+  violet, history arrows teal, padlock slate/amber by lock state. Drawn-glyph
+  buttons (padlock, history) borrow the identical plate via `plate()`.
+  **`PopFeedback` (new)**: every toolbar button squashes 0.94 on press and
+  springs back BACK-eased; drives only scale/rotation about the centre, so
+  container layout and `get_global_rect()` assertions are untouched.
+  **Save flourish**: button pops, sparks fly (`SparkleBurst`, new), the
+  "Saved!" toast bounces in with stars — flourish is opt-in per call site, so
+  "Page locked"/"Saving…" and the silent interval autosave stay plain.
+  **Start over**: `FreshSheetWipe` (new) — clean paper slides in from the
+  left with a shadow band and bright rim, blooms as it lands, fades to reveal
+  the blank page; plays from `restart_current_page()` after the clear, so any
+  path that clears a page gets the fresh sheet and the confirm overlay logic
+  is untouched. **Undo/redo**: `HistoryButton.play_press()` pops, tips in the
+  arrow's direction, and sheds three sparks in-`_draw` at the moment
+  `history_applied` says the paint actually changed; a disabled button never
+  animates.
+- Depth is tree order, not `z_index`: the new full-rect `Effects` layer sits
+  after `Celebration` and before `PageFlip` — over the toolbar, under the
+  flip and confirm overlay for free.
+- **Gotchas**: pressed styleboxes must keep identical content margins (a
+  margin change on press re-lays out the row under the finger);
+  `PackedColorArray(...)` is not a constant expression but
+  `const X: Array[Color]` is; a script can't reference its own `class_name`
+  in a static when the global class cache is stale — self-`preload` const
+  instead, and every cross-file reference to the new classes preloads.
+- Mechanics boundary held: PageView / paint_canvas / coverage_tracker /
+  stroke lifecycle / save timing / undo stacks untouched; all effects are
+  `MOUSE_FILTER_IGNORE` and self-freeing.
+
+### BL-30: Opening a book, and a richer page flip — `done`
+Playtest feedback (2026-08-07): the shelf→page swap was instant, and the BL-4
+curl was visually plain.
+- Done 2026-08-07. **Opening/closing** is a `main.gd`-owned overlay
+  (`BookOpenTransition` inner class, primitives only): the book dips
+  (BACK/EASE_IN anticipation) and flies to fill the screen in 0.24 s, the
+  screen swap happens behind it, the cover swings open on its spine over
+  0.34 s — vertical pinch fakes the rotation, a gradient shades the turning
+  face, a shadow travels ahead, a white page spread fades into the real page
+  (~0.6 s total). Leaving a book is the mirror (`Transition.BOOK_CLOSE`); the
+  cover carries a three-stroke crayon doodle in live palette colours
+  (injected, not read off the autoload). Deliberately a *generic* book — main
+  is handed a `BookDef`, never a cell's rectangle, so no shelf coupling.
+  `_show_screen()` is now `(scene, id, transition, setup)` — setup moved last
+  to keep the multi-line lambda parseable.
+- **The flip polish rode entirely on shader uniforms that already existed**
+  (`page_curl.gdshader` untouched): curl_radius swells 0.055→0.135 with the
+  lift, fold_tilt leans 0.17→0.05 (the straight sweep becomes an arc),
+  shadow deepens and softens with stand-off, back_bleed rises. The settle is
+  a code-built `SettleShade` child in the last 16% of the duration — a damped
+  `(1-t)·|cos(1.5πt)|` drop-bounce shadow — carved out of the existing
+  duration, so a flip still takes exactly `duration` and `flip_finished`
+  timing is unchanged. Progress-0 stays pixel-exact pass-through.
+
+### BL-31: Downloads should be fun to watch — `done`
+Playtest feedback (2026-08-07): a pack download in "More books" was a bare
+ProgressBar.
+- Done 2026-08-07. **`wax_progress.gd` (new)**: a self-contained strip drawn
+  from primitives — a wax ribbon fills from the left with sine-wobbled edges
+  (stationary in space, so laid wax sits still) and grain streaks, a 34 px
+  crayon rides the head, scribble-bobbing and shedding up to 12 wax crumbs as
+  bytes arrive, a dashed guide line marks the not-yet-coloured remainder.
+  Unknown total = a fixed-length smear sliding back and forth
+  (smoothstep-eased turnarounds). Completion: the stroke snaps full, a
+  5-point star pops at the finish line, the crayon hops off, 18 confetti bits
+  burst, the strip fades (1.2 s). Per-pack colour = slug hash into the
+  palette, stable across sessions.
+- **The strip is a second rendering of the bytes, never a second source of
+  truth**: `get_progress_ratio()` returns the value `set_downloading`
+  computed, synchronously; only the drawn head eases (`1-exp(-9·dt)`).
+  backend_smoke gained 9 assertions incl. "10 frames of easing don't move the
+  ratio". The animation hangs off `_set_state` by one added call knowing
+  three transitions (begin / celebrate / stop) — deleting the strip and
+  restoring the ProgressBar would be a purely local edit.
+- **Gotchas**: no `class_name` on the new script on purpose (the global class
+  cache only regenerates in the editor; `PackShop` preloads it into a const,
+  which resolves as a type hint from the inner `PackRow` too). Confetti must
+  burst from the finish line, not the eased head (the last chunk lands while
+  the stroke is still catching up). `--check-only --script` can't validate
+  anything touching an autoload — use a throwaway scene in project mode.
+- The row grows 14→48 px while downloading (intentional — draws the eye),
+  and the strip hides itself once the confetti lands.

@@ -9,10 +9,21 @@ extends Button
 ## is emptied in [method _init] so this script owns the whole look, hover and
 ## pressed tint included.
 ##
+## [b]BL-29 put it in the toolbar's uniform.[/b] The backplate is now
+## [method ToolbarStyle.plate] like every other control up there -- same corner
+## radius, same wax lip, same shadow -- and the two states are told apart by HUE
+## rather than by a slightly different grey: an open page wears warm slate with a
+## cream padlock, a locked one wears crayon amber with a dark brown padlock, which
+## is legible from across a room and does not depend on reading the shackle. The
+## button also pops when it is pressed, so the toggle answers before the toast does.
+##
 ## [b]Contract[/b]: the parent sets [member locked] and listens to the inherited
 ## [signal BaseButton.pressed]; the button decides nothing. [method wiggle] is the
 ## "you tapped a locked page" feedback -- a short shake, never a dialog, because a
 ## four-year-old cannot read one and the web export has no modals worth using.
+
+const POP := preload("res://scripts/components/pop_feedback.gd")
+const STYLE := preload("res://scripts/components/toolbar_style.gd")
 
 ## Minimum size, comfortably over the 48 px touch floor (DESIGN.md 3.5) and
 ## matching the toolbar's other icon-sized controls.
@@ -22,11 +33,18 @@ const WIGGLE_ANGLE := 0.12
 ## Seconds one whole shake takes.
 const WIGGLE_SECONDS := 0.34
 
-const LOCKED_BODY := Color(0.972549, 0.803922, 0.478431)
-const OPEN_BODY := Color(0.552941, 0.529412, 0.494118)
-const LOCKED_BODY_HOVER := Color(1.0, 0.882353, 0.639216)
-const OPEN_BODY_HOVER := Color(0.72549, 0.694118, 0.647059)
-const KEYHOLE := Color(0.184314, 0.156863, 0.129412)
+## The two plates. Amber shouts "this page is protected"; slate is the toolbar's
+## quiet neutral, the same one "Keep colouring" wears.
+const LOCKED_PLATE := Color(0.949020, 0.705882, 0.258824)
+const OPEN_PLATE := Color(0.352941, 0.309804, 0.278431)
+## The padlock itself, drawn dark on the amber plate and cream on the slate one so
+## it keeps its contrast in both states.
+const LOCKED_BODY := Color(0.286275, 0.192157, 0.086275)
+const OPEN_BODY := Color(0.972549, 0.949020, 0.905882)
+const LOCKED_BODY_HOVER := Color(0.180392, 0.117647, 0.047059)
+const OPEN_BODY_HOVER := Color(1.0, 1.0, 0.984314)
+const KEYHOLE_ON_AMBER := Color(0.949020, 0.780392, 0.435294)
+const KEYHOLE_ON_SLATE := Color(0.184314, 0.156863, 0.129412)
 
 ## Whether the page this button guards is locked. Purely presentational here --
 ## the parent owns the state and persists it.
@@ -41,9 +59,6 @@ const KEYHOLE := Color(0.184314, 0.156863, 0.129412)
 		queue_redraw()
 
 var _wiggle_tween: Tween
-## The backplate, drawn by hand so it can change colour with the lock while the
-## rest of the toolbar keeps its authored 12 px corners.
-var _plate := StyleBoxFlat.new()
 
 
 func _init() -> void:
@@ -53,7 +68,6 @@ func _init() -> void:
 	# The script draws every state, so the theme must not draw one underneath it.
 	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
 		add_theme_stylebox_override(state, StyleBoxEmpty.new())
-	_plate.set_corner_radius_all(12)
 
 
 func _ready() -> void:
@@ -63,6 +77,8 @@ func _ready() -> void:
 	button_up.connect(queue_redraw)
 	resized.connect(_recenter_pivot)
 	_recenter_pivot()
+	POP.attach(self)
+	pressed.connect(func() -> void: POP.pop(self, 0.16, 0.28))
 
 
 func _recenter_pivot() -> void:
@@ -102,14 +118,11 @@ func _draw() -> void:
 	)
 	var tint := _body_color()
 	if disabled:
-		tint = tint.darkened(0.45)
+		tint = tint.lerp(STYLE.DISABLED_BG, 0.6)
 
-	# Backplate, so the padlock reads as a button of the same family as the rest of
-	# the toolbar rather than a floating glyph.
-	_plate.bg_color = (
-		Color(0.34902, 0.290196, 0.180392) if locked else Color(0.219608, 0.203922, 0.192157)
-	)
-	_plate.draw(get_canvas_item(), Rect2(Vector2.ZERO, size))
+	# Backplate, from the toolbar's own family so the padlock reads as a button of
+	# the same box of crayons rather than a floating glyph.
+	_plate().draw(get_canvas_item(), Rect2(Vector2.ZERO, size))
 
 	# Shackle: a half-arc over the body, swung open when the page is unlocked.
 	var shackle_radius := body_size.x * 0.34
@@ -138,14 +151,35 @@ func _draw() -> void:
 		)
 
 	draw_rect(body, tint, true)
-	draw_circle(Vector2(body.get_center().x, body.get_center().y - body_size.y * 0.06), unit * 0.055, KEYHOLE)
+	var keyhole := KEYHOLE_ON_AMBER if locked else KEYHOLE_ON_SLATE
+	if disabled:
+		keyhole = keyhole.lerp(STYLE.DISABLED_BG, 0.6)
+	draw_circle(
+		Vector2(body.get_center().x, body.get_center().y - body_size.y * 0.06),
+		unit * 0.055,
+		keyhole
+	)
 	draw_rect(
 		Rect2(
 			Vector2(body.get_center().x - unit * 0.022, body.get_center().y - body_size.y * 0.04),
 			Vector2(unit * 0.044, body_size.y * 0.3)
 		),
-		KEYHOLE, true
+		keyhole, true
 	)
+
+
+## The slab under the padlock, built for the state being drawn. Cheap enough to
+## make on demand: this button redraws on a state CHANGE (hover, press, lock,
+## resize), never per frame.
+func _plate() -> StyleBoxFlat:
+	if disabled:
+		return STYLE.disabled_plate()
+	var base := LOCKED_PLATE if locked else OPEN_PLATE
+	if button_pressed:
+		return STYLE.pressed_plate(base)
+	if is_hovered():
+		return STYLE.plate(base.lightened(0.14))
+	return STYLE.plate(base)
 
 
 func _body_color() -> Color:

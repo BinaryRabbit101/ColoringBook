@@ -49,63 +49,6 @@ DLC_SERVER.md §11 currently has none).
 - Decision needed before paint/progress sync ships to a real household.
 
 
-### BL-27: Splash goes straight to the shelf — `open`
-Playtest feedback (2026-08-07): the title screen's "tap anywhere to start" is a
-gate with nothing behind it — the tap adds a step, not a choice. When the app
-has finished loading, the splash should play a short, joyful beat (crayons
-settling, title flourish) and then carry the player straight to the bookshelf
-with no tap required. The title screen keeps its role as the loading face of
-the app; it loses its job as a door.
-- Affected: `scripts/main.gd` (screen flow), `scripts/screens/title_screen.gd`,
-  `scenes/screens/title_screen.tscn`
-
-### BL-28: The bookshelf should look like a bookshelf — `open`
-Playtest feedback (2026-08-07), two halves of one picture:
-1. **The room.** The shelf screen is a grid of cards floating on a flat solid
-   colour. It should feel like a cosy corner of a playroom — warm background,
-   visible shelves the books stand ON, colour and depth instead of flatness.
-2. **The books.** Each `BookCell` is a rounded card. It should read as an
-   actual coloring book: a cover with a visible spine, a hint of stacked page
-   edges down the open side, sitting on the shelf — not a UI card.
-Both stay primitive-drawn (no PNG art) per the existing component style.
-- Affected: `scripts/screens/book_select.gd`, `scenes/screens/book_select.tscn`,
-  `scripts/components/book_cell.gd`
-
-### BL-29: Page toolbar polish + action feedback — `open`
-Playtest feedback (2026-08-07): the buttons across the top of a coloring page
-are plain, and the big verbs give no ceremony:
-1. **Toolbar look.** The top-of-page buttons (back, prev/next, save, start
-   over, undo/redo, padlock) should be fun and colorful — crayon-adjacent
-   styling consistent with the palette, still touch-sized (DESIGN.md 3.5).
-2. **Save** should answer with a small delightful animation, not just the
-   "Saved!" text.
-3. **Start over** should feel like a fresh page — e.g. a wipe/sweep as the
-   paint clears.
-4. **Undo / redo** should visibly respond on press (pop, wiggle, brief sparkle
-   as the stroke vanishes/returns), so the buttons feel connected to the paint.
-- Affected: `scripts/screens/coloring_page.gd`,
-  `scenes/screens/coloring_page.tscn`, `scripts/components/history_button.gd`,
-  `scripts/components/padlock_button.gd`
-
-### BL-30: Opening a book, and a richer page flip — `open`
-Playtest feedback (2026-08-07):
-1. **Opening.** Tapping a book on the shelf currently hard-swaps to the
-   coloring screen. It should feel like opening a book — a cover-opening /
-   zoom-toward-the-book transition between shelf and page.
-2. **Flipping.** The BL-4 page-curl works but is visually plain; give the curl
-   more life (paper shading, a settling bounce, maybe a soft page-turn arc)
-   while keeping its role — the flip is the reward for finishing a page.
-- Affected: `scripts/main.gd` (screen swap), `scripts/components/page_flip.gd`
-  (visuals only — the flip's API and its trigger in `coloring_page.gd` stay)
-
-### BL-31: Downloads should be fun to watch — `open`
-Playtest feedback (2026-08-07): downloading a book pack in "More books" is a
-bare progress bar. A child (or grown-up) waiting on a download should get
-something playful — e.g. a crayon filling the bar with a wax stroke, a little
-book assembling page by page, colors marching. Keep the real progress data
-(bytes, ratio) driving the animation; keep the existing error/status text.
-- Affected: `scripts/components/pack_shop.gd` (PackRow visuals)
-
 ### BL-32: Web build — HTTPRequest hangs on Chromium/Edge 151 — `open`
 Found 2026-08-07 during the BL-25/BL-26 live verification. On Edge 151
 (Chromium), **every** Godot `HTTPRequest` in the web build hangs after the
@@ -166,3 +109,8 @@ Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md
 - **BL-24** — Web authoring: book/page CRUD + server-side mapping + one-button publish
 - **BL-25** — All books served by the server; release builds ship none
 - **BL-26** — Client-side delta pack updates (fetch only changed files, zip fallback)
+- **BL-27** — Splash auto-advances to the shelf (animated beat, tap = skip)
+- **BL-28** — Bookshelf makeover: playroom wall + planks; cells drawn as real books
+- **BL-29** — Toolbar crayon styling + save/start-over/undo-redo feedback
+- **BL-30** — Book-open/close transition; richer page-curl (arc, shading, settle)
+- **BL-31** — Crayon wax-stroke download animation in the pack shop

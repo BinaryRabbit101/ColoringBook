@@ -107,6 +107,11 @@ func _run() -> void:
 	print("   DLC root:   %s" % ProjectSettings.globalize_path(TEST_DLC_ROOT))
 	print("   auth.json:  %s" % ProjectSettings.globalize_path(TEST_AUTH_PATH))
 
+	# BL-27: check (l) boots main.tscn and then holds the title still while it walks
+	# the account route. Left alone the splash would carry itself to the shelf
+	# mid-check; shell_smoke's check (a2) is where that behaviour is proved.
+	TitleScreen.autostart_enabled = false
+
 	_check_pure_logic()
 	await _check_inert_without_account()
 	await _check_auth()
@@ -942,6 +947,49 @@ func _check_ui() -> void:
 		new_row.set_downloading(1250000, 2500000)
 		_expect(absf(new_row.get_progress_ratio() - 0.5) < 0.01,
 			"...and the bar tracks real bytes (%.2f)" % new_row.get_progress_ratio())
+
+		# --- BL-31: the crayon strip is a SECOND rendering of those bytes ------
+		# It may lag them by a few frames on purpose (the drawn head eases), so
+		# what is asserted here is that it never becomes the source of truth.
+		var strip := new_row.get_progress_strip()
+		_expect(strip.visible and not strip.is_indeterminate(),
+			"...drawn by a crayon strip that knows the size")
+		for i in 10:
+			await get_tree().process_frame
+		_expect(absf(new_row.get_progress_ratio() - 0.5) < 0.01,
+			"...whose easing never moves the reported ratio (%.2f)"
+			% new_row.get_progress_ratio())
+		_expect("Downloading" in new_row.get_detail_text(),
+			"...nor the byte label ('%s')" % new_row.get_detail_text())
+
+		new_row.set_downloading(4096, -1)
+		_expect(absf(new_row.get_progress_ratio() - 0.0016) < 0.001,
+			"a total of -1 falls back to the catalogue size (%.4f)"
+			% new_row.get_progress_ratio())
+		var sizeless := PackShop.PackRow.new({"slug": "sizeless", "title": "No size"})
+		add_child(sizeless)
+		sizeless.set_downloading(4096, 0)
+		_expect(sizeless.get_progress_ratio() == 0.0,
+			"a pack with NO known size still reports 0.0, exactly as the bar did (%.2f)"
+			% sizeless.get_progress_ratio())
+		_expect(sizeless.get_progress_strip().is_indeterminate(),
+			"...and its strip scribbles instead of claiming a percentage")
+		remove_child(sizeless)
+		sizeless.queue_free()
+
+		# --- BL-31: the finish ------------------------------------------------
+		new_row.set_installed_version(1)
+		_expect(new_row.get_state() == PackShop.PackRow.STATE_INSTALLED
+				and strip.is_celebrating(),
+			"a finished install gets a little celebration (%s)" % new_row.get_state())
+		var waited := 0
+		while strip.is_celebrating() and waited < 600:
+			await get_tree().process_frame
+			waited += 1
+		_expect(not strip.is_celebrating() and not strip.visible,
+			"...which packs itself away again after %d frames" % waited)
+		_expect(new_row.get_detail_text() != "" and "Downloading" not in new_row.get_detail_text(),
+			"...leaving the row's resting description ('%s')" % new_row.get_detail_text())
 
 	_expect(PackShop.PackRow.format_bytes(950022) == "928 KB",
 		"sizes are human-readable (%s)" % PackShop.PackRow.format_bytes(950022))

@@ -22,6 +22,14 @@ extends Control
 ##
 ## Signals up: [signal book_chosen]. The parent decides what happens next (M5's
 ## [code]main.tscn[/code] swaps in the coloring screen); this screen never does.
+##
+## [b]BL-28 gave it a room and a bookcase[/b] without moving a single book. The
+## grid is still the layout: [ShelfBackdrop] paints the wall, the light, the floor
+## and the vignette behind everything, and [ShelfBoards] -- the grid's SIBLING
+## inside [code]Bookcase[/code], so both get the same rect -- reads the cells back
+## out of the grid after every sort and draws a wooden plank under each ROW, plus
+## the carcass around them. Nothing here decides how many shelves there are; the
+## column maths does, exactly as before, and the furniture follows.
 
 ## The player picked a book.
 signal book_chosen(book: BookDef)
@@ -33,6 +41,13 @@ const CELL_SEPARATION := 24
 ## Never more than this many across, however wide the window -- a wall of tiny
 ## columns is worse than a comfortable grid.
 const MAX_COLUMNS := 5
+## Width the bookcase's own carcass eats on each side (BL-28). Subtracted from the
+## space the columns are fitted into, so adding furniture around the grid can never
+## push a book off the edge of a narrow screen.
+const SHELF_FRAME_SIDE := ShelfBoards.SIDE_PAD
+## Width an EMPTY bookcase asks for -- min, max -- so "no books yet" still shows a
+## piece of furniture rather than a hole. Clamped to what the screen can give.
+const EMPTY_CASE_WIDTH_RANGE := Vector2(240.0, 520.0)
 
 ## The empty shelf, with a server in the build: the normal state of a fresh install
 ## since BL-25, and the reason this string points at something to press. "More
@@ -43,7 +58,9 @@ const EMPTY_WITH_SHOP := "No coloring books yet.\nA grown-up can tap “More boo
 ## show what it was given. Nothing to press, so nothing is promised.
 const EMPTY_WITHOUT_SHOP := "No coloring books yet."
 
-@onready var _grid: GridContainer = $Margin/Body/Scroll/Row/Shelf
+@onready var _bookcase: MarginContainer = $Margin/Body/Scroll/Row/Bookcase
+@onready var _boards: ShelfBoards = $Margin/Body/Scroll/Row/Bookcase/Boards
+@onready var _grid: GridContainer = $Margin/Body/Scroll/Row/Bookcase/Shelf
 @onready var _empty_label: Label = $Margin/Body/EmptyLabel
 
 var _cells: Array[BookCell] = []
@@ -51,8 +68,22 @@ var _cells: Array[BookCell] = []
 
 func _ready() -> void:
 	_empty_label.visible = false
+	_fit_bookcase_frame()
+	_boards.set_grid(_grid)
 	resized.connect(_relayout_columns)
 	_relayout_columns()
+
+
+## The [code]Bookcase[/code] margins ARE the space [ShelfBoards] draws its carcass
+## into -- it deliberately paints outside its own rect (Godot does not clip
+## [method CanvasItem._draw] to a control's box). Taking the numbers from the
+## drawing's own constants rather than trusting the ones saved in the scene keeps
+## the two from drifting apart.
+func _fit_bookcase_frame() -> void:
+	_bookcase.add_theme_constant_override("margin_left", int(ShelfBoards.SIDE_PAD))
+	_bookcase.add_theme_constant_override("margin_right", int(ShelfBoards.SIDE_PAD))
+	_bookcase.add_theme_constant_override("margin_top", int(ShelfBoards.TOP_PAD))
+	_bookcase.add_theme_constant_override("margin_bottom", int(ShelfBoards.BOTTOM_PAD))
 
 
 # ====================================================================== data ==
@@ -101,10 +132,28 @@ func get_book_count() -> int:
 func _relayout_columns() -> void:
 	if not is_instance_valid(_grid):
 		return
-	var available := size.x - 48.0  # the Margin container's left+right margins
+	# The Margin container's left+right margins, then the bookcase's own carcass:
+	# the books get what is left over.
+	var available := size.x - 48.0 - SHELF_FRAME_SIDE * 2.0
 	var per_cell := CELL_WIDTH + float(CELL_SEPARATION)
 	var fit := int(floor((available + float(CELL_SEPARATION)) / per_cell))
 	_grid.columns = clampi(mini(fit, MAX_COLUMNS), 1, MAX_COLUMNS)
+	_size_empty_case(available)
+
+
+## An empty shelf has no cells to size the bookcase, so the drawing is given a
+## minimum box of its own -- two bare planks' worth, no wider than the screen can
+## hold. Zero once there are books: the grid sizes the case from then on.
+func _size_empty_case(available: float) -> void:
+	if not is_instance_valid(_boards):
+		return
+	if not _cells.is_empty():
+		_boards.custom_minimum_size = Vector2.ZERO
+		return
+	_boards.custom_minimum_size = Vector2(
+		clampf(available, EMPTY_CASE_WIDTH_RANGE.x, EMPTY_CASE_WIDTH_RANGE.y),
+		ShelfBoards.empty_min_size().y
+	)
 
 
 func _clear() -> void:
