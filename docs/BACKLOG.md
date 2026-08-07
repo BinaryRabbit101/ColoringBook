@@ -781,3 +781,32 @@ DLC_SERVER.md §11 currently has none).
   path), `scripts/backend/sync_queue.gd` (fingerprint/revision reset on local
   erase), docs/DLC_SERVER.md §6.3/§11
 - Decision needed before paint/progress sync ships to a real household.
+
+### BL-19: DLC pack download stalls on the web build — `open`
+Found 2026-08-06 during the live end-to-end on http://192.168.0.164:91/ (the
+first run with the API reachable from a browser). Tapping Get → "Yes,
+download" fetches `/packs/{slug}/manifest` (200, and the free entitlement
+auto-grants) but the `/download` request is never issued — the row sits at
+"Downloading… — of 928 KB" forever, no console error, nothing in nginx.
+The identical install path is green natively (`backend_smoke` check e), so it
+is web-export-specific. Prime suspect: the deliberate `max_redirects = 0`
+"read the 302's `Location` header ourselves" step (WP10 — done so the bearer
+token is never forwarded to the signed URL). Browser `fetch()` does not expose
+redirect responses to the caller: on web, Godot's `HTTPRequest` gets an opaque
+or auto-followed response, so `location` is empty and the installer waits on a
+URL it never received. Likely fix: on the web platform let the request follow
+the redirect (same-origin signed URL carries no auth header anyway, and the
+token is stripped by the server's 302 hop — verify), or have the API return
+the signed URL in a JSON body for web clients. Note the paint-layer pull in
+`sync_queue.gd` uses the same `max_redirects = 0` pattern and almost
+certainly stalls the same way on web — fix both.
+Also worth folding in from the same session: `sync_smoke` needs its scratch
+password to satisfy production `Password::defaults()` (mixed case) before it
+can ever run against the live server, and its two pre-existing check-(k)
+failures (`BUSY` vs `NETWORK_UNREACHABLE`) plus the Vulkan-driver
+`HTTPRequest` CONNECTION_ERROR quirk are documented in the 2026-08-06 session
+notes.
+- Affected: `scripts/backend/pack_installer.gd`, `scripts/backend/sync_queue.gd`
+  (paint pull), possibly `api_client.gd` (a follow-redirects-on-web branch),
+  `scripts/dev/sync_smoke.gd`
+- Blocks: installing DLC from the web build (native installs work).
