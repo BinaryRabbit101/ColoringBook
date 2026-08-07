@@ -1556,3 +1556,102 @@ ProgressBar.
   anything touching an autoload — use a throwaway scene in project mode.
 - The row grows 14→48 px while downloading (intentional — draws the eye),
   and the strip hides itself once the confetti lands.
+
+### BL-35: Crayon sets round 2 — same lineup, escalating finishes — `done`
+Playtest feedback (2026-08-07): the default box is right; the five authored sets
+(Pastel/Neon/Earth/Candy/Spooky) read as washed out, dull or dark — "more colour
+options", not more fun. New vision: **every box carries the SAME crayon lineup;
+what changes is the FINISH**, and each box stands out more than the one before.
+- Done 2026-08-07, **phase 1 = bakeable finishes only** (animated ones are BL-38).
+- **The ladder shipped**: box 0 `classic` **Classic wax** — the default
+  `PaletteDef` box, today's look, arithmetically untouched → `neon_glow.tres`
+  `glow` **Neon Glow** (the dab is lit ink, brightened and lifted toward white,
+  inside a soft bloom on a 2.1× quad) → `textured_wax.tres` `grain` **Textured
+  Wax** (stretched crayon-grain streaks at the stroke's own angle, plus a fine
+  paper tooth) → `glitter.tres` `glitter` **Glitter**, the loudest (grain, plus a
+  hue drifting in slow rainbow bands across the page, plus white specks of
+  glitter on a jittered 21 px page grid). Three authored sets replace five.
+- **Why the sets author no colours.** `CrayonSetDef.colors` empty now means "the
+  palette's own lineup" (`PaletteDef.get_crayon_set_colors()` resolves it), and
+  every shipped box leaves it empty. A lineup copied into five files is a lineup
+  that drifts; making the sharing structural is also what makes the smoke check
+  ("every box offers the default lineup") impossible to fake.
+- **The rule amendment, and its exact width.** `CrayonSetDef` gained ONE field,
+  `effect: StringName`. BL-23's "colours and nothing else" existed to stop a box
+  becoming a difficulty mode, and that line is unmoved: brush diameter, hardness
+  and the completion threshold are still forbidden on a set and still live on
+  `PaletteDef` — the palette smoke still asserts the banned property names are
+  absent. A finish is how the paint LOOKS, never how the game PLAYS.
+- **How the finish reaches the shader.** New palette signal
+  `brush_effect_picked(effect: StringName)` — `color_picked` still carries one
+  resolved `Color` and nothing else reaches the paint path through it, and the
+  paint path never reaches into palette internals. `ColoringPage` wires it to
+  `PageView.brush_effect` in one line beside the other two. `set_palette()`
+  primes it (size → finish → colour), `set_crayon_set()` emits it once before the
+  colour; picking a crayon or a rung inside a box emits nothing, because the wax
+  did not change.
+- **`BrushFinish`** (`scripts/components/brush_finish.gd`, RefCounted, static):
+  the one table of ids → { shader mode, quad_scale, strength, display name,
+  animated }. `resolve()` turns an authored typo into classic wax rather than
+  into nothing; `LADDER` is the escalation order; `is_animated()` is the seam
+  phase 2 arrives through (false for everything today); `seed_for(page_position)`
+  is the per-stroke seed, an FNV-1a mix of the press pixel so it is decided
+  before the first dab and can be written straight into the recipe.
+- **The shader**: four new batch uniforms (`effect_mode`, `quad_scale`,
+  `effect_strength`, `effect_seed`) and one branch per finish in
+  `brush.gdshader`. `PaintCanvas` batches on the effect dict and draws the quad
+  at `radius * quad_scale`; the shader divides `quad_scale` back out, so a dab
+  radius means the same thing at every scale and only a spilling finish gets the
+  extra room. **Classic is the untouched path** — `quad_scale` 1.0 makes the new
+  arithmetic identical to the old, which is why the pre-existing 47 paint checks
+  went green unchanged.
+- **THE gotcha: an effect must be a function of PAGE POSITION, not of the dab.**
+  Stamp spacing is 0.25 × radius, so a stroke overlaps its own dabs by ~87% and
+  every pixel is painted ~8 times. An alpha-modulated grain fills itself in
+  (1 − 0.5⁸ ≈ 1.0) and a per-dab gradient is simply overwritten by the next dab —
+  the first glow attempt put a hot core inside each dab and only the LAST dab of
+  each stroke kept one. A field sampled in page space is idempotent under the
+  overlap: the eighth dab computes exactly what the first did. It is also what
+  makes replay pixel-exact, since it does not depend on dab order. Corollaries
+  actually shipped: the grain's grooves are a COLOUR, not an alpha hole; the glow
+  halo is the SAME lit colour as the core (a darker halo landing on an earlier
+  dab's core scalloped the stroke into a chain of rings). The one thing this
+  costs: the grain's ANGLE is per stroke (from the seed), not per drag segment —
+  a per-segment angle would need a recipe of segments, and a rebuild already
+  spends one frame per batch.
+- **Region clipping is unchanged and still owns every finish.** The glow halo is
+  extra quad, not extra compositing: it is discarded fragment by fragment against
+  the locked region's id like everything else. The paint smoke stamps each finish
+  30 px from a real boundary — inside the glow's 59 px reach — and asserts zero
+  pixels in the neighbour region.
+- **BL-17 recipes carry the finish AND its seed** (`effect`, `effect_seed`), so
+  `rebuild_paint()` re-stamps the same grain and the same glitter.
+  `stamp_recipe()` reads them from the recipe, never from the live brush, so
+  undoing after cycling boxes still replays each stroke in its own wax. A recipe
+  with neither key (one recorded before BL-35, or by a geometry-only test)
+  replays as classic wax.
+- **Crayon previews**: `CrayonButton.finish` draws the box's finish — bloom plus a
+  lit tip for glow, slanted wax flecks for grain, four-point sparkles for glitter
+  — from the same primitives, in the same **canonical space**, so the landscape
+  column gets them rotated for free (BL-21's rule: never fork the drawing code).
+  Every rung of the intensity ladder wears the box's finish too.
+- **The intensity ladder (BL-22) is untouched** and composes for free: it is
+  computed from a base colour, and the finish is applied to whatever colour comes
+  out of it.
+- **Smokes: paint 47 → 67, palette 146 → 161**; flow 159, mobile 141 unchanged.
+  (Shell reads 151, unchanged by this entry — the 142 recorded before BL-27..31
+  was already stale.) New paint check 10 covers the clip for all four finishes at
+  a boundary, the bloom's footprint, the grain's colour spread against classic's
+  flatness, glitter's bright specks, and undo→redo byte-equality of finished
+  strokes. Palette check 5d was rebuilt around the ladder rather than contorted.
+- **Gotcha: `TAU` is already a built-in in Godot 4 shaders** — redeclaring it is a
+  compile error, and a brush shader that fails to compile falls back to a shader
+  with no `discard`, which paints straight through the region boundaries. Three
+  clip checks failing at once is what that looks like.
+- Affected: `scripts/components/brush_finish.gd` (new),
+  `scenes/components/brush.gdshader`, `scripts/components/paint_canvas.gd`,
+  `page_view.gd`, `crayon_button.gd`, `palette_child.gd`,
+  `scripts/resources/crayon_set_def.gd`, `palette_def.gd`,
+  `scripts/screens/coloring_page.gd`, `resources/palettes/sets/*.tres`
+  (five deleted, three added), paint + palette smokes, DESIGN.md,
+  coloring-mechanics skill.
