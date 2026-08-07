@@ -1,14 +1,24 @@
 # DLC & Backend Server — Design
 
-Backlog item **BL-8**. Design only; nothing here is implemented yet.
+Backlog item **BL-8**. Originally pure design; as of 2026-08-07 **Phases 0–5 plus the
+§10.3 web-authoring flow are built and live on the mini-pc** — §12 tracks phase status,
+and [SERVER_BUILD_PLAN.md](SERVER_BUILD_PLAN.md)'s Decisions table records where the
+as-built app deviates from this document (SQLite not MySQL, Inertia + Vue not
+Blade + Livewire, `server/` inside the game repo, child profiles in v1, no `age_band`).
+Phase 6 (payments) remains design-only. Where a §-body below still speaks in the future
+tense, it is the original design text — the deltas above and the per-entry as-built notes
+in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md) are what actually shipped.
 
 Companion documents: [DESIGN.md](DESIGN.md) (the game), [ANDROID.md](ANDROID.md) (exports),
-[BACKLOG.md](BACKLOG.md) (**BL-9** — the outline-mask vs detail-image page split, which this
-design depends on).
+[BACKLOG.md](BACKLOG.md) (open items) + [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md)
+(BL-9/BL-12 — the page display/mask split; BL-19/BL-24/BL-25/BL-26 — the delivery,
+authoring and update rounds), and `server/CLAUDE.md` (as-built conventions — read it
+before touching `server/`).
 
-The server is a **Laravel** app: Nginx + PHP-FPM + MySQL on the Linux mini-pc, the same stack
-as the developer's other sites (the game's web build already lives there at
-`http://192.168.0.164:91/`). This document assumes that stack and does not re-litigate it.
+The server is a **Laravel** app on the Linux mini-pc, the same house stack as the
+developer's other sites (as built: Nginx + PHP-FPM + SQLite; the game's web build lives
+beside it at `http://192.168.0.164:91/`, the dashboard/API at `:92`). This document
+assumes that stack and does not re-litigate it.
 
 ---
 
@@ -457,6 +467,26 @@ v4 to fix one page downloads that one page, not 8 MB.
   vhost (`/api/…`) rather than a second port, and the CORS problem disappears. Quota is a real
   limit for many packs — see **Q7**.
 
+*As built, client side (BL-19 + BL-26, 2026-08-07). `PackInstaller` chooses per install:*
+
+- ***First install = the archive.*** *Nothing to diff against, and one zip beats N requests.*
+- ***Update = a per-file delta.*** *When a version is already installed and a newer one is
+  asked for, the new manifest's `files` map is diffed against **the bytes on disk** (hashed,
+  not against the old manifest — a file a crash truncated still has a good old entry). Files
+  whose sha256 already match are copied into `.incoming`; the rest are fetched from
+  `.../files/<path>`; anything gone from the new manifest is simply never carried over.
+  Progress counts against the delta's size, so a 567-byte fix reads as 567 bytes.*
+- ***The delta is an optimisation and can never be a failure mode.*** *A bad diff, a failed
+  per-file fetch, or a delta-built tree that fails verification all restart on the archive
+  path silently; the caller only ever learns which route won, via the result's `mode`.*
+- ***The 302 is read on native and followed in a browser*** *(both the archive and the files
+  route). Godot's web HTTP client is `fetch()` with the default `redirect: "follow"`, so a
+  browser never exposes `Location` to the caller and `max_redirects = 0` cannot work there;
+  the web build issues the authorised request and lets the browser follow. Measured in
+  Chrome: on a **same-origin** redirect fetch forwards `Authorization` (to an origin the
+  token already goes to on every call, which is what the same-origin deployment above
+  guarantees), and on a **cross-origin** redirect it strips it.*
+
 ---
 
 ## 8. Godot client integration
@@ -469,7 +499,9 @@ v4 to fix one page downloads that one page, not 8 MB.
    (build-in books), then scan `user://dlc/*/books/*/book.json` and build `BookDef`/`PageDef`
    instances in memory from the JSON. Same shelf, same ordering rules, sourced from two
    places. Books from a pack the user is no longer entitled to are filtered out by the caller,
-   not by `discover()`.
+   not by `discover()`. *(Since BL-25, 2026-08-07: release exports exclude the `res://` books,
+   so in a shipped build the first root is empty by construction and every book on the shelf
+   came from the server. The `res://` scan survives for the editor and dev smokes.)*
 3. **`PageDef` gains an optional texture source.** The display/mask split itself is **done**
    (BL-9, 2026-08-06, amended by BL-12): `PageDef` carries `display_image_path` (visible,
    required) plus an optional `mask_image_path` — since BL-12 that path names the shipped

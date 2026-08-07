@@ -161,8 +161,8 @@ WP6's doc updates.
 
 ## Campaign 2 — client integration, Dusk, first API-served book (2026-08-06)
 
-Campaign 1 (WP0–WP6) built the server; it lives on the `server-build` branch,
-416 tests green. Campaign 2 wires the game to it.
+Campaign 1 (WP0–WP6) built the server (since merged to `main`; the suite has
+grown past 470 tests with later campaigns). Campaign 2 wires the game to it.
 
 > **Status (2026-08-06): all of Campaign 2 is done.** WP7–WP12 complete: eight
 > godot smoke suites green (paint 47, palette 112, flow 159, shell 147, mobile
@@ -172,6 +172,8 @@ Campaign 1 (WP0–WP6) built the server; it lives on the `server-build` branch,
 > readback — design call), the debug Test Book ships in the release build,
 > dev smokes ride in the `.pck`, HTTPS on the mini-pc would remove two shell
 > workarounds, and BL-18 (erase vs sync restore) needs a decision.
+> *(Of those follow-ups, "the debug Test Book ships in the release build" was
+> closed by BL-25 on 2026-08-07 — release exports ship no books at all.)*
 
 ### WP7 — Godot Phase 0 (client prep; no server dependency)
 
@@ -227,6 +229,16 @@ deploys in a later round).
 Backlog **BL-20…BL-24**; the design was updated first — DESIGN.md §1 (the palette) and
 DLC_SERVER.md §10.3 (web authoring) are the authorities. Two independent workstreams in
 disjoint directories, safe to run in parallel.
+
+> **Status (2026-08-07): done and deployed.** WP13 (BL-20…23) and WP14 (BL-24) both
+> landed, integration ran the same day: game + server deployed to the mini-pc, the
+> pinned headless Godot 4.5.1 binary installed there
+> (`/home/gemini/godot/`, `COLORINGBOOK_GODOT_BINARY` in the box's `server/.env`),
+> mapping verified end-to-end on the box, and the queue drains via the every-minute
+> scheduler (`queue:work --stop-when-empty` in `routes/console.php`). A same-day
+> follow-up round covered BL-25 (release builds ship no books — the shelf is fully
+> server-fed) and BL-19/BL-26 (web download fix, delta updates). Per-entry as-built
+> notes live in BACKLOG.md.
 
 ### WP13 — Game: palette round (one Opus agent, entries in order)
 

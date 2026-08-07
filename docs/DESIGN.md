@@ -191,10 +191,15 @@ godot/
   scripts/                   # mirrors scenes/; snake_case.gd
   resources/
     books/<book_name>/book.tres      # BookDef: title, cover, ordered page list
+                                     #   (dev/editor fixtures only — release exports
+                                     #    exclude res:// books; shipped builds get every
+                                     #    book from the server, BL-25)
     books/<book_name>/pages/         # PageDef .tres per page
     palettes/child_palette.tres (+ one resource per crayon set, BL-23)
   assets/
     books/<book_name>/page_01.png / page_01_idmap.png / page_01_regions.json
+                                     #   (dev fixtures — excluded from release exports
+                                     #    like resources/books, BL-25)
   autoload/
     game_state.gd            # current book/page, save/load progress
   tools/
