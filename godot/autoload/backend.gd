@@ -485,8 +485,13 @@ func discover_visible_books(root: String = BookDef.BOOKS_ROOT, dlc_root: String 
 ## the raw pack rows (DLC_SERVER.md 11's [code]PackResource[/code] shape) so the
 ## catalogue UI can show titles, sizes and the [code]owned[/code] / [code]is_free[/code]
 ## flags without this file inventing a model of its own.
+##
+## [b]It needs a server, not an account[/b] (BL-25). The route is optional-auth by
+## design -- "the shop window", DLC_SERVER.md 7.4 -- and a signed-out build with no
+## books baked in has nothing else to show anybody. Signed out, every row simply
+## comes back [code]owned: false[/code]; the sign-in is what the first Get asks for.
 func fetch_packs() -> Dictionary:
-	if not is_signed_in():
+	if not is_enabled():
 		return _disabled()
 	var result: Dictionary = await _api.request_json(
 		HTTPClient.METHOD_GET, "/packs", null,

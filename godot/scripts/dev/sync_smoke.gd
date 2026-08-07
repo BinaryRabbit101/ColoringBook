@@ -9,7 +9,16 @@ extends Control
 ## half of this protocol.
 ##
 ##   cd server && php artisan serve --port=8123
-##   <godot_exe> --path <project> res://scenes/dev/sync_smoke.tscn
+##   <godot_exe> --path <project> --rendering-driver opengl3 \
+##       res://scenes/dev/sync_smoke.tscn
+##
+## [b]The renderer flag is not decoration on this box.[/b] Under the Vulkan driver
+## every [HTTPRequest] this harness makes comes back
+## [code]RESULT_CONNECTION_ERROR[/code] (4) before a byte leaves -- the same requests
+## succeed headless and under [code]opengl3[/code], and the server never sees them --
+## so a windowed Vulkan run fails at "register a scratch account" and proves nothing.
+## It is an engine/driver interaction, not a fact about this code; the flag is the
+## cheapest way past it.
 ##
 ## Extra user args (after a bare `--`):
 ##   --base-url <url>   API root (default: whatever BackendConfig resolves)
@@ -69,7 +78,11 @@ const TEST_QUEUE_PATH := "user://sync_smoke/sync_queue.json"
 ## Where the scratch account's email is left for the cleanup step.
 const EMAIL_FILE := "user://sync_smoke/scratch_account.txt"
 
-const SCRATCH_PASSWORD := "wp11-smoke-passphrase"
+## Password for the scratch account. Mixed case and a digit on purpose: a
+## production-config server applies Laravel's [code]Password::defaults()[/code],
+## which an all-lowercase passphrase does not satisfy -- and a harness that can only
+## register against a dev box is a harness that cannot check the real one.
+const SCRATCH_PASSWORD := "Wp11-Smoke-Passphrase-7"
 ## A port nothing is listening on, for the offline check.
 const DEAD_URL := "http://127.0.0.1:8199/api/v1"
 
@@ -350,7 +363,8 @@ func _check_sign_in() -> void:
 	_email = "wp11-smoke-%d@example.test" % int(Time.get_unix_time_from_system())
 	var result: Dictionary = await Backend.register(_email, SCRATCH_PASSWORD, true)
 	_expect(bool(result[Backend.KEY_OK]) and Backend.is_signed_in(),
-		"registered and signed in as %s" % _email)
+		"registered and signed in as %s (%s %s)"
+		% [_email, result[Backend.KEY_CODE], result[Backend.KEY_MESSAGE]])
 	if not Backend.is_signed_in():
 		_email = ""
 		return
@@ -632,6 +646,15 @@ func _check_offline_queue() -> void:
 	if painted != null:
 		GameState.save_page_paint(_book, 1, painted)
 	var result: Dictionary = await Backend.sync_now(false)
+	# The save point above scheduled its own debounced drain, and a drain that fails
+	# offline RESCHEDULES itself with backoff -- so this manual one can land on top of
+	# one already in flight and be answered BUSY. That is the harness racing itself,
+	# not a fact about the server, so wait the other drain out and ask again.
+	var collisions := 0
+	while String(result["code"]) == "BUSY" and collisions < 10:
+		collisions += 1
+		await _idle()
+		result = await Backend.sync_now(false)
 	# Either transport code is "the server is not there": Windows answers a dead
 	# loopback port with a connect refusal on some runs and a stall until
 	# HTTPRequest.timeout on others, and both are ApiClient's offline family.

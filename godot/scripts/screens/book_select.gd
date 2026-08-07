@@ -12,6 +12,14 @@ extends Control
 ## installed DLC packs under [code]user://dlc/[/code] -- same shelf, same ordering,
 ## two sources.
 ##
+## [b]In a shipped build the first of those two sources is empty[/b] (BL-25): the
+## export presets exclude [code]resources/books/*[/code] and [code]assets/books/*[/code],
+## so the [code]res://[/code] scan finds nothing by construction and every card on
+## the shelf came from the server. Nothing about discovery changes -- the books are
+## excluded from the export, not from the project, so the editor and every dev
+## harness still see them. What DOES change is that "no cards" is a normal first-run
+## state rather than a bug, which is what [constant EMPTY_WITH_SHOP] is for.
+##
 ## Signals up: [signal book_chosen]. The parent decides what happens next (M5's
 ## [code]main.tscn[/code] swaps in the coloring screen); this screen never does.
 
@@ -25,6 +33,15 @@ const CELL_SEPARATION := 24
 ## Never more than this many across, however wide the window -- a wall of tiny
 ## columns is worse than a comfortable grid.
 const MAX_COLUMNS := 5
+
+## The empty shelf, with a server in the build: the normal state of a fresh install
+## since BL-25, and the reason this string points at something to press. "More
+## books" is [code]main.gd[/code]'s overlay button, which is on screen next to this
+## label whenever the shelf is up.
+const EMPTY_WITH_SHOP := "No coloring books yet.\nA grown-up can tap “More books” to add some."
+## The empty shelf with no server configured at all -- a build that can only ever
+## show what it was given. Nothing to press, so nothing is promised.
+const EMPTY_WITHOUT_SHOP := "No coloring books yet."
 
 @onready var _grid: GridContainer = $Margin/Body/Scroll/Row/Shelf
 @onready var _empty_label: Label = $Margin/Body/EmptyLabel
@@ -61,6 +78,7 @@ func set_books(books: Array[BookDef]) -> int:
 		cell.pressed.connect(_on_cell_pressed.bind(book))
 		_grid.add_child(cell)
 		_cells.append(cell)
+	_empty_label.text = EMPTY_WITH_SHOP if Backend.is_enabled() else EMPTY_WITHOUT_SHOP
 	_empty_label.visible = _cells.is_empty()
 	_relayout_columns()
 	return _cells.size()

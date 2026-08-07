@@ -893,29 +893,46 @@ func _wants_server_paint(uid: String, page_index: int, server: Dictionary) -> bo
 
 ## [code]GET /sync/paint/{book}/{page}[/code] -> 302 -> the bytes -> GameState.
 ##
-## The redirect is READ rather than followed ([code]max_redirects = 0[/code], the
-## same pattern [PackInstaller] uses for a pack): Godot reports the redirect limit
-## instead of chasing it, which is what stops the bearer header being forwarded to a
-## URL that authorises itself in its query string (7.4).
+## [b]On native the redirect is READ rather than followed[/b]
+## ([code]max_redirects = 0[/code], the same pattern [PackInstaller] uses for a
+## pack): Godot reports the redirect limit instead of chasing it, which is what
+## stops the bearer header being forwarded to a URL that authorises itself in its
+## query string (7.4).
+##
+## [b]In a browser that is not available[/b] (BL-19): fetch follows the 302 itself
+## and never exposes a [code]Location[/code], so the two-step would sit on an empty
+## URL and this device would silently never pull a picture. On web the authorised
+## endpoint is therefore downloaded directly, in one request, and the redirect --
+## bearer header and all -- is the browser's own business. See
+## [method ApiClient.can_read_redirects].
 func _pull_page_paint(uid: String, page_index: int, server: Dictionary) -> bool:
 	var book := _book_for_uid(uid)
 	if book == null:
 		return false
-	var redirect: Dictionary = await _api.request_json(
-		HTTPClient.METHOD_GET, "/sync/paint/%s/%d" % [uid, page_index], null,
-		{"follow_redirects": false, "attempts": REQUEST_ATTEMPTS}
-	)
-	var url := String(redirect.get(ApiClient.KEY_LOCATION, ""))
-	if url == "":
-		if String(redirect[ApiClient.KEY_CODE]) != CODE_PAINT_NOT_FOUND:
-			print_verbose("SyncQueue: no paint URL for %s page %d (%s)."
-				% [uid, page_index + 1, redirect[ApiClient.KEY_CODE]])
-		return false
+	var authorised := "/sync/paint/%s/%d" % [uid, page_index]
+	var url := ""
+	if ApiClient.can_read_redirects():
+		var redirect: Dictionary = await _api.request_json(
+			HTTPClient.METHOD_GET, authorised, null,
+			{"follow_redirects": false, "attempts": REQUEST_ATTEMPTS}
+		)
+		url = String(redirect.get(ApiClient.KEY_LOCATION, ""))
+		if url == "":
+			if String(redirect[ApiClient.KEY_CODE]) != CODE_PAINT_NOT_FOUND:
+				print_verbose("SyncQueue: no paint URL for %s page %d (%s)."
+					% [uid, page_index + 1, redirect[ApiClient.KEY_CODE]])
+			return false
 
 	var scratch := _download_dir().path_join("%s_%02d.png" % [uid, page_index + 1])
-	# Signed URL: it carries its own authorisation and must NOT get a bearer header.
-	var download: Dictionary = await _api.download(url, scratch, {"auth": false})
+	# A signed URL carries its own authorisation and must NOT get a bearer header;
+	# the authorised endpoint (the web path) is exactly the one that needs it.
+	var download: Dictionary = await _api.download(
+		url if url != "" else authorised, scratch, {"auth": url == ""}
+	)
 	if not bool(download[ApiClient.KEY_OK]) or not FileAccess.file_exists(scratch):
+		# A refused download still wrote the error body to the scratch path; leaving
+		# it there would fill the tablet one failed pull at a time.
+		DirAccess.remove_absolute(scratch)
 		return false
 	var bytes := FileAccess.get_file_as_bytes(scratch)
 	var sha := FileAccess.get_sha256(scratch).to_lower()

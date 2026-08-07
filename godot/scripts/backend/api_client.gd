@@ -39,7 +39,8 @@ const KEY_MESSAGE := "message"
 const KEY_HEADERS := "headers"
 const KEY_BODY := "body"
 ## The [code]Location[/code] of a 3xx, when [code]follow_redirects[/code] was false.
-## This is how the signed pack URL arrives (DLC_SERVER.md 7.4).
+## This is how the signed pack URL arrives (DLC_SERVER.md 7.4) -- [b]on native
+## only[/b]. In a browser it is always "": see [method can_read_redirects].
 const KEY_LOCATION := "location"
 
 ## Transport-level [code]code[/code] values. UPPER_SNAKE like the server's own
@@ -122,6 +123,7 @@ func get_client_version() -> String:
 ## timeout: float      seconds (default TIMEOUT_JSON)
 ## attempts: int       total tries, backing off between them (default 1)
 ## follow_redirects: bool  default true; false to READ a 302's Location yourself
+##                     (native only -- [method can_read_redirects])
 ## query: Dictionary   appended as a query string, values url-encoded
 ## [/codeblock]
 func request_json(method: int, path: String, body: Variant = null,
@@ -178,6 +180,42 @@ func download(url: String, destination: String, options: Dictionary = {},
 	opts["timeout"] = float(opts.get("timeout", TIMEOUT_PACK))
 	opts["on_progress"] = on_progress
 	return await _request_once(HTTPClient.METHOD_GET, url, null, opts, destination)
+
+
+## Whether this platform can READ a 3xx instead of chasing it -- the question
+## [code]follow_redirects: false[/code] only has a useful answer to on native
+## (BL-19).
+##
+## [b]Native: yes.[/b] [code]max_redirects = 0[/code] makes Godot report
+## [constant HTTPRequest.RESULT_REDIRECT_LIMIT_REACHED] with the 3xx's own headers,
+## so [constant KEY_LOCATION] holds the signed URL and the bearer header is never
+## forwarded to it (DLC_SERVER.md 7.4).
+##
+## [b]Web: no, and not by a setting we could change.[/b] Godot's web HTTP client is
+## [code]fetch(url, {method, headers, body})[/code] -- it passes no
+## [code]redirect[/code] option, so the browser uses the default
+## [code]"follow"[/code], chases the 302 itself and hands back the FINAL response.
+## Measured in Chrome against a 302 (see BL-19's done notes):
+## [codeblock]
+## fetch(302) default        status 200, redirected true, url = the target,
+##                           headers.get("location") === null  (so does every
+##                           other header the 302 itself carried)
+## fetch(302) redirect:manual  an OPAQUEREDIRECT: status 0, no headers at all
+## [/codeblock]
+## So [constant KEY_LOCATION] is ALWAYS "" on web, whatever the engine does with
+## [member HTTPRequest.max_redirects], and a caller that waits for a URL out of a
+## redirect waits forever. Callers that need bytes behind a 302 ask this and, on
+## web, simply request the authorised endpoint and let the browser follow.
+##
+## [b]The bearer header is still safe on the hop[/b], and by the browser's own rule
+## rather than by our care: on a SAME-ORIGIN redirect -- which is what a web build
+## always has, since [method BackendConfig.for_web_origin] puts the API on the
+## page's own origin and the signed URL is a route on it -- fetch forwards
+## [code]Authorization[/code] to an origin the token is already sent to on every
+## call; on a CROSS-ORIGIN redirect fetch STRIPS it (measured: the second hop saw
+## no header at all). That is exactly the guarantee the native dance buys by hand.
+static func can_read_redirects() -> bool:
+	return not OS.has_feature("web")
 
 
 ## Seconds to wait before retry number [param attempt] (0-based): exponential,

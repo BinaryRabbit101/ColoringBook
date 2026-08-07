@@ -29,13 +29,18 @@ extends Node
 ##   a  BackendConfig + ApiClient as pure logic: base URL, version comparison
 ##      (equal satisfies), the backoff schedule and its cap, header parsing
 ##   b  with no account every Backend method is a NO-OP, and the shelf is exactly
-##      what BookDef.discover() returns
+##      what BookDef.discover() returns -- EXCEPT the shop window (BL-25): the
+##      catalogue lists signed out, and a Get asks for a sign-in
 ##   c  register -> token: auth.json written, ULID device uid, expiry parsed, a
 ##      wrong password is INVALID_CREDENTIALS and does not disturb the stored token
 ##   d  GET /packs lists coyote-book with the server's flags; GET /entitlements
 ##      caches, and is the update check
 ##   e  the install: manifest, signed URL, 950 KB downloaded with real progress,
 ##      EVERY sha256 verified, atomic swap, no .incoming left behind
+##   m  the BL-26 delta update: v1 -> v2 moves ONLY the file that changed, the
+##      result is byte-identical to a full-zip install of v2, and a per-file fetch
+##      that fails falls back to the archive and still installs. Needs TWO
+##      published versions of the pack -- see [method _check_delta_update]
 ##   f  discovery -- the installed pack IS a discoverable runtime book, and is
 ##      nevertheless SHELF-INVISIBLE because the built-in coyote wins de-duplication
 ##   g  the entitlement filter: a revoked pack is hidden but its FILES STAY, and an
@@ -44,7 +49,8 @@ extends Node
 ##   i  the checksum gate and the zip-slip guard, as pure functions
 ##   j  the adult gate and the pack-shop row state machine, headless
 ##   l  the real wiring in main.tscn: gear -> Settings -> Account -> GATE -> account
-##      panel, and the shelf's "More books" button appearing only when signed in
+##      panel, and the shelf's "More books" button, which is there whenever the
+##      build has a server at all (BL-25)
 ##   k  sign out: server told, auth.json cleared, cache dropped, PACK LEFT ON DISK
 ##
 ## Exit code is 0 only if every check passes.
@@ -67,8 +73,10 @@ const EMAIL_FILE := "user://backend_smoke/scratch_account.txt"
 ## harness must never push the DEVELOPER's real colouring to a scratch account.
 const TEST_SAVE_ROOT := "user://backend_smoke/state"
 
-## Password for the scratch account. Long enough for the server's Password rule.
-const SCRATCH_PASSWORD := "wp10-smoke-passphrase"
+## Password for the scratch account. Mixed case and a digit on purpose: a
+## production-config server applies Laravel's [code]Password::defaults()[/code],
+## which a long but all-lowercase passphrase does not satisfy.
+const SCRATCH_PASSWORD := "Wp10-Smoke-Passphrase-7"
 ## Seconds to wait out the server's `throttle:6,1` on the auth routes, plus slack.
 const THROTTLE_WINDOW_SECONDS := 62.0
 
@@ -100,10 +108,11 @@ func _run() -> void:
 	print("   auth.json:  %s" % ProjectSettings.globalize_path(TEST_AUTH_PATH))
 
 	_check_pure_logic()
-	_check_inert_without_account()
+	await _check_inert_without_account()
 	await _check_auth()
 	await _check_catalog()
 	await _check_install()
+	await _check_delta_update()
 	_check_discovery()
 	await _check_entitlement_filter()
 	_check_expired_token()
@@ -257,6 +266,49 @@ func _check_inert_without_account() -> void:
 	_expect(Backend.filter_books(discovered).size() == discovered.size(),
 		"...the entitlement filter never touches a built-in book")
 
+	# --- the one thing that is NOT inert without an account (BL-25) -----------
+	# A shipped build has no books baked in, so a signed-out first launch has
+	# nothing but the shop window. GET /packs is optional-auth for exactly that.
+	var window: Dictionary = await Backend.fetch_packs()
+	_expect(bool(window[Backend.KEY_OK]),
+		"GET /packs answers with NO account at all (%s)" % window[Backend.KEY_CODE])
+	var offered: Array = window[Backend.KEY_DATA] as Array \
+		if typeof(window[Backend.KEY_DATA]) == TYPE_ARRAY else []
+	_expect(not offered.is_empty(),
+		"...and lists the catalogue signed out (%d pack(s))" % offered.size())
+	var owned_signed_out := false
+	for raw: Variant in offered:
+		if typeof(raw) == TYPE_DICTIONARY and bool((raw as Dictionary).get("owned", false)):
+			owned_signed_out = true
+	_expect(not owned_signed_out, "...with nothing marked owned, because nobody is signed in")
+
+	var window_shop := PACK_SHOP_SCENE.instantiate() as PackShop
+	add_child(window_shop)
+	if not await _wait_for(func() -> bool: return not window_shop.get_rows().is_empty()):
+		_expect(false, "the pack shop renders the catalogue while signed out")
+	_expect(not window_shop.get_rows().is_empty(),
+		"the pack shop renders the catalogue while signed out (%d row(s))"
+		% window_shop.get_rows().size())
+	_expect(window_shop.get_status_text() == PackShop.SIGNED_OUT_HINT,
+		"...saying what is still missing ('%s')" % window_shop.get_status_text())
+	var asked_to_sign_in := [0]
+	window_shop.sign_in_requested.connect(func() -> void: asked_to_sign_in[0] += 1)
+	var window_row := window_shop.get_row(PACK_SLUG)
+	if window_row != null:
+		window_row.press_action()
+		window_row.press_action()
+		await get_tree().process_frame
+		_expect(asked_to_sign_in[0] == 1 and not window_shop.is_installing(),
+			"...and a Get asks for a SIGN-IN rather than failing silently (%d)"
+			% asked_to_sign_in[0])
+		_expect(window_row.get_state() == PackShop.PackRow.STATE_CONFIRM,
+			"...leaving the row's 'Yes, download' where the grown-up left it (%s)"
+			% window_row.get_state())
+	else:
+		_expect(false, "the signed-out catalogue includes '%s'" % PACK_SLUG)
+	remove_child(window_shop)
+	window_shop.queue_free()
+
 
 # ======================================================== c: register + token ==
 
@@ -320,6 +372,15 @@ func _check_auth() -> void:
 
 	# A wrong password must not disturb the token we already have.
 	var bad: Dictionary = await Backend.sign_in(_email, "not-the-password")
+	if String(bad[Backend.KEY_CODE]) == ApiClient.CODE_THROTTLED:
+		# Same `throttle:6,1` the register above already waits out (DLC_SERVER.md
+		# 4.2): register + token + this one is three of the six, and a second run of
+		# this smoke inside the window spends the rest. Being rate-limited is the
+		# server working, so wait rather than report a red run.
+		print("   auth routes are rate-limited again; waiting %d s for the window."
+			% THROTTLE_WINDOW_SECONDS)
+		await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
+		bad = await Backend.sign_in(_email, "not-the-password")
 	_expect(not bool(bad[Backend.KEY_OK])
 			and String(bad[Backend.KEY_CODE]) == ApiClient.CODE_INVALID_CREDENTIALS,
 		"a wrong password is %s, branchable without reading prose (%s)"
@@ -461,6 +522,175 @@ func _check_install() -> void:
 		"latest_version == installed version, so nothing needs updating")
 	_expect(Backend.packs_needing_update().is_empty(),
 		"...which is what packs_needing_update() says (%s)" % [Backend.packs_needing_update()])
+
+
+# ================================================ m: the delta update (BL-26) ==
+
+## An update must move the DIFFERENCE, not the pack.
+##
+## [b]Needs two published versions of the fixture pack on the dev server[/b], the
+## second differing from the first in exactly one file. That is not a test fixture,
+## it is how a real fix ships -- versions are assigned by the server and immutable
+## (DLC_SERVER.md 7.3), so publishing the same directory twice IS the workflow:
+## [codeblock]
+## php artisan pack:publish build/packs/coyote-book          # v1
+## cp -r build/packs/coyote-book /tmp/v2 && edit one file    # rehash it in
+## php artisan pack:publish /tmp/v2                            manifest.json
+## [/codeblock]
+##
+## The order below is deliberate: the FALLBACK's archive install is also the
+## reference tree, so one full-zip install of v2 proves both halves of "byte
+## identical" -- the delta's tree and the fallback's tree are compared against the
+## same thing, and the run costs two installs of each version rather than three.
+func _check_delta_update() -> void:
+	print("\n-- check m: an update downloads the difference, not the pack (BL-26) --")
+	if not Backend.is_signed_in():
+		_expect(false, "signed in, so a pack can be updated")
+		return
+
+	# --- 0. what actually changed, read off the two manifests ----------------
+	var first := await _published_files(1)
+	var second := await _published_files(2)
+	if first.is_empty() or second.is_empty():
+		_expect(false, ("the dev server publishes at least TWO versions of '%s'"
+			+ " -- see this check's doc comment for the two publish commands") % PACK_SLUG)
+		return
+	var changed := PackedStringArray()
+	var changed_bytes := 0
+	for path: Variant in second:
+		var before: Variant = first.get(path, null)
+		var after := second[path] as Dictionary
+		if typeof(before) != TYPE_DICTIONARY \
+				or String((before as Dictionary).get("sha256", "")) != String(after.get("sha256", "")):
+			changed.append(String(path))
+			changed_bytes += int(after.get("bytes", 0))
+	_expect(changed.size() == 1 and changed_bytes > 0,
+		"v1 -> v2 differs in exactly one file, %s of it (%s)"
+		% [PackShop.PackRow.format_bytes(changed_bytes), ", ".join(changed)])
+	if changed.size() != 1:
+		return
+	var pack_root := TEST_DLC_ROOT.path_join(PACK_SLUG)
+
+	# --- 1. v1, from nothing: there is no delta against an empty shelf -------
+	Backend.uninstall_pack(PACK_SLUG)
+	var one := await _install_version(1)
+	_expect(bool(one[PackInstaller.KEY_OK])
+			and String(one[PackInstaller.KEY_MODE]) == PackInstaller.MODE_ARCHIVE
+			and Backend.installed_pack_version(PACK_SLUG) == 1,
+		"a FIRST install takes the archive (%s, v%d)"
+		% [one[PackInstaller.KEY_MODE], Backend.installed_pack_version(PACK_SLUG)])
+
+	# --- 2. the fallback, and the reference tree it leaves behind ------------
+	Backend.get_installer().fail_next_delta_fetch(0)
+	var fell_back := await _install_version(2)
+	_expect(bool(fell_back[PackInstaller.KEY_OK])
+			and String(fell_back[PackInstaller.KEY_MODE]) == PackInstaller.MODE_ARCHIVE,
+		"a delta whose per-file fetch fails falls back to the ARCHIVE and still installs (%s %s, %s)"
+		% [fell_back[PackInstaller.KEY_CODE], fell_back[PackInstaller.KEY_MESSAGE],
+			fell_back[PackInstaller.KEY_MODE]])
+	_expect(Backend.installed_pack_version(PACK_SLUG) == 2,
+		"...at the version that was asked for (v%d)" % Backend.installed_pack_version(PACK_SLUG))
+	_expect(not DirAccess.dir_exists_absolute(pack_root + PackInstaller.INCOMING_SUFFIX),
+		"...leaving no half-built .incoming behind it")
+	var reference := _tree_digest(pack_root)
+	_expect(reference.size() == second.size() + 1,
+		"the full-zip install of v2 holds %d manifest files plus its own manifest.json"
+		% second.size())
+
+	# --- 3. back to v1, so there is something to diff against ----------------
+	Backend.uninstall_pack(PACK_SLUG)
+	var again := await _install_version(1)
+	_expect(bool(again[PackInstaller.KEY_OK]) and Backend.installed_pack_version(PACK_SLUG) == 1,
+		"v1 is installed again, so the next install is a real update")
+
+	# --- 4. the update, as a delta -------------------------------------------
+	var update := await _install_version(2)
+	_expect(bool(update[PackInstaller.KEY_OK]),
+		"the update to v2 succeeded (%s %s)"
+		% [update[PackInstaller.KEY_CODE], update[PackInstaller.KEY_MESSAGE]])
+	if not bool(update[PackInstaller.KEY_OK]):
+		return
+	_expect(String(update[PackInstaller.KEY_MODE]) == PackInstaller.MODE_DELTA,
+		"...as a DELTA (%s)" % update[PackInstaller.KEY_MODE])
+	var fetched := update[PackInstaller.KEY_FETCHED_PATHS] as PackedStringArray
+	_expect(Array(fetched) == Array(changed),
+		"...fetching EXACTLY the file that changed (%s)" % ", ".join(fetched))
+	_expect(int(update[PackInstaller.KEY_FETCHED_BYTES]) == changed_bytes,
+		"...and only its %s -- the pack itself is %s (%.1f%%)"
+		% [PackShop.PackRow.format_bytes(int(update[PackInstaller.KEY_FETCHED_BYTES])),
+			PackShop.PackRow.format_bytes(int(update[PackInstaller.KEY_BYTES])),
+			100.0 * float(update[PackInstaller.KEY_FETCHED_BYTES])
+				/ maxf(float(update[PackInstaller.KEY_BYTES]), 1.0)])
+	_expect(int(update[PackInstaller.KEY_COPIED_FILES]) == second.size() - changed.size(),
+		"...taking the other %d files off the previous install instead of the wire"
+		% int(update[PackInstaller.KEY_COPIED_FILES]))
+	_expect(Backend.installed_pack_version(PACK_SLUG) == 2,
+		"...and the installed version moved to v%d" % Backend.installed_pack_version(PACK_SLUG))
+
+	# The bar must count against what is actually travelling (BL-26), or a 567-byte
+	# update would crawl across a 950 KB scale and look broken.
+	var reported := 0
+	for entry: Array in _progress:
+		reported = maxi(reported, int(entry[2]))
+	_expect(reported == changed_bytes,
+		"the progress total is the DELTA's size, not the pack's (%s)"
+		% PackShop.PackRow.format_bytes(reported))
+
+	# --- 5. and the result is the same tree, file for file -------------------
+	var difference := _tree_difference(_tree_digest(pack_root), reference)
+	_expect(difference.is_empty(),
+		"the delta-built install is byte-identical to the full-zip install of v2 (%s)"
+		% ("identical" if difference.is_empty() else ", ".join(difference)))
+
+
+## The `files` map of one published version, or {} when there is no such version.
+func _published_files(version: int) -> Dictionary:
+	var result: Dictionary = await Backend.get_api().request_json(
+		HTTPClient.METHOD_GET, "/packs/%s/manifest" % PACK_SLUG, null,
+		{"query": {"version": str(version)}}
+	)
+	if not bool(result[ApiClient.KEY_OK]) or typeof(result[ApiClient.KEY_DATA]) != TYPE_DICTIONARY:
+		return {}
+	var files: Variant = (result[ApiClient.KEY_DATA] as Dictionary).get("files", {})
+	return files as Dictionary if typeof(files) == TYPE_DICTIONARY else {}
+
+
+## One install, with [member _progress] refilled from the real progress signal.
+func _install_version(version: int) -> Dictionary:
+	_progress.clear()
+	var hook := func(slug: String, downloaded: int, total: int) -> void:
+		_progress.append([slug, downloaded, total])
+	Backend.pack_install_progress.connect(hook)
+	var result: Dictionary = await Backend.install_pack(PACK_SLUG, version)
+	Backend.pack_install_progress.disconnect(hook)
+	return result
+
+
+## pack-relative path -> sha256, for every file in an installed tree. The comparison
+## "byte-identical" is made of.
+static func _tree_digest(root: String, prefix: String = "") -> Dictionary:
+	var digests := {}
+	var directory := DirAccess.open(root)
+	if directory == null:
+		return digests
+	for name in directory.get_files():
+		digests[prefix + name] = FileAccess.get_sha256(root.path_join(name)).to_lower()
+	for name in directory.get_directories():
+		digests.merge(_tree_digest(root.path_join(name), prefix + name + "/"))
+	return digests
+
+
+static func _tree_difference(a: Dictionary, b: Dictionary) -> PackedStringArray:
+	var out := PackedStringArray()
+	for path: Variant in a:
+		if not b.has(path):
+			out.append("only in the delta: %s" % path)
+		elif String(a[path]) != String(b[path]):
+			out.append("different bytes: %s" % path)
+	for path: Variant in b:
+		if not a.has(path):
+			out.append("only in the archive: %s" % path)
+	return out
 
 
 # ================================================= f: discovery and de-duping ==
@@ -755,7 +985,7 @@ func _check_main_flow() -> void:
 		% (shelf.get_book_count() if shelf else -1))
 	_expect(main.get_gear_button().visible, "the settings gear is on the shelf")
 	_expect(main.get_more_books_button().visible,
-		"...and 'More books' is there too, because a grown-up is signed in")
+		"...and 'More books' is there too, because this build has a server (BL-25)")
 
 	# --- settings -> account, via the gate ------------------------------------
 	var settings := main.open_settings()

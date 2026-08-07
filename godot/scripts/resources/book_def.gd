@@ -169,10 +169,18 @@ static func discover(root: String = BOOKS_ROOT, dlc_root: String = DLC_ROOT) -> 
 ##
 ## Directories without a book file are skipped silently: [code]pages/[/code]
 ## subfolders, art folders and work-in-progress drafts must not break the shelf.
+##
+## [b]An absent root is NORMAL since BL-25[/b] and says so quietly. A shipped build
+## excludes [code]resources/books/*[/code] from the export, so the PCK has no such
+## directory at all and this scan finds nothing by construction -- every book comes
+## from the server. The scan itself is unchanged; only the noise is, because a
+## warning printed on every shelf build for the designed-for case is a warning
+## nobody will read when it means something.
 static func discover_builtin(root: String = BOOKS_ROOT) -> Array[BookDef]:
 	var books: Array[BookDef] = []
 	if not DirAccess.dir_exists_absolute(root):
-		push_warning("BookDef: books root '%s' does not exist." % root)
+		print_verbose("BookDef: no built-in books root at '%s'; the shelf is the server's."
+			% root)
 		return books
 	var directories := DirAccess.get_directories_at(root)
 	var names := Array(directories)

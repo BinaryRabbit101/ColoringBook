@@ -33,8 +33,9 @@ extends Control
 ## Settings -> "Account" -> AdultGate -> AccountPanel   sign in / register / out
 ## shelf    -> "More books"           -> PackShop       the DLC catalogue
 ## [/codeblock]
-## The "More books" button appears only while the shelf is up AND a grown-up is
-## signed in; the gate stands in front of every account screen (DLC_SERVER.md 4.1).
+## The "More books" button appears while the shelf is up and this build has a
+## server (BL-25 -- see [method _refresh_more_books] for why it no longer waits for
+## a sign-in); the gate stands in front of every account screen (DLC_SERVER.md 4.1).
 ## [b]No kid-facing screen shows network state at all[/b] (DLC_SERVER.md 8.2) --
 ## the shelf is built from local discovery every time and merely re-filtered when
 ## an entitlement answer lands.
@@ -504,13 +505,22 @@ func _build_more_books() -> void:
 	_overlays.add_child(_more_books)
 
 
-## Shown only on the shelf, only when a grown-up is signed in (DLC_SERVER.md 4.1:
-## children never touch an account, and a shop they cannot use is just confusing).
+## Shown on the shelf whenever this build has a server at all -- signed in or not
+## (BL-25).
+##
+## [b]It used to require a signed-in account[/b], on the argument that a shop a
+## grown-up cannot use is just confusing. That argument dies with the built-in
+## books: a shipped build ships NO books, so the catalogue is the only way a shelf
+## ever gets one, and hiding the way in until somebody signs in makes first launch a
+## dead end with nothing on screen to press. [code]GET /packs[/code] is optional-auth
+## and renders signed out (DLC_SERVER.md 7.4/9), and the first [b]Get[/b] is what
+## sends the grown-up to the adult gate -- so the sign-in still happens, at the
+## moment it is actually needed, instead of being a precondition for looking.
 func _refresh_more_books() -> void:
 	if not is_instance_valid(_more_books):
 		return
 	_more_books.visible = _current_id == SCREEN_BOOK_SELECT \
-		and not _transitioning and Backend.is_signed_in()
+		and not _transitioning and Backend.is_enabled()
 
 
 func open_pack_shop() -> PackShop:
@@ -521,6 +531,12 @@ func open_pack_shop() -> PackShop:
 	_pack_shop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_pack_shop.closed.connect(close_pack_shop)
 	_pack_shop.pack_installed.connect(func(_slug: String) -> void: _rescan_shelf())
+	# BL-25: a Get pressed while signed out leads to the gate rather than failing.
+	# The shop stays open underneath, so passing the gate and signing in leaves the
+	# grown-up looking at the catalogue they were already looking at.
+	_pack_shop.sign_in_requested.connect(func() -> void:
+		open_adult_gate(open_account_panel)
+	)
 	_overlays.add_child(_pack_shop)
 	return _pack_shop
 
@@ -538,6 +554,10 @@ func _on_backend_auth_changed(_signed_in: bool) -> void:
 	_rescan_shelf()
 	if is_instance_valid(_settings):
 		_settings.refresh()
+	if is_instance_valid(_pack_shop):
+		# Signing in from on top of the shop changes every row's `owned` flag and is
+		# what makes Get work; re-ask rather than leave a signed-out catalogue up.
+		_pack_shop.refresh()
 
 
 func _on_backend_shelf_changed() -> void:

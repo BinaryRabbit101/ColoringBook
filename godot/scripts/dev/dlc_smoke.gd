@@ -45,7 +45,10 @@ extends Control
 ##   e  save schema v2: keyed by book_uid, and a v1 file migrates -- keys rekeyed,
 ##      paint directories renamed, nothing lost, unknown keys passed through,
 ##      re-runnable, and the v1 file left where it was
-##   f  a DLC book and the built-in book that share a uid share one save entry
+##   f  a DLC book and the built-in book that share a uid share one save entry --
+##      migrated progress AND progress recorded live against the built-in book --
+##      and the BL-25 release shape: with no built-in books at all the shelf is
+##      exactly the installed packs, still carrying that progress
 ##
 ## Exit code is 0 only if every check passes.
 
@@ -53,6 +56,9 @@ const TEST_BOOK_PATH := "res://resources/books/test_book/book.tres"
 const COYOTE_BOOK_PATH := "res://resources/books/coyote/book.tres"
 const TEST_BOOK_UID := "test-book-2026"
 const COYOTE_UID := "coyote-2026"
+## A books root that is not there, which is what a shipped build's PCK looks like
+## since BL-25 excluded [code]resources/books/*[/code] from every export preset.
+const MISSING_BOOKS_ROOT := "res://resources/books_excluded_from_this_build"
 
 ## Everything this run writes.
 const TEST_ROOT := "user://dlc_smoke"
@@ -685,6 +691,52 @@ func _check_shared_uid() -> void:
 	_expect(GameState.get_page_status(GameState.book_key(dupe), 0) == GameState.STATUS_COMPLETE,
 		"...and the same progress (%s)"
 		% GameState.get_page_status(GameState.book_key(dupe), 0))
+
+	# --- BL-25: the same thing, recorded LIVE rather than migrated ------------
+	# The scenario the entry is about: a child colours the built-in coyote in
+	# today's build; tomorrow's build ships with no books in it at all and the same
+	# uid arrives as a DLC pack. Nothing may notice.
+	GameState.erase_page_progress(_coyote_book, 0)
+	_expect(GameState.get_page_status(GameState.book_key(dupe), 0) == GameState.STATUS_UNTOUCHED,
+		"a page erased through the BUILT-IN book reads untouched through the pack twin (%s)"
+		% GameState.get_page_status(GameState.book_key(dupe), 0))
+	GameState.mark_page_status(_coyote_book, 0, GameState.STATUS_IN_PROGRESS)
+	var canvas := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+	canvas.fill(Color(0.2, 0.6, 0.9, 1.0))
+	var painted := canvas.save_png_to_buffer()
+	_expect(GameState.install_page_paint(_coyote_book, 0, painted),
+		"...a paint layer is written against the built-in book")
+	_expect(GameState.get_page_status(GameState.book_key(dupe), 0) == GameState.STATUS_IN_PROGRESS,
+		"...and the pack twin reports that progress (%s)"
+		% GameState.get_page_status(GameState.book_key(dupe), 0))
+	_expect(GameState.get_resume_index(dupe) == GameState.get_resume_index(_coyote_book),
+		"...opens at the same page (%d)" % GameState.get_resume_index(dupe))
+	_expect(FileAccess.file_exists(GameState.get_paint_path(dupe, 0))
+			and FileAccess.get_file_as_bytes(GameState.get_paint_path(dupe, 0)) == painted,
+		"...and finds the very same pixels on disk (%s)"
+		% GameState.get_paint_path(dupe, 0).get_file())
+
+	# --- BL-25: the release-shaped shelf --------------------------------------
+	# A shipped build's res:// scan finds nothing, because the export excludes
+	# resources/books/*. Proved here by pointing the scan at a root that does not
+	# exist, which is exactly what the PCK looks like: no built-ins, no de-dupe to
+	# do, every card on the shelf a pack.
+	var shipped := BookDef.discover(MISSING_BOOKS_ROOT, TEST_DLC_ROOT)
+	var installed := BookDef.discover_runtime(TEST_DLC_ROOT)
+	_expect(shipped.size() == installed.size() and shipped.size() > 0,
+		"with no built-in books the shelf is exactly the installed packs (%d: %s)"
+		% [shipped.size(), _names(shipped)])
+	var all_runtime := true
+	for book in shipped:
+		all_runtime = all_runtime and book.is_runtime
+	_expect(all_runtime, "...and every one of them is a runtime book")
+	var shipped_dupe := _book_with_uid(shipped, COYOTE_UID)
+	_expect(shipped_dupe != null and shipped_dupe.is_runtime
+			and GameState.get_page_status(GameState.book_key(shipped_dupe), 0)
+				== GameState.STATUS_IN_PROGRESS,
+		"...and the coyote the player already coloured is still the coyote they coloured")
+	_expect(BookDef.discover(MISSING_BOOKS_ROOT, "").is_empty(),
+		"nothing installed and nothing built in is an EMPTY shelf, not an error")
 
 
 # =================================================================== helpers ==

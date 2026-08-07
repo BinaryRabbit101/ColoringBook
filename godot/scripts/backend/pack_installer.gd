@@ -30,10 +30,41 @@ extends RefCounted
 ## wrong regions -- silently, and only for the child who downloaded it -- so this is
 ## a hard gate, not a warning.
 ##
+## [b]Getting the bytes takes two requests on native and one in a browser[/b]
+## (BL-19). Natively the [code]302[/code] from [code]/packs/<slug>/download[/code] is
+## READ rather than followed, so the bearer header never reaches the signed URL
+## (7.4). A browser cannot do that -- it follows redirects itself and never shows
+## the caller a [code]Location[/code] -- so on web the authorised endpoint is
+## downloaded directly and the redirect is the browser's business, which is also
+## where [code]Authorization[/code] is handled by the fetch spec's own rules. See
+## [method ApiClient.can_read_redirects] for the measurements behind that.
+##
 ## [b]The manifest is the installer's, not the game's.[/b] It is written into the
 ## installed directory so the pack records its own [code]pack_version[/code] and
 ## [code]min_client_version[/code] (7.3's update check reads it back), but nothing
 ## in the GAME ever opens it: [BookDef] reads [code]book.json[/code] only.
+##
+## [b]An update downloads the DIFFERENCE, a first install downloads the pack[/b]
+## (BL-26). The manifest's per-file sha256 map (7.2) and the entitled
+## [code]/packs/<slug>/files/<path>[/code] route exist for exactly this: when a
+## version of the pack is already installed and a newer one is being fetched, every
+## file whose sha256 the installed tree already has is COPIED into
+## [code].incoming[/code] and only the rest is asked for, so a one-page fix on an
+## 8 MB pack moves the page rather than the pack. A file that has vanished from the
+## new manifest is simply never carried over -- deletion falls out of the diff and
+## needs no code of its own.
+##
+## Three properties make that safe to have at all:
+## [codeblock]
+## nothing downstream changes   every sha256 is still verified against the bytes
+##                              on disk, and the swap is still one rename
+## the fallback is total        any diff or fetch that goes wrong restarts on the
+##                              archive path, and the caller is told nothing
+## first installs are unchanged a delta against nothing is the whole pack, and one
+##                              zip beats N requests
+## [/codeblock]
+## The delta is an OPTIMISATION, and an optimisation that can introduce a failure
+## mode is not one. [constant KEY_MODE] on the result says which route ran.
 ##
 ## Plain [RefCounted] -- it borrows an [ApiClient] and never touches the tree.
 
@@ -56,6 +87,22 @@ const KEY_SLUG := "slug"
 const KEY_VERSION := "version"
 const KEY_BYTES := "bytes"
 const KEY_FILES := "files"
+## How the bytes actually arrived (BL-26): one of the MODE_* values below, or "" on
+## a failure that never got as far as choosing.
+const KEY_MODE := "mode"
+## Bytes this install pulled over the wire -- the archive's size, or on a delta the
+## size of the files it actually fetched. NOT the pack's size: that is
+## [constant KEY_BYTES], and the difference between the two is the point of BL-26.
+const KEY_FETCHED_BYTES := "fetched_bytes"
+## The pack-relative paths a delta fetched, in order. Empty for an archive install.
+const KEY_FETCHED_PATHS := "fetched_paths"
+## How many files a delta took from the previous install instead of the network.
+const KEY_COPIED_FILES := "copied_files"
+
+## [constant KEY_MODE]: the whole published [code]pack.zip[/code].
+const MODE_ARCHIVE := "archive"
+## [constant KEY_MODE]: per-file, diffed against what was already installed.
+const MODE_DELTA := "delta"
 
 ## Installer-specific failure codes, in the server's UPPER_SNAKE namespace.
 const CODE_BAD_ARCHIVE := "PACK_ARCHIVE_UNREADABLE"
@@ -73,6 +120,9 @@ var _dlc_root := BookDef.DLC_ROOT
 ## installs of the same pack would fight over one .incoming directory, and a child
 ## queueing five packs on a phone plan is exactly what 8.2 forbids.
 var _busy_slug := ""
+## Index of the delta fetch to fail on the next update, or -1. See
+## [method fail_next_delta_fetch].
+var _delta_fetch_probe := -1
 
 
 func _init(api: ApiClient, dlc_root: String = BookDef.DLC_ROOT) -> void:
@@ -90,6 +140,20 @@ func is_busy() -> bool:
 
 func get_busy_slug() -> String:
 	return _busy_slug
+
+
+## Makes the next delta's [param index]-th per-file fetch fail. [b]DEV/TEST ONLY[/b]
+## -- the mirror of [method GameState.set_autosave_interval] and
+## [method Backend.use_test_stores], and for the same reason.
+##
+## BL-26's fallback is the property the whole feature rests on: a delta that goes
+## wrong must cost a bigger download and nothing else. That is otherwise only
+## reachable by unplugging the network inside a window a few hundred milliseconds
+## wide, which is to say it is otherwise never tested and quietly rots. One
+## integer, consumed by the next delta attempt and immediately reset, buys a real
+## assertion that the archive picks the install up and finishes it.
+func fail_next_delta_fetch(index: int = 0) -> void:
+	_delta_fetch_probe = index
 
 
 # =================================================================== installed ==
@@ -204,44 +268,38 @@ func _install(slug: String, version: int, on_progress: Callable) -> Dictionary:
 		return _fail(slug, CODE_CLIENT_TOO_OLD,
 			"This pack needs app version %s or newer." % required)
 
-	# --- 3. the signed URL, then the bytes ------------------------------------
+	# --- 3. the bytes: the difference if we can, the whole pack otherwise -----
 	var pinned := int((manifest as Dictionary).get("pack_version", version))
-	var redirect: Dictionary = await _api.request_json(
-		HTTPClient.METHOD_GET, "/packs/%s/download" % slug, null,
-		{"query": query, "follow_redirects": false}
-	)
-	var download_url := String(redirect.get(ApiClient.KEY_LOCATION, ""))
-	var status := int(redirect[ApiClient.KEY_STATUS])
-	if download_url == "" and not (status >= 200 and status < 300):
-		# Neither a redirect we can follow nor a body we were handed: a real error.
-		return _from_api(slug, redirect)
-
 	var incoming := pack_dir(slug + INCOMING_SUFFIX)
-	delete_recursive(incoming)
-	DirAccess.make_dir_recursive_absolute(incoming)
-	var archive := incoming.path_join(ARCHIVE_NAME)
+	var arrival := {}
+	if _can_delta(slug, installed_version(slug), pinned):
+		arrival = await _install_delta(slug, query, files, incoming, on_progress)
+		if bool(arrival[KEY_OK]):
+			# The hard gate below runs for both routes, but a delta has to face it
+			# HERE as well: a tree the new manifest disowns is a delta gone wrong, and
+			# "gone wrong" must mean "take the archive", not "this pack failed". The
+			# second pass a few lines down is not wasted -- it is the gate every
+			# install goes through, and this one is only the fallback's trigger.
+			var provisional := verify_files(incoming, files)
+			if not bool(provisional[KEY_OK]):
+				arrival = _fail(slug, String(provisional[KEY_CODE]),
+					String(provisional[KEY_MESSAGE]))
+		if not bool(arrival[KEY_OK]):
+			# BL-26's whole safety argument: a delta that goes wrong is not a failed
+			# install, it is an install that did not get its shortcut. Nobody on screen
+			# hears about it; the archive path starts from scratch on the next line.
+			print_verbose("PackInstaller: the delta for '%s' fell back to the archive (%s: %s)."
+				% [slug, arrival[KEY_CODE], arrival[KEY_MESSAGE]])
+			arrival = {}
+	if arrival.is_empty():
+		arrival = await _install_archive(slug, query, incoming, on_progress)
+	if not bool(arrival[KEY_OK]):
+		return arrival
 
-	var download: Dictionary
-	if download_url != "":
-		# The signed URL authorises itself in its query string and must NOT get a
-		# bearer header (DLC_SERVER.md 7.4).
-		download = await _api.download(download_url, archive, {"auth": false}, on_progress)
-	else:
-		download = await _api.download(
-			"/packs/%s/download" % slug, archive, {"query": query}, on_progress
-		)
-	if not bool(download[ApiClient.KEY_OK]):
-		return _from_api(slug, download)
-	if not FileAccess.file_exists(archive):
-		return _fail(slug, CODE_WRITE_FAILED, "The archive did not reach disk.")
-
-	# --- 4. unpack ------------------------------------------------------------
-	var unpacked := _unzip(archive, incoming)
-	if unpacked != "":
-		return _fail(slug, CODE_BAD_ARCHIVE, unpacked)
-	DirAccess.remove_absolute(archive)
-
-	# --- 5. verify EVERY sha256 (the hard gate; see the class doc) ------------
+	# --- 4. verify EVERY sha256 (the hard gate; see the class doc) ------------
+	# Both routes land here, and it is the reason the delta needs no trust of its
+	# own: a file copied from the previous install is checked against the NEW
+	# manifest exactly as a file off the wire is.
 	var verified := verify_files(incoming, files)
 	if not bool(verified[KEY_OK]):
 		return _fail(slug, String(verified[KEY_CODE]), String(verified[KEY_MESSAGE]))
@@ -264,6 +322,182 @@ func _install(slug: String, version: int, on_progress: Callable) -> Dictionary:
 	return {
 		KEY_OK: true, KEY_CODE: "", KEY_MESSAGE: "",
 		KEY_SLUG: slug, KEY_VERSION: pinned, KEY_BYTES: total, KEY_FILES: files.size(),
+		KEY_MODE: String(arrival[KEY_MODE]),
+		KEY_FETCHED_BYTES: int(arrival[KEY_FETCHED_BYTES]),
+		KEY_FETCHED_PATHS: arrival[KEY_FETCHED_PATHS],
+		KEY_COPIED_FILES: int(arrival[KEY_COPIED_FILES]),
+	}
+
+
+# ================================================================== the routes ==
+
+## Whether this install is an UPDATE the delta applies to (BL-26).
+##
+## Deliberately narrow. A first install has nothing to diff against, and a
+## same-version reinstall -- which is what a repair is -- stays on the archive: the
+## entry scoped the delta to updates, and re-fetching a pack somebody asked for
+## again is the one case where the extra bytes buy something.
+func _can_delta(slug: String, installed: int, pinned: int) -> bool:
+	return installed > 0 and pinned > installed and is_installed(slug)
+
+
+## Fills [param incoming] from the published [code]pack.zip[/code] -- the whole
+## pack, unconditionally. First installs, and anything the delta declined or fumbled.
+func _install_archive(slug: String, query: Dictionary, incoming: String,
+		on_progress: Callable) -> Dictionary:
+	var download_url := ""
+	if ApiClient.can_read_redirects():
+		var redirect: Dictionary = await _api.request_json(
+			HTTPClient.METHOD_GET, "/packs/%s/download" % slug, null,
+			{"query": query, "follow_redirects": false}
+		)
+		download_url = String(redirect.get(ApiClient.KEY_LOCATION, ""))
+		var status := int(redirect[ApiClient.KEY_STATUS])
+		if download_url == "" and not (status >= 200 and status < 300):
+			# Neither a redirect we can follow nor a body we were handed: a real error.
+			return _from_api(slug, redirect)
+
+	delete_recursive(incoming)
+	DirAccess.make_dir_recursive_absolute(incoming)
+	var archive := incoming.path_join(ARCHIVE_NAME)
+
+	var download: Dictionary
+	if download_url != "":
+		# The signed URL authorises itself in its query string and must NOT get a
+		# bearer header (DLC_SERVER.md 7.4).
+		download = await _api.download(download_url, archive, {"auth": false}, on_progress)
+	else:
+		# In a browser this is the WHOLE step (BL-19): one authorised request that the
+		# browser redirects for us, streamed straight to disk. On native it is the
+		# fallback for a server that answered with bytes instead of a 302.
+		download = await _api.download(
+			"/packs/%s/download" % slug, archive, {"query": query}, on_progress
+		)
+	if not bool(download[ApiClient.KEY_OK]):
+		return _from_api(slug, download)
+	if not FileAccess.file_exists(archive):
+		return _fail(slug, CODE_WRITE_FAILED, "The archive did not reach disk.")
+	var moved := file_size(archive)
+
+	var unpacked := _unzip(archive, incoming)
+	if unpacked != "":
+		return _fail(slug, CODE_BAD_ARCHIVE, unpacked)
+	DirAccess.remove_absolute(archive)
+	return _arrived(MODE_ARCHIVE, moved, PackedStringArray(), 0)
+
+
+## Fills [param incoming] file by file (BL-26): everything the installed pack
+## already holds at the sha256 the NEW manifest asks for is copied across, and only
+## the remainder is fetched.
+##
+## [b]The diff is the manifest against the bytes on disk, not manifest against
+## manifest.[/b] Comparing the two manifests would trust the installed one -- a file
+## a previous crash truncated, or a disk that ate a byte, still has its old entry in
+## the old manifest and would be carried into the new install as good. Hashing what
+## is actually there costs one read per file and cannot be wrong; and since it is
+## the same hash [method verify_files] applies afterwards, a corrupted file simply
+## joins the fetch list.
+##
+## Returns a failure result rather than throwing, and the caller treats ANY failure
+## as "take the archive instead" -- so nothing in here has to be careful about
+## leaving [param incoming] half built.
+func _install_delta(slug: String, query: Dictionary, files: Dictionary, incoming: String,
+		on_progress: Callable) -> Dictionary:
+	var sabotage := _delta_fetch_probe
+	_delta_fetch_probe = -1
+	var source := pack_dir(slug)
+	var copy_paths := PackedStringArray()
+	var fetch_paths := PackedStringArray()
+	var fetch_bytes := 0
+	for path_variant: Variant in files:
+		var path := String(path_variant)
+		if not is_safe_entry(path):
+			# The same zip-slip shapes the archive path rejects. A manifest is our own
+			# server's word, and this is still not a thing to take on trust.
+			return _fail(slug, CODE_BAD_MANIFEST,
+				"The manifest lists an unsafe path ('%s')." % path)
+		var expected := String((files[path_variant] as Dictionary).get("sha256", "")).to_lower()
+		var local := source.path_join(path)
+		if expected != "" and FileAccess.file_exists(local) \
+				and FileAccess.get_sha256(local).to_lower() == expected:
+			copy_paths.append(path)
+		else:
+			fetch_paths.append(path)
+			fetch_bytes += int((files[path_variant] as Dictionary).get("bytes", 0))
+
+	delete_recursive(incoming)
+	DirAccess.make_dir_recursive_absolute(incoming)
+	for path in copy_paths:
+		var target := incoming.path_join(path)
+		DirAccess.make_dir_recursive_absolute(target.get_base_dir())
+		var error := DirAccess.copy_absolute(source.path_join(path), target)
+		if error != OK:
+			return _fail(slug, CODE_WRITE_FAILED,
+				"Could not reuse '%s' from the installed pack (%d)." % [path, error])
+
+	var done := 0
+	for index in fetch_paths.size():
+		var path := fetch_paths[index]
+		if index == sabotage:
+			return _fail(slug, CODE_WRITE_FAILED,
+				"A dev probe failed the fetch of '%s'." % path)
+		var target := incoming.path_join(path)
+		DirAccess.make_dir_recursive_absolute(target.get_base_dir())
+		# Captured per file so the bar counts the whole delta, not each file from zero.
+		var already := done
+		var fetched: Dictionary = await _download_pack_file(slug, path, query, target,
+			func(downloaded: int, _total: int) -> void:
+				if on_progress.is_valid():
+					on_progress.call(already + maxi(downloaded, 0), fetch_bytes)
+		)
+		if not bool(fetched[ApiClient.KEY_OK]):
+			return _from_api(slug, fetched)
+		if not FileAccess.file_exists(target):
+			return _fail(slug, CODE_WRITE_FAILED, "'%s' did not reach disk." % path)
+		done += file_size(target)
+		if on_progress.is_valid():
+			on_progress.call(done, fetch_bytes)
+	return _arrived(MODE_DELTA, fetch_bytes, fetch_paths, copy_paths.size())
+
+
+## One file out of a published release, through the same two-shaped hop the archive
+## takes (BL-19): native reads the [code]302[/code] and fetches the signed URL with
+## no bearer header; web asks the authorised route and lets the browser follow.
+func _download_pack_file(slug: String, path: String, query: Dictionary,
+		destination: String, on_progress: Callable) -> Dictionary:
+	var route := "/packs/%s/files/%s" % [slug, encode_pack_path(path)]
+	if ApiClient.can_read_redirects():
+		var redirect: Dictionary = await _api.request_json(
+			HTTPClient.METHOD_GET, route, null, {"query": query, "follow_redirects": false}
+		)
+		var url := String(redirect.get(ApiClient.KEY_LOCATION, ""))
+		if url != "":
+			return await _api.download(url, destination, {"auth": false}, on_progress)
+		var status := int(redirect[ApiClient.KEY_STATUS])
+		if not (status >= 200 and status < 300):
+			return redirect
+	return await _api.download(route, destination, {"query": query}, on_progress)
+
+
+## Percent-encodes a pack-relative path for a URL [b]without touching its
+## separators[/b]: the delta route is declared [code]{path}[/code] with
+## [code].*[/code] precisely because a pack path has slashes in it
+## ([code]books/coyote-2026/page_01.png[/code]), and encoding those would address a
+## file that does not exist.
+static func encode_pack_path(path: String) -> String:
+	var parts := PackedStringArray()
+	for part in path.split("/"):
+		parts.append(part.uri_encode())
+	return "/".join(parts)
+
+
+## Result of one of the two routes above: how the bytes arrived, and at what cost.
+static func _arrived(mode: String, fetched_bytes: int, fetched_paths: PackedStringArray,
+		copied_files: int) -> Dictionary:
+	return {
+		KEY_OK: true, KEY_CODE: "", KEY_MESSAGE: "", KEY_MODE: mode,
+		KEY_FETCHED_BYTES: fetched_bytes, KEY_FETCHED_PATHS: fetched_paths,
+		KEY_COPIED_FILES: copied_files,
 	}
 
 
@@ -389,7 +623,20 @@ static func _has_ignored_suffix(name: String) -> bool:
 
 func _fail(slug: String, code: String, message: String) -> Dictionary:
 	return {KEY_OK: false, KEY_CODE: code, KEY_MESSAGE: message,
-		KEY_SLUG: slug, KEY_VERSION: 0, KEY_BYTES: 0, KEY_FILES: 0}
+		KEY_SLUG: slug, KEY_VERSION: 0, KEY_BYTES: 0, KEY_FILES: 0,
+		KEY_MODE: "", KEY_FETCHED_BYTES: 0, KEY_FETCHED_PATHS: PackedStringArray(),
+		KEY_COPIED_FILES: 0}
+
+
+## Size of a file in bytes, or 0. Public because the smoke compares installed trees
+## and there is no reason for two copies.
+static func file_size(path: String) -> int:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return 0
+	var size := int(file.get_length())
+	file.close()
+	return size
 
 
 func _from_api(slug: String, result: Dictionary) -> Dictionary:

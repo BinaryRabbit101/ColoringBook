@@ -3,10 +3,18 @@ extends Control
 ## "More books": the catalogue of DLC packs, and the only place a download can
 ## start (DLC_SERVER.md 7.4, 8.2, 9).
 ##
-## [b]An overlay on the shelf, shown only when a grown-up is signed in.[/b]
+## [b]An overlay on the shelf, shown whenever this build has a server.[/b]
 ## [code]main.gd[/code] owns it and its entry button, exactly as it owns the
 ## settings gear -- which is what keeps [code]book_select.tscn[/code] frozen while
 ## the shelf grows a new affordance.
+##
+## [b]It lists signed out[/b] (BL-25). Since a shipped build contains no coloring
+## books at all, this overlay is the only way a shelf ever gets one, so it must not
+## require an account merely to be looked at: [code]GET /packs[/code] is
+## optional-auth for exactly that reason. What DOES need an account is getting a
+## pack -- even a free one, whose entitlement is granted to a signed-in device
+## (DLC_SERVER.md 9) -- so a Get pressed signed out raises
+## [signal sign_in_requested] and the grown-up meets the adult gate.
 ##
 ## [b]Two rules from DLC_SERVER.md 8.2 are the whole design of this screen:[/b]
 ##
@@ -30,6 +38,9 @@ extends Control
 signal closed()
 ## A pack finished installing, so the shelf behind should rescan.
 signal pack_installed(slug: String)
+## A download was asked for with nobody signed in. [code]main.gd[/code] answers with
+## the adult gate; this overlay never opens an account screen itself (BL-25).
+signal sign_in_requested()
 
 ## Response keys of the server's [code]PackResource[/code] (DLC_SERVER.md 11).
 const KEY_SLUG := "slug"
@@ -41,6 +52,11 @@ const KEY_BYTES := "bytes"
 const KEY_LATEST_VERSION := "latest_version"
 const KEY_MIN_CLIENT_VERSION := "min_client_version"
 const KEY_PAGE_COUNT := "page_count"
+
+## Shown when the catalogue lists but nobody is signed in, and again if a Get is
+## pressed in that state (BL-25). One string, so the shop says the same thing twice
+## rather than two things once.
+const SIGNED_OUT_HINT := "A grown-up needs to sign in to add a book."
 
 @onready var _scrim: Button = $Scrim
 @onready var _list: VBoxContainer = $Center/Panel/Margin/Column/Scroll/List
@@ -66,8 +82,8 @@ func _ready() -> void:
 ## Fetches the catalogue and rebuilds the list. Never blocks the shelf: the
 ## overlay is already on screen and already useful when this starts.
 func refresh() -> void:
-	if not Backend.is_signed_in():
-		_set_status("Sign in from Settings to see extra books.")
+	if not Backend.is_enabled():
+		_set_status("This version of the game has no book shop.")
 		return
 	_set_status("Looking for new books…")
 	var result: Dictionary = await Backend.fetch_packs()
@@ -79,6 +95,10 @@ func refresh() -> void:
 		return
 	var packs: Variant = result.get(Backend.KEY_DATA, [])
 	set_packs(packs as Array if typeof(packs) == TYPE_ARRAY else [])
+	if not _rows.is_empty() and not Backend.is_signed_in():
+		# The catalogue lists fine signed out (BL-25); getting one still needs an
+		# account, so say so here rather than only at the moment of the tap.
+		_set_status(SIGNED_OUT_HINT)
 
 
 ## Fills the list from an explicit array of pack rows -- dependency injection for
@@ -142,6 +162,15 @@ func _show_installed_only() -> void:
 ## "yes" (DLC_SERVER.md 8.2).
 func _on_download_requested(row: PackRow) -> void:
 	if _installing != "":
+		return
+	if not Backend.is_signed_in():
+		# BL-25: even a free pack needs a signed-in device to grant its entitlement
+		# (DLC_SERVER.md 9). Route the grown-up to the gate instead of letting the
+		# install fail with a code nobody asked to see. The row is left in its confirm
+		# state on purpose -- come back from the gate and "Yes, download" is still
+		# there, and a refresh after a successful sign-in rebuilds it anyway.
+		_set_status(SIGNED_OUT_HINT)
+		sign_in_requested.emit()
 		return
 	_installing = row.get_slug()
 	row.set_downloading(0, row.get_bytes())
