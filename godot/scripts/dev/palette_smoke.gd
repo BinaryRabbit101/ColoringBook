@@ -53,12 +53,16 @@ const REMOVED_FILES: PackedStringArray = [
 ## Minimum perceptual separation between two crayons, as an RGB distance
 ## (0..sqrt(3)). Kids must never confuse two crayons.
 const MIN_COLOR_DISTANCE := 0.25
-## The same floor for a BL-23 crayon set, relaxed on purpose: a Pastel box whose
-## crayons were a quarter of the colour cube apart would not be a pastel box. Far
-## enough apart to be different crayons, close enough to have a character.
-const MIN_SET_COLOR_DISTANCE := 0.10
-## Authored crayon sets that ship (BL-23): Pastel, Neon, Earth, Candy, Spooky.
-const EXPECTED_EXTRA_SETS := 5
+## Authored crayon sets that ship: BL-35 replaced BL-23's five recolours (Pastel,
+## Neon, Earth, Candy, Spooky -- "more colour options, not more fun") with three
+## boxes of the SAME crayons in escalating finishes.
+const EXPECTED_EXTRA_SETS := 3
+## The finish ladder the shipped boxes walk, dullest first: box 0 is the default
+## crayon box in plain wax, then one box per authored set.
+const FINISH_LADDER: Array[StringName] = [
+	BrushFinish.CLASSIC, BrushFinish.GLOW, BrushFinish.GRAIN, BrushFinish.GLITTER
+]
+const SET_NAMES: PackedStringArray = ["Neon Glow", "Textured Wax", "Glitter"]
 
 ## Per-channel tolerance (0..255) when checking painted pixels against the picked
 ## palette colour.
@@ -84,6 +88,8 @@ var _def: PaletteDef
 
 var _colors: Array[Color] = []
 var _sizes: Array[float] = []
+## BL-35: every finish the palette handed the paint path, in order.
+var _effects: Array[StringName] = []
 
 var _checks := 0
 var _failures := 0
@@ -186,6 +192,7 @@ func _check_component_built() -> void:
 	# Recorders go on BEFORE set_palette so the auto-selection emission is caught.
 	_palette.color_picked.connect(func(c: Color) -> void: _colors.append(c))
 	_palette.brush_size_picked.connect(func(s: float) -> void: _sizes.append(s))
+	_palette.brush_effect_picked.connect(func(e: StringName) -> void: _effects.append(e))
 
 	_palette.set_palette(_def)
 
@@ -489,46 +496,58 @@ func _check_intensity() -> void:
 	_palette.select_color(0)
 
 
-## (d cont.) BL-23: the fun crayon boxes, and the control that cycles them.
+## (d cont.) BL-23's fun crayon boxes, rebuilt by BL-35 around FINISHES.
 ##
-## Two claims to hold down. First, a set is COLOURS AND NOTHING ELSE -- if a box
-## could carry a brush size or a threshold it would be a difficulty mode again,
-## which is the thing BL-20 just deleted. Second, the intensity ladder works on
-## every box without any box saying anything about it.
+## Three claims to hold down. First, every box carries the SAME lineup -- the
+## playtest verdict on five recoloured boxes was "more colour options, not more
+## fun", so what makes a box a different box is now the finish it paints with.
+## Second, a set carries colours and a FINISH and nothing else: a brush size or a
+## threshold on a box would be a difficulty mode again, which is the thing BL-20
+## deleted, and BL-35's amendment is exactly one field wide. Third, the finish
+## reaches the paint path through its OWN signal -- once per box change, never
+## through `color_picked` -- and the intensity ladder still works on every box
+## without any box saying anything about it.
 func _check_crayon_sets() -> void:
-	print("\n-- check 5d: fun crayon boxes (BL-23) --")
+	print("\n-- check 5d: crayon boxes and their finishes (BL-23, BL-35) --")
 	var sets := CrayonSetDef.discover()
-	_expect(sets.size() >= EXPECTED_EXTRA_SETS,
+	_expect(sets.size() == EXPECTED_EXTRA_SETS,
 		"%d authored crayon set(s) were discovered on disk (%d)"
 		% [EXPECTED_EXTRA_SETS, sets.size()])
 	var names := PackedStringArray()
 	for set_def in sets:
 		names.append(set_def.display_name)
-	_expect(names.has("Pastel") and names.has("Neon") and names.has("Earth")
-			and names.has("Candy") and names.has("Spooky"),
-		"...including the shipped five (%s)" % [names])
+	var shipped := true
+	for expected_name in SET_NAMES:
+		shipped = shipped and names.has(expected_name)
+	_expect(shipped, "...the shipped ladder of boxes (%s)" % [names])
 
 	var orders_ascend := true
 	var all_valid := true
-	var all_separated := true
-	var carry_only_colors := true
+	var carry_only_colors_and_finish := true
+	var share_the_lineup := true
+	var known_finishes := true
 	for i in sets.size():
 		var set_def := sets[i]
 		all_valid = all_valid and set_def.validate().is_empty()
 		if i > 0:
 			orders_ascend = orders_ascend and sets[i - 1].sort_order <= set_def.sort_order
 		# A set that could set a brush size or a threshold would be a difficulty
-		# mode wearing a hat. The property list is the check, not a promise.
+		# mode wearing a hat. The property list is the check, not a promise -- and
+		# the list is unchanged by BL-35, which added `effect` and nothing else.
 		for banned in ["brush_sizes", "default_brush_size", "completion_threshold",
 				"default_brush_hardness", "mode"]:
-			carry_only_colors = carry_only_colors and not _has_property(set_def, banned)
-		all_separated = all_separated and _closest_pair(set_def.colors) >= MIN_SET_COLOR_DISTANCE
+			carry_only_colors_and_finish = (
+				carry_only_colors_and_finish and not _has_property(set_def, banned)
+			)
+		known_finishes = known_finishes and BrushFinish.is_known(set_def.get_effect())
+		share_the_lineup = share_the_lineup and _def.get_crayon_set_colors(i + 1) == _def.colors
 	_expect(all_valid, "every set validates")
 	_expect(orders_ascend, "...and they come back in authored sort_order, not filesystem order")
-	_expect(carry_only_colors,
-		"a CrayonSetDef carries COLOURS ONLY -- no brush, no threshold, no mode")
-	_expect(all_separated,
-		"...and no two crayons in a box are closer than %.2f apart" % MIN_SET_COLOR_DISTANCE)
+	_expect(carry_only_colors_and_finish,
+		"a CrayonSetDef carries colours and a FINISH -- no brush, no threshold, no mode")
+	_expect(known_finishes, "...and every box names a finish this build can paint")
+	_expect(share_the_lineup,
+		"EVERY box offers the default box's lineup -- what changes is the finish (BL-35)")
 
 	# --- the palette presents the default box and the sets through one index ---
 	_expect(_def.crayon_set_count() == sets.size() + 1,
@@ -539,6 +558,29 @@ func _check_crayon_sets() -> void:
 		"box 0 IS the palette's own crayons ('%s')" % _def.get_crayon_set_name(0))
 	_expect(_def.wrap_crayon_set(_def.crayon_set_count()) == 0,
 		"the cycle wraps back to the default box")
+
+	# --- the ladder: each box louder than the one before it -------------------
+	var ladder: Array[StringName] = []
+	for i in _def.crayon_set_count():
+		ladder.append(_def.get_crayon_set_effect(i))
+	_expect(ladder == FINISH_LADDER,
+		"the boxes escalate: %s" % [", ".join(_finish_names(ladder))])
+	_expect(_def.get_crayon_set_effect(0) == BrushFinish.CLASSIC,
+		"...starting with today's plain wax, which the default box keeps untouched")
+	var animated := PackedStringArray()
+	for finish in ladder:
+		if BrushFinish.is_animated(finish):
+			animated.append(String(finish))
+	_expect(animated.is_empty(),
+		"every shipped finish is BAKEABLE, so the saved PNG carries it (phase 2 is"
+		+ " animated finishes) -- live ones found: %s" % [animated])
+
+	# --- set_palette primes the finish, like the size and the colour ----------
+	_expect(_effects.size() == 1 and _effects[0] == BrushFinish.CLASSIC,
+		"set_palette() primed the brush with exactly one finish, '%s' -- never finish-less"
+		% [_effects[-1] if not _effects.is_empty() else &"<none>"])
+	_expect(_palette.get_selected_effect() == BrushFinish.CLASSIC,
+		"...and the palette agrees that is what is in hand")
 
 	# --- cycling it, the way the button does ---------------------------------
 	var box := _palette.get_crayon_box_button()
@@ -555,6 +597,7 @@ func _check_crayon_sets() -> void:
 
 	var brush_before := _palette.get_selected_brush_size()
 	var emitted_before := _colors.size()
+	var effects_before := _effects.size()
 	box.pressed.emit()
 	await _settle()
 	_expect(_palette.get_crayon_set_index() == 1,
@@ -567,13 +610,34 @@ func _check_crayon_sets() -> void:
 	_expect(swapped, "...and the strip is now that box's crayons, in order")
 	_expect(_colors.size() == emitted_before + 1 and _colors[-1] == next_colors[0],
 		"...with its first crayon in hand (#%s)" % _colors[-1].to_html(false))
+	# BL-35: the finish travels on its own signal, exactly once per box change. If
+	# it ever rode inside color_picked the paint path would be reaching into the
+	# palette, which is the thing the contract exists to prevent.
+	_expect(_effects.size() == effects_before + 1
+			and _effects[-1] == _def.get_crayon_set_effect(1),
+		"...and ONE brush_effect_picked, carrying the box's finish ('%s')" % [_effects[-1]])
+	_expect(_palette.get_selected_effect() == _def.get_crayon_set_effect(1),
+		"...which is the finish the palette says is in hand")
+	var previewing := true
+	for control in strip:
+		previewing = previewing and (control as CrayonButton).finish == _effects[-1]
+	_expect(previewing,
+		"every crayon on the strip PREVIEWS that finish, so the box sells itself first")
 	_expect(is_equal_approx(_palette.get_selected_brush_size(), brush_before)
 			and _sizes.size() == 1,
-		"the brush never moved -- a box of crayons is colours, not a difficulty (%.0f px)"
+		"the brush never moved -- a finish is how the paint looks, not how the game plays (%.0f px)"
 		% _palette.get_selected_brush_size())
 	_expect(_palette.get_selected_intensity() == PaletteDef.INTENSITY_BASE_STEP
 			and not _palette.is_showing_shades(),
 		"...and the new box opens on its own colours, not halfway up a ladder")
+
+	# Picking a crayon or a rung inside a box is a COLOUR change and nothing else.
+	var quiet := _effects.size()
+	_palette.select_color(2)
+	_palette.select_intensity(PaletteDef.INTENSITY_STEPS - 1)
+	_expect(_effects.size() == quiet,
+		"picking crayons and rungs inside a box emits no finish -- the wax did not change")
+	_palette.select_color(0)
 
 	# --- intensity on a set, for free ----------------------------------------
 	var swap := _palette.get_intensity_button()
@@ -587,6 +651,11 @@ func _check_crayon_sets() -> void:
 		laddered = laddered and (shades[i] as CrayonButton).crayon_color == set_ladder[i]
 	_expect(laddered,
 		"the ladder works on a SET crayon too, with nothing authored for it (BL-22 x BL-23)")
+	var rungs_finished := true
+	for control in shades:
+		rungs_finished = rungs_finished and (control as CrayonButton).finish == _palette.get_selected_effect()
+	_expect(rungs_finished,
+		"...and every rung of it wears the box's finish -- same wax, different intensity")
 	(shades[0] as CrayonButton).pressed.emit()
 	_expect(_colors[-1] == _def.shade_of(set_base, 0),
 		"...and picking its palest rung emits that resolved colour (#%s)"
@@ -595,8 +664,10 @@ func _check_crayon_sets() -> void:
 	await _settle()
 
 	# --- all the way round ----------------------------------------------------
+	var walked: Array[StringName] = []
 	for i in range(_palette.get_crayon_set_index(), _def.crayon_set_count()):
 		box.pressed.emit()
+		walked.append(_palette.get_selected_effect())
 	await _settle()
 	_expect(_palette.get_crayon_set_index() == 0,
 		"cycling past the last box comes back to the default one ('%s')"
@@ -604,7 +675,21 @@ func _check_crayon_sets() -> void:
 	_expect(_palette.get_color_buttons().size() == CRAYON_COUNT,
 		"...with its %d crayons back on the strip (%d)"
 		% [CRAYON_COUNT, _palette.get_color_buttons().size()])
+	_expect(walked[-1] == BrushFinish.CLASSIC and _effects[-1] == BrushFinish.CLASSIC,
+		"...and the FINISH resets with the crayon and the rung -- back to plain wax")
+	var strip_reset := true
+	for control in _palette.get_color_buttons():
+		strip_reset = strip_reset and (control as CrayonButton).finish == BrushFinish.CLASSIC
+	_expect(strip_reset, "...on every crayon of it")
 	_palette.select_color(0)
+
+
+## Finish ids as the names a human would read them by.
+static func _finish_names(ladder: Array[StringName]) -> PackedStringArray:
+	var names := PackedStringArray()
+	for finish in ladder:
+		names.append(BrushFinish.display_name(finish))
+	return names
 
 
 ## (e) Palette -> PageView: wiring the two signals is all the coloring screen has
@@ -618,7 +703,17 @@ func _check_page_view_integration() -> void:
 	# Exactly the wiring the coloring screen does -- calls DOWN into PageView.
 	_palette.color_picked.connect(func(c: Color) -> void: _page_view.brush_color = c)
 	_palette.brush_size_picked.connect(func(s: float) -> void: _page_view.brush_size = s)
+	_palette.brush_effect_picked.connect(func(e: StringName) -> void: _page_view.brush_effect = e)
 	_page_view.brush_hardness = _def.default_brush_hardness
+
+	# BL-35's third wire, and the whole of it: cycle a box, the brush is holding
+	# that box's wax. Nothing in the palette reaches into the paint path to do it.
+	_palette.next_crayon_set()
+	_expect(_page_view.brush_effect == _def.get_crayon_set_effect(1),
+		"PageView.brush_effect follows brush_effect_picked ('%s')" % _page_view.brush_effect)
+	_palette.set_crayon_set(0)
+	_expect(_page_view.brush_effect == BrushFinish.CLASSIC,
+		"...and back to the default box puts plain wax back on the brush")
 
 	var picked_index := 3
 	_palette.select_brush_size(0)
@@ -952,18 +1047,9 @@ static func _all_positive(sizes: PackedFloat32Array) -> bool:
 	return not sizes.is_empty()
 
 
-## The tightest RGB gap between any two entries of [param colors]. INF for a list
-## of fewer than two.
-static func _closest_pair(colors: PackedColorArray) -> float:
-	var closest := INF
-	for i in colors.size():
-		for j in range(i + 1, colors.size()):
-			closest = minf(closest, Vector3(colors[i].r, colors[i].g, colors[i].b).distance_to(
-				Vector3(colors[j].r, colors[j].g, colors[j].b)
-			))
-	return closest
-
-
+## (BL-35 deleted `_closest_pair`, which measured a SET's own colour separation:
+## the sets do not author colours any more, so the default lineup's separation --
+## `_closest_color_pair` below -- is the only one there is to measure.)
 func _closest_color_pair() -> Dictionary:
 	var best := {"a": -1, "b": -1, "distance": INF}
 	var colors := _def.colors

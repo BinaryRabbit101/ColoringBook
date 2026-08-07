@@ -22,6 +22,14 @@ const SOLID_ALPHA := 200
 ## Test brush diameter in page pixels.
 const BRUSH_DIAMETER := 56.0
 
+## BL-35's finish checks paint with a mid-tone colour, so a finish that lightens the
+## wax and one that darkens it are both visible against it.
+const FINISH_COLOR := Color(0.35, 0.55, 0.85, 1.0)
+## Deep inside region 4 (the big circle), far enough from every boundary that even
+## the glow's widened stamp cannot reach one -- these checks measure the finish, not
+## the clip, and the clip has its own check above them.
+const FINISH_DAB := Vector2(788.5, 250.5)
+
 @onready var _page_view: PageView = $PageView
 
 var _id_rgba: Image
@@ -73,6 +81,7 @@ func _run() -> void:
 	await _check_composited_layer_stack()
 	await _check_painting_disabled()
 	await _check_stroke_replay()
+	await _check_brush_finishes()
 
 	print("=== %d/%d checks passed ===" % [_checks - _failures, _checks])
 	if "--stay" in OS.get_cmdline_user_args():
@@ -361,6 +370,162 @@ func _check_stroke_replay() -> void:
 	await _clear()
 	_expect(_page_view.take_last_stroke_recipe().is_empty(),
 		"clearing the page drops the pending recipe with the pixels")
+
+
+## BL-35: the crayon boxes' FINISHES, at the layer that bakes them.
+##
+## Three claims, and the first one is the one that could break the game. (1) The
+## region clip owns every finish -- a glow halo spills PAST the dab, so a stamp laid
+## a fraction of its bloom away from a boundary is the case that would leak paint
+## into the neighbouring region if the halo were composited rather than clipped.
+## (2) A finish actually changes the pixels, in the way it claims to: the glow
+## reaches further than the dab, the grain varies the wax colour across it, the
+## glitter puts specks brighter than the crayon in it. (3) A finished stroke is
+## replayable to the byte, because BL-17's undo re-stamps recipes and a finish whose
+## seed were re-rolled on replay would shift every speck of glitter on the page.
+func _check_brush_finishes() -> void:
+	print("\n-- check 10: bakeable crayon finishes (BL-35) --")
+	await _clear()
+	_page_view.brush_size = BRUSH_DIAMETER
+	_page_view.brush_color = FINISH_COLOR
+
+	# --- (1) the clip owns every finish, halo included -------------------------
+	var line_x := _find_line_pixel().x
+	_expect(line_x > 0.0, "found the region 4 / region 1 boundary to stamp beside (x=%.0f)" % line_x)
+	# Well inside region 4, but nearer the boundary than the glow's bloom reaches:
+	# the halo is over the line, and only the shader's discard keeps it off.
+	var near_boundary := Vector2(line_x - 30.0, 250.5)
+	var reach := BRUSH_DIAMETER * 0.5 * BrushFinish.quad_scale(BrushFinish.GLOW)
+	_expect(reach > 30.0,
+		"...and the glow's bloom (%.0f px) really does overhang it by %.0f px"
+		% [reach, reach - 30.0])
+	for finish in BrushFinish.LADDER:
+		await _clear()
+		_page_view.brush_effect = finish
+		_expect(_page_view.brush_effect == finish, "PageView takes the '%s' finish" % finish)
+		_page_view.begin_stroke(near_boundary)
+		_page_view.end_stroke()
+		var counts := _count_painted_by_region(await _read_paint())
+		var leaks := _describe_leaks(counts, 4)
+		_expect(int(counts.get(4, 0)) > 0 and leaks == "",
+			"'%s' stamped %d px in the locked region and NOTHING across the line%s"
+			% [finish, int(counts.get(4, 0)), "" if leaks == "" else " -- " + leaks])
+
+	# --- (2) each finish looks like what it says -------------------------------
+	var classic := await _stamp_finish(BrushFinish.CLASSIC, FINISH_DAB)
+	var glow := await _stamp_finish(BrushFinish.GLOW, FINISH_DAB)
+	var grain := await _stamp_finish(BrushFinish.GRAIN, FINISH_DAB)
+	var glitter := await _stamp_finish(BrushFinish.GLITTER, FINISH_DAB)
+
+	var classic_px := _painted_pixels(classic)
+	var glow_px := _painted_pixels(glow)
+	_expect(glow_px > classic_px * 2,
+		"the glow BLOOMS past the dab: %d px lit against classic wax's %d" % [glow_px, classic_px])
+	_expect(_core_spread(classic) < 0.01,
+		"classic wax lays one flat colour down the middle of the dab (spread %.4f)"
+		% _core_spread(classic))
+	_expect(_core_spread(grain) > 0.03,
+		"textured wax varies the colour across the dab -- visible grain (spread %.4f)"
+		% _core_spread(grain))
+	_expect(_brightest_core(glitter) > FINISH_COLOR.get_luminance() + 0.25,
+		"glitter catches specks brighter than the crayon itself (%.3f vs %.3f)"
+		% [_brightest_core(glitter), FINISH_COLOR.get_luminance()])
+
+	# --- (3) a finished stroke replays to the byte -----------------------------
+	await _clear()
+	_page_view.brush_effect = BrushFinish.GLITTER
+	_page_view.begin_stroke(Vector2(700.5, 250.5))
+	for x in range(720, 860, 20):
+		_page_view.continue_stroke(Vector2(x + 0.5, 250.5))
+	_page_view.end_stroke()
+	var recipe_a := _page_view.take_last_stroke_recipe()
+	_expect(StringName(recipe_a.get("effect", &"")) == BrushFinish.GLITTER,
+		"the recipe names the finish the stroke painted with ('%s')" % recipe_a.get("effect"))
+	_expect(float(recipe_a.get("effect_seed", -1.0)) >= 0.0,
+		"...and the seed its grain and its glitter were laid out from (%.4f)"
+		% float(recipe_a.get("effect_seed", -1.0)))
+	var after_a := (await _read_paint()).get_data()
+
+	_page_view.brush_effect = BrushFinish.GLOW
+	_page_view.begin_stroke(Vector2(264.5, 264.5))
+	_page_view.continue_stroke(Vector2(264.5, 210.5))
+	_page_view.end_stroke()
+	var recipe_b := _page_view.take_last_stroke_recipe()
+	_expect(StringName(recipe_b.get("effect", &"")) == BrushFinish.GLOW
+			and not is_equal_approx(
+				float(recipe_b.get("effect_seed", 0.0)), float(recipe_a.get("effect_seed", 0.0))
+			),
+		"a second stroke gets its own finish and its own seed (%.4f vs %.4f)"
+		% [float(recipe_b.get("effect_seed", 0.0)), float(recipe_a.get("effect_seed", 0.0))])
+	var after_b := (await _read_paint()).get_data()
+
+	# The brush moves on, exactly as it would when the player cycles boxes and then
+	# undoes: the replay must use the RECIPE's finish, not the live one.
+	_page_view.brush_effect = BrushFinish.GRAIN
+	await _page_view.rebuild_paint(null, [recipe_a])
+	_expect((await _read_paint()).get_data() == after_a,
+		"undoing a finished stroke rebuilds the one below it BYTE FOR BYTE")
+	_page_view.stamp_recipe(recipe_b)
+	_expect((await _read_paint()).get_data() == after_b,
+		"...and redoing it re-stamps the glow exactly -- finishes are pixel-stable")
+
+	# A recipe from before finishes existed is classic wax, not nothing.
+	var plain := recipe_a.duplicate()
+	plain.erase("effect")
+	plain.erase("effect_seed")
+	await _page_view.rebuild_paint(null, [plain])
+	var plain_counts := _count_painted_by_region(await _read_paint())
+	_expect(int(plain_counts.get(4, 0)) > 0 and _describe_leaks(plain_counts, 4) == "",
+		"a recipe with no finish replays as plain wax, clipped like any other (%d px)"
+		% int(plain_counts.get(4, 0)))
+
+	_page_view.brush_effect = BrushFinish.CLASSIC
+	await _clear()
+
+
+## One dab of [param finish] at [param at], as its own layer. Returns the paint
+## image, so the finishes can be compared against each other pixel by pixel.
+func _stamp_finish(finish: StringName, at: Vector2) -> Image:
+	await _clear()
+	_page_view.brush_effect = finish
+	_page_view.begin_stroke(at)
+	_page_view.end_stroke()
+	return await _read_paint()
+
+
+func _painted_pixels(paint: Image) -> int:
+	var bytes := paint.get_data()
+	var painted := 0
+	for i in _page_width * _page_height:
+		if bytes[i * 4 + 3] > 0:
+			painted += 1
+	return painted
+
+
+## Spread (max - min luminance) of the solidly painted pixels down the middle of a
+## dab: 0 for a flat colour, more the more texture the finish put in the wax.
+func _core_spread(paint: Image) -> float:
+	var lowest := 1.0
+	var highest := 0.0
+	for dx in range(-16, 17):
+		var pixel := paint.get_pixel(int(FINISH_DAB.x) + dx, int(FINISH_DAB.y))
+		if pixel.a8 < SOLID_ALPHA:
+			continue
+		var luminance := pixel.get_luminance()
+		lowest = minf(lowest, luminance)
+		highest = maxf(highest, luminance)
+	return maxf(highest - lowest, 0.0)
+
+
+## Brightest solidly painted pixel in the dab -- the glitter check.
+func _brightest_core(paint: Image) -> float:
+	var brightest := 0.0
+	for dy in range(-20, 21):
+		for dx in range(-20, 21):
+			var pixel := paint.get_pixel(int(FINISH_DAB.x) + dx, int(FINISH_DAB.y) + dy)
+			if pixel.a8 >= SOLID_ALPHA:
+				brightest = maxf(brightest, pixel.get_luminance())
+	return brightest
 
 
 func _screen_sample(screen: Image, page_position: Vector2) -> Color:
