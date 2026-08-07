@@ -8,9 +8,10 @@ Project conventions live in `.claude/skills/` — follow them.
 
 A digital coloring book. The player:
 
-1. Picks a **mode**: **Child** or **Adult** — this changes palette difficulty and UI presentation.
-2. Picks a **coloring book** (a collection of pages).
-3. Colors **any page they like, for as long as they like**. Completion is a celebration, never a gate — see §2.1 (free play).
+1. Picks a **coloring book** (a collection of pages).
+2. Colors **any page they like, for as long as they like**. Completion is a celebration, never a gate — see §2.1 (free play).
+
+There is **no Child/Adult mode choice** — removed 2026-08-07 (BL-20; the split existed from M3 through BL-19, and older sections of the backlog describe it as it was).
 
 ### The core coloring mechanic (the heart of the game)
 
@@ -20,24 +21,39 @@ A digital coloring book. The player:
 - **For as long as the press/drag is held**, paint is applied **only inside the locked region** — the brush can wander over the lines, but pixels land exclusively within that region's boundary. This is the "can't color outside the lines" guarantee.
 - Releasing ends the stroke. The next press locks a (possibly different) region.
 
-### Difficulty modes
+### The palette — one crayon row (BL-20…BL-23)
 
-| | Child | Adult |
-|---|---|---|
-| Palette | Short row of **crayons** (8–12 bold colors), large touch targets | Larger swatch grid and/or fine color picker, many colors/shades |
-| Brush | Large, forgiving | Finer sizes, optional size control |
-| Completion | Generous (region counts done at lower coverage) | Stricter coverage threshold |
-| UI | Big, playful, minimal text | Denser, more options |
+One palette for everyone: the **crayon row** (formerly the "child" palette) — 8–12 bold
+colors as crayons, large touch targets, a single forgiving brush, and the generous
+completion threshold (**0.90**, BL-5's child value). The former Adult mode — swatch grid,
+fine color picker, brush-size slider, stricter threshold — is **removed** along with the
+mode-select screen and the settings mode switch (BL-20). One flow, no mode parameter.
 
-Mode is chosen at startup (and changeable from settings); it parameterizes the palette scene and thresholds — **do not fork the game flow per mode**. One flow, mode-driven configuration.
+The crayon row grows three features (designed 2026-08-07):
+
+- **Intensity (BL-22).** Every crayon color has a light→dark range. A swap control on the
+  row toggles it between **color crayons** and **intensity crayons**: after picking a
+  color, swapping redraws the same row as shades of that color from a pale tint to a deep
+  shade; picking one sets the paint color, and swapping back returns to the colors. The
+  intensity ladder is **derived** from the base color (a fixed set of ~7 computed steps,
+  never authored per color), so every crayon set gets it for free. The active pick is
+  always *base color + intensity step*; `color_picked` carries the resolved color and
+  nothing downstream of the palette changes.
+- **Crayon sets (BL-23).** Mario-Paint-style fun: additional authored **crayon sets**
+  beyond the default box — e.g. Pastel, Neon, Earth, Candy, Spooky — cycled with a
+  crayon-box control on the row. Each set is authored data (colors only; brush and
+  threshold stay with the base palette); swapping sets swaps the row's colors and nothing
+  else. Optional stretch: a special rainbow crayon that cycles hue along the stroke
+  (cheap — the brush stamps per-dab color).
+- **Layout (BL-21).** In portrait the crayon row sits along the bottom of the canvas
+  (unchanged — it reads well). In **landscape the crayons dock on the side of the canvas**
+  as a vertical column instead of eating the already-short screen height. Same palette
+  scene, orientation-keyed layout (key off aspect ratio, not width — §3.5).
 
 ## 2. Player flow
 
 ```
-TitleScreen ──► ModeSelect (Child / Adult)
-                    │
-                    ▼
-              BookSelect (grid of book covers)
+TitleScreen ──► BookSelect (grid of book covers)
                     │
                     ▼
               ColoringPage ◄──► free page navigation (any page, any order, any time)
@@ -49,7 +65,7 @@ TitleScreen ──► ModeSelect (Child / Adult)
 There is **no separate completion screen** — neither for a page nor for the
 book (BL-11). Completion is celebrated on the coloring page itself (§2.2).
 
-Progress (which pages are colored, per book, per mode) persists to `user://` via a save system.
+Progress (which pages are colored, per book) persists to `user://` via a save system.
 
 ### 2.1 Free play, completion & the coloring lock (BL-10)
 
@@ -79,7 +95,7 @@ Completing a page is **never a requirement** for anything. The rules:
     still work — the lock stops paint, not looking);
   - **Start over** is disabled (the lock's whole job is preventing accidental
     damage);
-  - Save, navigation, palette browsing and mode switching are unaffected;
+  - Save, navigation and palette browsing are unaffected;
   - tapping the page gives lightweight feedback (e.g. the padlock wiggles) so a
     child understands why nothing is happening.
   The lock is **per page** and **persists** in the save file, so a protected
@@ -99,8 +115,8 @@ completion presentation in the game:
 - Both **fade away on their own** after a few seconds. Nothing persists,
   nothing needs dismissing, and the celebration never blocks input —
   painting, pan/zoom, navigation and the toolbar all keep working under it.
-- The existing rules around *when* it fires are unchanged: thresholds from the
-  mode (§1), once per completion (sticky — re-painting a complete page or
+- The existing rules around *when* it fires are unchanged: the palette's
+  completion threshold (§1), once per completion (sticky — re-painting a complete page or
   restoring one from a save must not re-fire it), and the page-flip ceremony
   still rewards the forward step off a page completed this visit (BL-4/BL-10).
 
@@ -147,7 +163,7 @@ Do **not** CPU-paint pixels with per-pixel region checks on mobile. Use the GPU:
 - Scene layering (back → front): paper background → SubViewport paint texture → **mask texture when the page has one** (BL-12 — its outlines stay visible over the paint as permanent region guides) → display/line-art texture (lines on top, transparent elsewhere).
 - The ID map **must** stay lossless end-to-end or region IDs bleed at edges. In Godot 4 that means: `.import` keeps `compress/mode=0`, `mipmaps/generate=false`, **and `detect_3d/compress_to=0`** (the default `1` silently re-imports as VRAM-compressed if the texture is ever seen in a 3D context). Texture *filtering* is not an import flag — set `TEXTURE_FILTER_NEAREST` on the node/material that samples the ID map.
 
-Per-region **coverage tracking** for completion: count painted pixels per region. Cheap approach: on stroke end, sample the SubViewport texture at a sparse grid of points per region (precomputed from the polygons) rather than reading back full images every frame. Threshold per mode (§1).
+Per-region **coverage tracking** for completion: count painted pixels per region. Cheap approach: on stroke end, sample the SubViewport texture at a sparse grid of points per region (precomputed from the polygons) rather than reading back full images every frame. Threshold from the palette (§1).
 
 The readback itself is **asynchronous** (M6): `RenderingDevice.texture_get_data_async()` via `scripts/components/async_readback.gd`, because the synchronous `Viewport.get_texture().get_image()` blocks the main thread for the length of the presentation queue — 350–530 ms under the default FIFO v-sync, on every stroke end. Two rules come with it: a readback may be **stale by a couple of frames** (harmless, coverage is monotonic), and the engine must **never be torn down while one is queued** (`AsyncReadback.drain()` before any `SceneTree.quit()`; it is a hard crash otherwise).
 
@@ -167,27 +183,25 @@ godot/
   scenes/
     main.tscn                # entry point: swaps screens
     screens/title_screen.tscn
-    screens/mode_select.tscn
     screens/book_select.tscn
     screens/coloring_page.tscn   # page view + palette + toolbar
-    components/palette_child.tscn    # crayon row
-    components/palette_adult.tscn    # swatch grid / picker
+    components/palette_child.tscn    # the crayon row — the one palette (BL-20)
     components/page_view.tscn        # SubViewport painting stack, pan/zoom
     components/page_flip.tscn        # flip transition
   scripts/                   # mirrors scenes/; snake_case.gd
   resources/
     books/<book_name>/book.tres      # BookDef: title, cover, ordered page list
     books/<book_name>/pages/         # PageDef .tres per page
-    palettes/child_palette.tres, adult_palette.tres
+    palettes/child_palette.tres (+ one resource per crayon set, BL-23)
   assets/
     books/<book_name>/page_01.png / page_01_idmap.png / page_01_regions.json
   autoload/
-    game_state.gd            # current mode, current book/page, save/load progress
+    game_state.gd            # current book/page, save/load progress
   tools/
     generate_region_map.gd   # the mapping pipeline (§4) — dev-only, headless
 ```
 
-Custom `Resource` types (`class_name`): `BookDef`, `PageDef` (display name + paths to the display image, the optional mask, the idmap and the regions JSON), `PaletteDef` (mode, colors, brush sizes). Data in `.tres`, logic in nodes.
+Custom `Resource` types (`class_name`): `BookDef`, `PageDef` (display name + paths to the display image, the optional mask, the idmap and the regions JSON), `PaletteDef` (colors, brush sizes, completion threshold). Data in `.tres`, logic in nodes.
 
 One autoload: `GameState`. Screens communicate upward via signals; `main.tscn` swaps screens and injects dependencies (e.g. hands `PageDef` + `PaletteDef` to the coloring screen).
 
@@ -199,7 +213,7 @@ One autoload: `GameState`. Screens communicate upward via signals; `main.tscn` s
   - Between Forward+ and Mobile, Mobile wins on cost: it is the tile-GPU-oriented pipeline (single-pass forward, no clustered-lighting/decal/SDFGI machinery to set up per frame), which means less bandwidth and less battery for output that is pixel-identical here. All five smoke tests pass under it on Windows.
   - Compatibility remains the fallback for a device with no Vulkan 1.0 driver. The code degrades rather than breaks: `AsyncReadback.request()` returns false and the caller uses the synchronous readback.
 - Textures: page art up to 2048×2048; keep ID maps lossless (VRAM-uncompressed) — they are correctness-critical. `rendering/textures/vram_compression/import_etc2_astc=true` gives ETC2/ASTC for everything else.
-- Touch targets ≥ 48 px logical (child-mode controls use 64+, the settings gear 72); UI uses anchors/containers for portrait/landscape, and `scripts/components/safe_area.gd` wraps the shell in notch-safe margins.
+- Touch targets ≥ 48 px logical (the crayon palette's controls use 64+, the settings gear 72); UI uses anchors/containers for portrait/landscape, and `scripts/components/safe_area.gd` wraps the shell in notch-safe margins.
 - Window stretch mode `canvas_items`, aspect `expand`. **Consequence worth knowing**: with the 1152×648 base viewport, a portrait window never narrows the logical canvas below 1152 — it grows the *height* instead (a 720×1280 window becomes a 1152×2048 canvas). Portrait layouts therefore key off **aspect ratio**, not width.
 - Orientation: `display/window/handheld/orientation=6` (SENSOR) — portrait and landscape both allowed.
 - Android export: `godot/export_presets.cfg`, preset `Android`. See [ANDROID.md](ANDROID.md).
@@ -227,7 +241,7 @@ Steps:
 
 Also provide a **debug overlay** toggle in `page_view.tscn` that tints regions from the JSON polygons — the fastest way to verify a page's mapping in-game.
 
-## 5. Implementation milestones (suggested agent work order)
+## 5. Implementation milestones (historical — M1–M6 shipped; the mode split M3/M5 built was later removed by BL-20)
 
 1. **M1 — Mapping pipeline**: `generate_region_map.gd` + one hand-made test page (simple shapes). Verify JSON + ID map outputs. *Everything else depends on this.*
 2. **M2 — Page view & constrained painting**: `page_view.tscn`, SubViewport stack, brush shader with ID-map clipping, stroke lifecycle, pan/zoom. Test with M1's page.

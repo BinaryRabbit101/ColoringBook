@@ -810,3 +810,386 @@ notes.
   (paint pull), possibly `api_client.gd` (a follow-redirects-on-web branch),
   `scripts/dev/sync_smoke.gd`
 - Blocks: installing DLC from the web build (native installs work).
+
+### BL-20: Remove the Child/Adult split — one crayon palette — `done`
+Logged 2026-08-07. Remove the mode choice entirely: the game always uses the
+crayon palette (the former child palette). Full design: DESIGN.md §1.
+- Delete the mode-select screen (`scenes/screens/mode_select.*`) and the
+  settings mode switch; `main.gd` goes TitleScreen → BookSelect directly.
+- Delete the adult palette and everything only it used:
+  `palette_adult.tscn`/`.gd`, `swatch_button.gd`, `brush_size_slider.gd`,
+  `adult_palette.tres`. The brush-size slider (BL-3/BL-14) dies with it — the
+  crayon palette keeps its single forgiving 96 px brush, as today.
+- `GameState.mode` and the save's `"mode"` field become vestigial: nothing
+  writes or branches on them, the reader keeps tolerating the key, and
+  `SAVE_VERSION` does not move (additive-tolerant, the BL-10 pattern).
+- Completion threshold: the single palette's **0.90** (BL-5's child value).
+- Server side: progress rows and sync payloads were always keyed per book,
+  never per mode — no server change. `child_profiles.default_mode` becomes
+  vestigial (column stays; nothing reads it).
+- Affected: `scripts/main.gd`, `scenes/screens/mode_select.*` (delete),
+  `scenes/components/palette_adult.tscn` + `palette_adult.gd` +
+  `swatch_button.gd` + `brush_size_slider.gd` (delete),
+  `resources/palettes/adult_palette.tres` (delete), `autoload/game_state.gd`,
+  `scripts/screens/coloring_page.gd` (mode plumbing), dev smokes (palette/
+  flow/shell/mobile all assert the split today),
+  `.claude/skills/coloring-mechanics/SKILL.md` (after implementation).
+- Done. **Eleven files deleted** and nothing left behind that could grow the split
+  back: `mode_select.{tscn,gd}`, `palette_adult.{tscn,gd}`, `swatch_button.gd`,
+  `brush_size_slider.gd`, `adult_palette.tres`. The palette smoke now asserts each
+  of those paths is *gone* (`ResourceLoader.exists` + `FileAccess.file_exists`),
+  because "we removed it" is the kind of claim that quietly stops being true.
+  **The crayon palette kept its names.** `PaletteChild` / `palette_child.tscn` /
+  `child_palette.tres` are still called that: DESIGN.md §3.4 names them, they are
+  referenced from a dozen places, and a rename would have been the largest and
+  least useful diff in the entry. The class doc says out loud why.
+  **`GameState` lost its mode surface entirely** — `mode`, `set_mode()`,
+  `mode_changed`, `is_child_mode()`, `get_available_modes()`,
+  `get_palette_for_mode()`, `PALETTE_PATHS`, `MODE_CHILD`/`MODE_ADULT`,
+  `DEFAULT_MODE`. What is left is `get_active_palette()` (one cached
+  `PaletteDef`) and `get_palette_scene_path()` (one scene). `PaletteDef` lost
+  `mode` and `shades_per_family` + `family_count()`/`get_family()`/
+  `effective_shades_per_family()`, which existed only for the swatch grid.
+  `ColoringPage` lost `_on_mode_changed()` and the `palette_rebuilt` signal: with
+  one palette and one threshold, nothing rebuilds mid-book.
+  **The save's `"mode"` key is read but never written.** `load_save()` reads past
+  it (a new `GameState.VESTIGIAL_SAVE_KEYS` names it, so the tolerance is
+  declared rather than accidental) and `to_save_dict()` no longer emits it.
+  `SAVE_VERSION` deliberately did **not** move — dropping a key nobody reads is
+  additive-tolerant in both directions, the same argument BL-10 made for adding
+  one — and the smokes prove both halves: a planted pre-BL-20 file loads, and the
+  file written back is the same schema version without the key.
+  **Threshold**: the single 0.90. `CoverageTracker` was not touched; it is still
+  injected from the `PaletteDef` and still clamps against `MIN_REGION_THRESHOLD`.
+  **Settings** lost its Mode row; it now shows *which* crayons the game paints
+  with (`Crayons — Crayon Box`) and offers nothing to change about it, so the
+  panel is still an honest inventory rather than a dead end.
+- **The mode-split assertions were rewritten, not deleted** (the point of the
+  exercise). Shell check (a) now asserts the title tap reaches the shelf DIRECTLY
+  and that `main` has no `show_mode_select`/`get_mode_select_overlay` left; check
+  (f) — "change mode mid-book" — became "one palette, one threshold, nothing to
+  change mid-book", which opens settings over an open book and asserts there is
+  no Mode row and the palette it opened with is the palette it still has; check
+  (b) asserts the save has NO `"mode"` key; the DLC smoke's v1-migration check
+  asserts the same. Palette check 1 asserts the deleted files are gone and that
+  `PaletteDef` carries no `mode`/`shades_per_family`; check 8 asserts `GameState`
+  has no mode property, method or signal, and drives the save round-trip above.
+- Smokes: **palette 112 → 72** (the adult half's 40-odd checks went with the
+  adult palette; the rewrites above landed in their place), **shell 147 → 142**,
+  **mobile 139 → 133** (its portrait pass no longer has a mode-select screen to
+  stack cards on), **flow 159 → 159** and **dlc 90 → 90** (one assertion swapped
+  each). paint 47 untouched. Also fixed while in there: shell/mobile wiped their
+  own screenshot directory in setup and then failed every `save_png` — the shot
+  dir is re-made in `_screenshot()` now.
+
+### BL-21: Landscape layout — crayons dock beside the canvas — `done`
+Logged 2026-08-07 from playtest. Portrait ("vertical") looks good — keep it.
+In landscape the bottom crayon row eats the already-short screen height:
+dock the crayons on the **side** of the canvas as a vertical column instead.
+Same palette scene, orientation-keyed layout (aspect ratio, not width —
+DESIGN.md §3.5). Everything the row carries must work in both orientations:
+slide-to-select (BL-2), the pick-preview bubble (BL-15/16 — offset away from
+the hand still, which is sideways now), the crayon lift/halo (the lift must
+point INTO the canvas, with headroom reserved per BL-16's clipping gotcha),
+and the swap/set controls arriving with BL-22/BL-23.
+- Affected: `scenes/screens/coloring_page.tscn`,
+  `scripts/screens/coloring_page.gd`, `scenes/components/palette_child.tscn`,
+  `scripts/components/palette_child.gd`, `crayon_button.gd` (lift direction),
+  `palette_slide_input.gd` (hit-testing), `pick_preview.gd`, dev smokes.
+- Done. **One `BoxContainer`, pointed two ways.** `coloring_page.tscn`'s `Ui`
+  VBox gained a `Body` between the toolbar and the page; `PageView` and the
+  palette are its two children, in that order, always. Portrait points `Body`
+  down (crayons under the canvas — pixel-identical to before), landscape points
+  it across (crayons to the right of it). A plain `BoxContainer`, not an
+  H/VBoxContainer, because those two refuse `set_vertical()` — the same trap M6
+  hit with `ModeSelect`. `ColoringPage.is_landscape()` is `size.x > size.y`:
+  **aspect, never width** (DESIGN.md §3.5 — a portrait window's logical canvas
+  never gets narrow, so a width threshold is keyed off nothing).
+  `PaletteChild.set_layout()` does the rest with four moves and no second scene:
+  the strip's `custom_minimum_size` and size flags swap axes (212 px across its
+  short one either way), `Body`/`CrayonRow` flip direction, the `ScrollContainer`
+  swaps which axis scrolls, and the crayons change orientation.
+- **The crayon rotates rather than forking.** `CrayonButton._draw()` now sets up a
+  CANONICAL space — tip up, lift rising — and `ORIENT_LEFT` rotates it a quarter
+  turn anticlockwise (`draw_set_transform(Vector2(0, size.y), -PI/2)`) before a
+  single pixel is drawn, so canonical `(x, y)` lands at screen `(y, height - x)`.
+  Not one drawing routine was duplicated, and — the reason it is worth doing this
+  way — everything expressed in canonical space follows for free: the lift points
+  canonical UP, which is screen LEFT, which is **into the canvas** when the column
+  is docked on the right; `LIFT_HEADROOM` is still reserved at the canonical top,
+  so BL-16's bounce overshoot still has somewhere to go; and the halo still
+  flattens along the axis the scroller clips, because that axis is canonical in
+  both orientations. `box_for()` and `lift_direction()` are the public handles the
+  smoke measures instead of trusting the constants.
+- **The pick bubble parks sideways.** `PickPreview` had "above the finger" baked
+  into its size, its tail and its clamp; all three are now one direction vector
+  (`get_tail_direction()` — DOWN for `PLACE_ABOVE`, RIGHT for `PLACE_LEFT`). The
+  body circle always sits in the box's top-left and the tail is what makes the box
+  longer on one axis, so `_size_for()`, `_reposition()` and `_draw()` are each a
+  single expression in that vector. The palette sets the placement when its layout
+  flips: the hand comes in from the side the crayons are docked on, so the bubble
+  goes the other way. `_reposition()` also clamps BOTH axes now — a clamp on the
+  tail's axis can only push the bubble further from the finger, never onto it.
+  Slide-to-select needed **nothing**: `PaletteSlideInput` hit-tests real control
+  rects in viewport space, which does not care which way a strip runs.
+- **Gotcha:** the docked column is 212 px wide and a crayon is 176 px long, so
+  ten crayons no longer fit on a 738 px-tall canvas — the strip scrolls, which is
+  correct and future-proof (BL-23's sets can be any length) but means the last
+  crayon is a flick away in landscape where it was on screen in portrait.
+- Smokes: **palette 72 → 92** (new check 5b flips the layout and back: the strip's
+  thickness moves axes, the scroll swaps direction, every crayon lies on its side
+  and stacks, the touch target holds, the lift points LEFT and still springs
+  inside its headroom, the bubble parks entirely to the left of the finger at the
+  same `FINGER_GAP`, and flipping back restores the row exactly),
+  **mobile 133 → 141** (portrait is asserted as the UNCHANGED case — strip below
+  the canvas — then the window goes back to landscape and the same screen, same
+  palette instance, docks as a column beside the page, costs the canvas only the
+  strip's width, keeps its touch targets and lifts left; `coloring_landscape_dock.png`
+  is the new screenshot).
+
+### BL-22: Crayon intensity — swap the row from colors to light→dark — `done`
+Logged 2026-08-07. Full design: DESIGN.md §1. A swap control on the crayon
+row toggles between **color crayons** and **intensity crayons**: shades of
+the currently selected color from a pale tint to a deep shade (~7 steps,
+**derived** from the base color — computed, never authored per color).
+Picking an intensity resolves the paint color (base × step) through the
+existing `color_picked` chain — the paint path, shader and stroke lifecycle
+do not change. Picking a new base color resets intensity to the full/middle
+step; in intensity view the selected crayon shows which step is active, and
+the swap control makes the current view obvious (kid-readable, drawn from
+primitives like the rest of the shell).
+- Affected: `scripts/components/palette_child.gd`, `palette_child.tscn`,
+  `crayon_button.gd` (render a shade), a small intensity-ladder helper (in
+  `PaletteDef` or a component), `pick_preview.gd` (bubble shows the resolved
+  shade), palette smoke, `.claude/skills/coloring-mechanics/SKILL.md`.
+- Done. **The ladder is arithmetic, not data.** `PaletteDef.shade_of(base, step)`
+  is a pure function: `INTENSITY_STEPS` = 7, `INTENSITY_BASE_STEP` = 3 (the
+  crayon's own colour), rungs below it lightened linearly to `MAX_TINT` 0.72 and
+  above it darkened linearly to `MAX_SHADE` 0.60, alpha untouched.
+  `shades_of(base)` returns the whole ladder. That is the entire feature's data
+  model, and it is why BL-23's sets get intensity for free — a per-colour table
+  would have been nine numbers to get wrong for every crayon of every set, and
+  every new set would have shipped without one.
+- **The strip grew a second face, not a second component.** `PaletteChild` has a
+  `_view` (`VIEW_COLORS` / `VIEW_SHADES`) and `_rebuild_strip()` builds the crayon
+  buttons for whichever is up — the same `CrayonButton`s, carrying either the box's
+  colours or the ladder of the colour in hand. One pick callback (`_pick_at`)
+  dispatches on the view, so `PaletteSlideInput` never learns any of this exists
+  and slide-to-select works identically on both faces.
+- **Nothing downstream of the palette changed**, which was the constraint. The
+  active pick is always "crayon C at rung R"; `get_selected_color()` resolves it
+  in one place and `color_picked` carries the resolved colour exactly as it always
+  did. `ColoringPage`, `PageView`, `brush.gdshader`, the stroke lifecycle and the
+  coverage path were not touched. The pick bubble shows the resolved shade
+  (`_candidate_color()`), because the bubble's job is "what will this paint".
+- **Picking a crayon resets the rung** to its own colour (the design's
+  full/middle step), so a child who wandered to rung 6 once is not stuck there for
+  every colour afterwards. Swapping the VIEW, in either direction, is deliberately
+  **not** a pick — it emits nothing and the brush keeps whatever shade is on it.
+- **`IntensityButton`** (`scripts/components/intensity_button.gd`, new,
+  primitive-drawn, 88 px) answers two questions in one tile: it draws the whole
+  ladder of the current crayon with the ACTIVE rung wider inside a bright rim and
+  a dark keyline — the same grammar a selected `CrayonButton` uses, and visible
+  when no finger is anywhere near the strip (BL-15's lesson) — and it changes
+  state to say what pressing does: closed tile with a chevron pointing in while
+  the colours are up, open tile with a gold border and the chevron pointing back
+  out while the ladder is. It lives in a new `Controls` box on the strip, OUTSIDE
+  the crayon scroller, so a slide can never land on it.
+- Smokes: **palette 92 → 117**. The ladder is asserted as derived (rung 3 of every
+  crayon IS that crayon; all ten ladders run pale to deep without a break;
+  `PaletteDef` authors no shade table), and the swap is driven the way a finger
+  would: the strip becomes exactly `shades_of(base)`, a shade press emits
+  `color_picked` ONCE carrying the RESOLVED colour, the crayon in hand is still
+  the crayon in hand, the bubble previews the resolved shade, swapping back keeps
+  the shade on the brush, and picking a new crayon comes back to rung 3.
+
+### BL-23: Fun crayon sets (Mario Paint-inspired) — `done`
+Logged 2026-08-07. Full design: DESIGN.md §1. Additional authored crayon
+**sets** beyond the default box — fun and unique, in the Mario Paint spirit —
+cycled with a crayon-box control on the row: e.g. Pastel, Neon, Earth, Candy,
+Spooky. Each set is authored data (colors only; brush size and completion
+threshold stay with the base palette), and swapping sets swaps the row's
+colors and nothing else. Intensity (BL-22) works on every set for free since
+its steps are derived. Optional stretch, not required to close this entry:
+one special rainbow crayon that cycles hue along the stroke (per-dab color —
+cheap with the existing stamped-quad brush).
+- Affected: `resources/palettes/` (new set resources),
+  `scripts/resources/palette_def.gd` (or a lighter `CrayonSetDef`),
+  `palette_child.gd`/`.tscn` (set-cycling control), palette smoke,
+  `.claude/skills/coloring-mechanics/SKILL.md`.
+- Done. **`CrayonSetDef`** (`scripts/resources/crayon_set_def.gd`, new) is the
+  lighter resource the entry offered: `display_name`, `sort_order`, `colors`, and
+  that is the whole class. It cannot carry a brush size, a hardness or a
+  threshold — the palette smoke asserts those properties are ABSENT, because a
+  crayon box that could change how the game plays is a difficulty mode wearing a
+  hat, and BL-20 had just finished deleting those.
+  **Sets are DISCOVERED, not listed**, exactly like books: `CrayonSetDef.discover()`
+  scans `res://resources/palettes/sets/*.tres` and sorts by `sort_order` then name,
+  so shipping a box is dropping a file and the cycle order does not depend on
+  filenames (or on hand-writing a typed `Array[CrayonSetDef]` into a `.tres`,
+  which was the alternative and is exactly the kind of serialisation that breaks
+  quietly). It handles `.remap` for exported builds, like `BookDef` does.
+  **Five shipped**: Pastel, Neon, Earth, Candy, Spooky — ten crayons each.
+- **One index covers both kinds of box.** `PaletteDef.get_crayon_set_colors(i)`:
+  0 is the palette's own `colors` (the default box, which stays authored on the
+  palette because the title screen, the boot splash and the confetti all read it),
+  1..n are the discovered sets. `crayon_set_count()` / `wrap_crayon_set()` /
+  `get_crayon_set_name()` complete it, and the discovery is cached
+  (`reload_crayon_sets()` for tests). Callers never have to know which is which.
+  `PaletteChild._active_colors()` is the one line that changed to make the strip
+  set-aware; **intensity then worked on every set with no further code at all**,
+  which is the payoff for BL-22 deriving the ladder.
+- **A new box is a fresh start**: first crayon, own colour, colours face. Leaving
+  a child on rung 6 of a colour that no longer exists was the alternative.
+  `set_crayon_set()` emits one `color_picked` with the new crayon; the brush size
+  is untouched and the smoke asserts it, because that is the whole "colours only"
+  claim in one number.
+- **`CrayonBoxButton`** (`scripts/components/crayon_box_button.gd`, new,
+  primitive-drawn, 88 px, next to the intensity swap) draws a carton with the
+  CURRENT set's first five crayons standing in it, a pip per box with the current
+  one filled, and a right chevron. It reports the position rather than previewing
+  the destination — the opposite convention from `IntensityButton` next to it, and
+  deliberately so: the ladder is a mode you go into and come back out of, the
+  boxes are a carousel with no home. No text: the set's name is the obvious label
+  and is exactly what a four-year-old cannot use.
+- **Gotcha:** the two 88 px tool tiles share the strip's SHORT axis with its
+  margins (212 − 24 = 188 px in a row, 212 − 28 = 184 px in a column), so they fit
+  with 2 px to spare. Growing either tile, or adding a third, overflows the strip
+  in silence — the palette smoke now measures every tool tile against the strip's
+  own rect in all three layouts rather than trusting the arithmetic.
+- **Not done: the optional rainbow crayon.** It was explicitly a stretch, and the
+  cheap version of it (per-dab colour along a stroke) is the one thing in this
+  round that would have had to reach into the frozen stroke lifecycle. Left open.
+- Smokes: **palette 117 → 146** (new check 5d: the five sets are discovered in
+  authored order and validate, no two crayons in a box are closer than 0.10 apart
+  — a looser floor than the default box's 0.25, because a Pastel box whose crayons
+  were a quarter of the colour cube apart would not be a pastel box — a set
+  carries no brush/threshold/mode property, box 0 IS the palette's own crayons,
+  pressing the control swaps the strip and puts its first crayon in hand without
+  moving the brush, the ladder works on a set crayon with nothing authored for it,
+  and cycling past the last box wraps home; plus the tool-tile fit check in all
+  three layouts).
+
+### BL-24: Web authoring — book & page CRUD + one-button publish — `done`
+Logged 2026-08-07. Full design: DLC_SERVER.md §10.3. The admin website
+(`server/`, Inertia) becomes a full authoring surface. Three parts:
+1. **Books CRUD**: create and remove (empty) coloring books in the browser.
+   A web-authored book gets its own one-book pack (slug = book slug) so packs
+   stay the delivery/entitlement unit and the game changes not at all.
+2. **Pages CRUD**: per book — add, remove, reorder, retitle pages; upload or
+   replace the **detail (display) image** and the **optional masking image**
+   per page (BL-9/BL-12 semantics). Each upload queues a server-side mapping
+   job (headless Godot running `tools/generate_region_map.gd` — the same
+   pipeline, never a PHP port), whose artifacts + §10.1 validation verdict +
+   region-overlay preview land on the page editor.
+3. **Publish**: one button per book — refuses while any page is unmapped or
+   failing validation, otherwise builds the §7.2 pack directory and publishes
+   an immutable new version through `PublishPackDirectory` +
+   `PublishPackVersion` (the single existing code path). The game picks the
+   version bump up through the existing entitlement/update check.
+- Affected: `server/` (books/pages authoring models + routes/admin.php +
+  `routes/api/admin.php`, mapping-job queue, `config/coloringbook.php`
+  `godot_binary` knob, Inertia pages, Pest + Dusk coverage),
+  `docs/DLC_SERVER.md` §10.3/§11 (done alongside this entry).
+- Deploy note: puts a pinned headless Godot binary on the mini-pc; treat an
+  engine upgrade there as a content-pipeline change (re-map a fixture page
+  and diff artifacts before trusting it).
+- Done, all three parts. Server-side only; `godot/` untouched. Full as-built
+  notes in `server/CLAUDE.md` § "WP14 — web authoring".
+  - **The authoring data model is a second pair of tables**, and that was the
+    one real design decision. `books`/`pages` are a *projection of the newest
+    published release* — `PublishPackDirectory` drops and rebuilds them on every
+    publish, deliberately — so they can hold no draft state at all: a page
+    uploaded but not yet mapped, a title changed since the last release, a
+    per-page tuning override would each be deleted by the next publish. So
+    `authored_books` (ulid, `book_uid` unique, `pack_id`, title, blurb) and
+    `authored_pages` (uploads: `display_asset_id` + optional `mask_asset_id`;
+    derived and nullable: `idmap`/`regions`/`mask_artifact` asset ids,
+    `image_w`/`image_h`/`region_count`; plus `mapping_status`, `mapping_error`,
+    `mapping_log`, `validation_errors`, `validation_warnings`, `tuning`,
+    `UNIQUE(book, page_index)`). The workspace is draft state; the catalog is
+    what players have; publish is the only thing that crosses.
+  1. **Books CRUD.** One book ↔ one pack, `packs.slug = book_uid`, created
+     together so the slug — a pack's permanent address in every URL the game
+     builds — is reserved the moment the uid is. `is_free` chosen at creation.
+     The uid is checked three ways (unique in `authored_books`, in `books`, and
+     as a `packs.slug`) and can never be edited: it is what every `book_progress`
+     and paint row on every device keys off. Deleting a never-published book
+     removes it outright — pack, versions, catalog rows, entitlements and the
+     `packs/<slug>/` directory — because leaving a dead slug behind reserves a
+     uid for a mistake forever; deleting a published one **retires** the pack and
+     removes only the workspace, since `scopeDownloadable()` already includes
+     `retired` so delisting never takes a book off a child's shelf (§7.3).
+     Content-addressed assets are never deleted either way: they are shared by
+     digest and a published release may be standing on the same bytes.
+  2. **Pages CRUD + server-side mapping.** Add / remove / reorder / retitle,
+     upload or replace the detail image and the optional mask, either as
+     multipart or as ULIDs of assets already uploaded to `POST /admin/assets`.
+     BL-9/BL-12 hold exactly: mask present → the mask is the mapping source and
+     `mask_artifact_asset_id` (the pipeline's display-resolution resample) ships
+     as `page_NN_mask.png`; mask absent → the display image maps itself and no
+     mask file appears in the pack. Each detail/mask/tuning change **clears the
+     derived columns and re-queues** `App\Jobs\MapAuthoredPage` — leaving
+     yesterday's ID map beside today's art is the exact failure
+     `PackValidation`'s bijection check exists to catch, and it would have been
+     the server that created it. The job stages a scratch tree (the mask at
+     `source/mask.png`, deliberately *not* at `page_01_mask.png`, which is where
+     the pipeline writes its own resample), shells out through
+     `App\Services\Mapping\MappingRunner`, stores the artifacts as
+     content-addressed assets and runs the existing `PackValidation`, storing the
+     verdict on the row. Mapping and validating are separate verdicts: a page can
+     map perfectly and still be unpublishable because one region swallowed the
+     drawing — and the editor says "that is a gap in the line art, not a region",
+     because only the artist can fix it. Reordering is a two-phase shuffle
+     (unique `(book, page_index)`, and SQLite checks unique indexes per
+     statement); deleting compacts, because a hole at index 2 would publish a
+     manifest the client reads as a book with a missing page.
+     Nothing in the job throws on a bad page — a failed run is a state on the
+     row, since the queue retrying a gap in the line art three times only loses
+     the message.
+  3. **Publish.** One button. Refuses with the *whole* list of reasons while any
+     page is unmapped or failing §10.1; otherwise writes a §7.2 directory from
+     the book's current pages and hands it to `SubmitPackVersion` +
+     `PublishPackVersion`. **No second publisher**: every `pack_versions` row in
+     the app still comes out of `PublishPackDirectory`. It re-validates on the
+     way — cheap check before an irreversible act, and the assets could have been
+     replaced or re-mapped since. Pack cover and book cover are both page one's
+     display art (one blob, two `assets.kind` rows). Edits after a publish
+     accumulate as draft state until the next press, which is v2, never a rewrite
+     of v1.
+  - **`MappingRunner` is the only seam**, and exists solely because a shell-out
+    is not testable on a box with no engine. `GodotMappingRunner` builds
+    `<godot> --headless --path <project> --script tools/generate_region_map.gd
+    -- <mapping source> [--display <page>] [flags]`, passing every tunable
+    explicitly so a run is reproducible from the summary the pipeline prints; a
+    missing or unconfigured binary is a *failed run with a sentence*, never an
+    exception, so a box with no engine shows "no headless Godot is configured
+    here" on the page instead of 500ing with a row stuck at `running`. There is
+    no PHP mapping code anywhere and there must never be. Tests bind
+    `Tests\Support\FakeMappingRunner`, which drops pre-baked
+    `tests/Fixtures/pages/<case>` artifacts into the paths a real run would have
+    written; `QUEUE_CONNECTION=sync` means the job runs inline, so a page that
+    came back from an endpoint has really been through staging → run → store →
+    validate.
+  - Config: `coloringbook.godot_binary` (**null by default**) plus an
+    `authoring` block — `godot_project` (defaults to the sibling `../godot`),
+    `mapping_script`, `mapping_timeout_seconds`, `queue`, `max_image_kb`, and
+    `tuning`, the pipeline's own flag defaults pinned server-side with optional
+    per-page overrides in the same vocabulary (so a page tuned in the browser can
+    be re-run by hand on the dev box with the same flags).
+  - UI: `admin/Books.vue`, `admin/Book.vue`, `admin/AuthoredPage.vue` (the page
+    editor: mapping state, the §10.1 region-overlay preview via
+    `PackPreview::renderPair()`, the validation report in plain language, the
+    tuning form and the pipeline output). Sidebar gained a **Books** entry,
+    admin-only like the rest.
+  - Tests: **417 → 471** (`composer test` green: pint + phpstan level 7 + pest;
+    470 passed, 1 skipped — the opt-in Godot integration test). Dusk **33 → 40**,
+    all green, `tests/Browser/AuthoringTest.php`. The engine integration test is
+    opt-in via `COLORINGBOOK_GODOT_BINARY` and was verified against the real
+    4.5.1 binary on the dev box; it is also the check to run when the pinned
+    engine on the mini-pc moves.
+  - Still open: `COLORINGBOOK_GODOT_BINARY` has to be set in the mini-pc's `.env`
+    (with a pinned engine and a queue worker with a real memory limit for 2048²
+    images) before web-authored pages can map there — until then the editor
+    reports "no headless Godot binary is configured on this server" and refuses
+    to publish, which is the intended behaviour rather than a failure.

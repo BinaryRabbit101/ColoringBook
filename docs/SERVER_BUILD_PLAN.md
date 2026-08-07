@@ -222,6 +222,45 @@ After WP10. `sync_queue.json`, progress push/pull + client-side merge mirror,
 web build and deploy to the mini-pc port-91 site (game only — the Laravel app
 deploys in a later round).
 
+## Campaign 3 — one palette + crayon features (game), web authoring (server) (2026-08-07)
+
+Backlog **BL-20…BL-24**; the design was updated first — DESIGN.md §1 (the palette) and
+DLC_SERVER.md §10.3 (web authoring) are the authorities. Two independent workstreams in
+disjoint directories, safe to run in parallel.
+
+### WP13 — Game: palette round (one Opus agent, entries in order)
+
+All four entries touch the same palette files, so they are sequential inside one agent.
+Order matters — BL-20 deletes the adult half first so the later features are built once,
+on the surviving palette:
+
+1. **BL-20** — single palette: delete mode select, the adult palette + swatch/slider,
+   `adult_palette.tres`; vestigial `GameState.mode` / save `"mode"`; threshold 0.90.
+2. **BL-21** — landscape: crayons dock beside the canvas (aspect-ratio keyed).
+3. **BL-22** — intensity swap (derived light→dark ladder, resolved through `color_picked`).
+4. **BL-23** — fun crayon sets (authored set resources + a set-cycling control).
+
+Every dev smoke suite green after each entry (the mode-split assertions in palette/flow/
+shell/mobile smokes must be rewritten, not deleted); project runs clean via godot-mcp;
+update `.claude/skills/coloring-mechanics/SKILL.md` at the end of the round.
+
+### WP14 — Server: web authoring (one Opus agent, BL-24)
+
+- Books/pages authoring: models + migrations, `routes/admin.php` Inertia pages +
+  `routes/api/admin.php` endpoints per DLC_SERVER.md §11's web-authoring table.
+- Per-page mapping job: queued shell-out to headless Godot
+  (`config('coloringbook.godot_binary')`; tests use a fake binary/pre-baked artifacts —
+  the suite must stay green on a box with no Godot).
+- §10.1 validation + region-overlay preview surfaced on the page editor.
+- One-button publish through `PublishPackDirectory` + `PublishPackVersion` (never a
+  second publish path).
+- `composer test` green; Dusk coverage for the new pages follows WP8's patterns.
+
+### Integration (main session, after both)
+
+Merge, run the full game smoke suites + `composer test`, then export the web build and
+deploy game + server to the mini-pc — the standing final step of every feature round.
+
 ## Deploy (later, not this campaign)
 
 Mini-pc deploy conventions assume one repo per site with `deploy.sh` doing

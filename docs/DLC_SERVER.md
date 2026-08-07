@@ -160,6 +160,8 @@ users                 id, ulid, email (unique), password, is_admin,
                       email_verified_at, timestamps
 child_profiles        id, ulid, user_id →users, nickname, avatar_index,
                       age_band nullable, default_mode ('child'|'adult'), timestamps
+                      (default_mode is vestigial since BL-20 removed the mode split —
+                       the column stays, nothing reads it)
 devices               id, ulid, user_id →users, device_uid (unique per user),
                       device_name, platform, last_seen_at, timestamps
 personal_access_tokens   (Sanctum's own table; token→device via tokenable + name)
@@ -276,8 +278,9 @@ identifier. So:
 > directories get renamed once during migration. This is a client-side change with no server
 > dependency and belongs in **Phase 0**.
 
-The `mode` field stays local — it is a device/profile preference, not progress. If profiles
-ship (Q4), `default_mode` on the profile is the server-side notion.
+The `mode` field stays local — and since BL-20 (2026-08-07) it is vestigial everywhere:
+the game has one palette, nothing writes or branches on `mode`, and readers merely
+tolerate the key in old saves.
 
 ### 6.2 What syncs, and how eagerly
 
@@ -564,6 +567,9 @@ Worth stating plainly because it constrains the API more than anything else:
 
 > **Decision — the mapping pipeline stays a local dev tool. The server accepts and validates
 > its output; it does not run it.**
+>
+> *Amended 2026-08-07 (BL-24): still true for dev-box packs, but web-authored books (§10.3)
+> run the same pipeline server-side via the escape hatch this section reserved.*
 
 Reasoning, and this is not a performance argument:
 
@@ -597,7 +603,8 @@ happen (someone uploading mismatched artifacts):
 
 A deliberate escape hatch for later, if it is ever wanted: a queue worker shelling out to
 headless Godot for a *first-pass* mapping, with the dev-box run remaining canonical and
-overridable. Explicitly **not** Phase 1–6 work.
+overridable. Explicitly **not** Phase 1–6 work. *(Taken up 2026-08-07 — §10.3 promotes
+exactly this for web-authored books.)*
 
 ### 10.2 Admin flow
 
@@ -628,6 +635,48 @@ It is a single-operator tool: no roles, no workflow states beyond
 less friction) that walks `resources/books/<book>/`, resolves each `PageDef` to its three
 artifacts, writes `manifest.json` + `book.json`, zips, and POSTs with an admin token. It is
 the same tool a developer would otherwise write by hand three times.
+
+### 10.3 Web authoring — books, pages, publish (2026-08-07, BL-24)
+
+The admin site becomes an **authoring surface**, not just an upload door. The §10.1
+decision is amended, not reversed: the dev-box run remains available (and canonical for
+hand-tuned pages), but a book can now be built end-to-end in the browser.
+
+- **Books.** The admin creates and deletes coloring books in the browser. A web-authored
+  book gets its own **one-book pack** (pack slug = the book's slug, `is_free` chosen at
+  creation): packs stay the delivery/entitlement unit and the game client changes not at
+  all, while the operator thinks in books. Deleting a never-published book removes it
+  outright; deleting a published one **retires** its pack (§7.3 — never delete files a
+  household owns).
+- **Pages.** Per book: add, remove, reorder, retitle pages; upload or replace the
+  **detail (display) image** and the **optional masking image** per page. BL-9/BL-12
+  semantics hold exactly: mask present → the mask is the mapping source and its
+  display-resolution resample ships as `page_NN_mask.png`; mask absent → the display
+  image is the mapping source and no mask file appears in the pack. Uploads are
+  content-addressed `assets` rows (`display`/`mask` kinds), the same store §10.2 uses.
+- **Mapping runs server-side, per page, as a queued job** whenever a page's detail or
+  mask changes. The job shells out to **headless Godot running
+  `tools/generate_region_map.gd`** — one implementation, never a PHP port — writes the
+  idmap/regions (and resampled-mask) artifacts back as `assets`, then runs the existing
+  §10.1 `PackValidation` checks and stores the verdict on the page. The page editor
+  shows the §10.1 region-overlay preview and the failure report (a giant region still
+  means "a line has a gap — fix the art"; the editor says so instead of hiding it).
+  Default tuning knobs with optional per-page overrides stored on the page row cover
+  the §10.1 tuning loop at web quality; a page needing real hand-tuning can still be
+  mapped on the dev box and its artifacts uploaded to override the job's output.
+- **Publish** is one button on the book. It refuses while any page is unmapped or
+  failing validation; otherwise it builds the §7.2 pack directory from the book's
+  current pages (manifest.json, book.json, per-page display/mask/idmap/regions) and
+  hands it to `PublishPackDirectory` + `PublishPackVersion` — the single existing
+  publish path. The result is an immutable new `pack_versions` row (§7.3); the game
+  sees the version bump through the existing entitlement/update check and downloads
+  the delta. Edits after publishing accumulate as draft state until the next press.
+
+Operational note: this puts a headless Godot binary on the mini-pc after all. §10.1's
+cost arguments stand but are now paid on purpose: pin the binary path and version in
+`config/coloringbook.php` (`godot_binary`), give the queue worker a real memory limit
+for 2048² images, and treat an engine upgrade as a content-pipeline change — re-map a
+fixture page and diff the artifacts before trusting it.
 
 ---
 
@@ -685,6 +734,17 @@ old game builds live on players' devices forever.
 | `GET` | `/admin/packs/{slug}/versions/{v}/preview` | region-overlay preview per page |
 | `POST` | `/admin/packs/{slug}/versions/{v}/publish` | flips `published_at` |
 | `POST` | `/admin/entitlements` | grant a promo/gift entitlement by email |
+
+Web authoring (§10.3, BL-24) adds book/page CRUD alongside the pack routes:
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET`/`POST` | `/admin/books` | list / create a book `{book_uid, title, is_free}` — creates its one-book draft pack |
+| `PATCH`/`DELETE` | `/admin/books/{book_uid}` | retitle / delete (retires the pack once published) |
+| `GET`/`POST` | `/admin/books/{book_uid}/pages` | list / add a page (multipart detail + optional mask, or asset ulids) |
+| `PATCH`/`DELETE` | `/admin/books/{book_uid}/pages/{index}` | title, reorder, replace detail/mask / remove |
+| `GET` | `/admin/books/{book_uid}/pages/{index}/status` | mapping-job state, validation verdict, preview URL |
+| `POST` | `/admin/books/{book_uid}/publish` | build + validate + publish a new pack version (§10.3) |
 
 Error shape everywhere: `{"error": {"code": "ENTITLEMENT_REQUIRED", "message": "..."}}` with a
 stable machine-readable `code` — the client branches on `code`, never on prose.
