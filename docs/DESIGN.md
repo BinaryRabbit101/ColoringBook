@@ -41,14 +41,21 @@ The crayon row grows three features (designed 2026-08-07):
   nothing downstream of the palette changes.
 - **Crayon sets (BL-23).** Mario-Paint-style fun: additional authored **crayon sets**
   beyond the default box — e.g. Pastel, Neon, Earth, Candy, Spooky — cycled with a
-  crayon-box control on the row. Each set is authored data (colors only; brush and
+  **cycle bar at each end of the strip** (BL-34: back at one end, forward at the other,
+  both outside the crayon scroller). Each set is authored data (colors only; brush and
   threshold stay with the base palette); swapping sets swaps the row's colors and nothing
-  else. Optional stretch: a special rainbow crayon that cycles hue along the stroke
+  else. Which box is out is drawn as a pip row on the bars plus a transient name banner
+  on every cycle — no permanent label, because the strip is built for a child who cannot
+  read yet. Optional stretch: a special rainbow crayon that cycles hue along the stroke
   (cheap — the brush stamps per-dab color).
 - **Layout (BL-21).** In portrait the crayon row sits along the bottom of the canvas
   (unchanged — it reads well). In **landscape the crayons dock on the side of the canvas**
   as a vertical column instead of eating the already-short screen height. Same palette
   scene, orientation-keyed layout (key off aspect ratio, not width — §3.5).
+- **Every crayon is visible, always (BL-33).** The strip never scrolls: it sizes its
+  crayons to the room it has (available length ÷ count, floored at the 64 px touch
+  target) and wraps onto a second rank across the strip when the floor is reached. A
+  crayon off the end of a scroller is a crayon that does not exist.
 
 ## 2. Player flow
 

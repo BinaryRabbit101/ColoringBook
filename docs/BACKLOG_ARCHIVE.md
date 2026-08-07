@@ -1556,3 +1556,136 @@ ProgressBar.
   anything touching an autoload — use a throwaway scene in project mode.
 - The row grows 14→48 px while downloading (intentional — draws the eye),
   and the strip hides itself once the confetti lands.
+
+### BL-34: Cycle-left / cycle-right arrows at the strip's ends — `done`
+Logged 2026-08-07 (playtest: the crayon-box carousel only ran forwards, so
+overshooting the box you wanted cost a full lap). Done 2026-08-07 together with
+BL-33, which depends on where the arrows land.
+- **`CrayonCycleButton` (new, `scripts/components/crayon_cycle_button.gd`)**,
+  one at each OUTER END of the strip's long axis, replacing the single
+  forward-only `CrayonBoxButton` tile. Primitive-drawn like everything else in
+  this shell. It is a **bar**, not a tile — `THICKNESS` 68 px across the strip's
+  long axis, stretching along its short one — because a bar costs the crayons the
+  least length, and length is the entire currency of BL-33's fit.
+- **Where they sit, and why it is not symmetric.** `Body` is
+  `[Controls, Scroll, CycleNext]`: the LEADING bar shares the tool band
+  (`Controls`) with the `IntensityButton`, the TRAILING one caps the far end
+  alone. The obvious symmetric layout — a band of its own at each end — costs the
+  strip 88 + 88 px of length instead of 88 + 68, and at the smallest landscape
+  canvas that difference is the whole margin between "two ranks of 65 px crayons"
+  and "does not fit, scroll after all". Both bars are still at the two outer ends
+  of everything on the strip, which is what the smoke asserts (`_ends_of`:
+  nothing — crayon or tool — starts before the back bar or ends after the forward
+  one).
+- **Both are OUTSIDE the crayon `ScrollContainer`**, the BL-2/BL-23 rule
+  preserved: a slide-to-select gesture can never land on a tool.
+- **Each bar previews the box IT would fetch**, as a segmented colour stripe
+  along its outer edge — the opposite convention from the tile it replaced, and
+  deliberately: a two-ended carousel's arrows answer "what happens if I press
+  this", while "where am I" moved to the pips and the flash below.
+- **`PaletteChild.prev_crayon_set()`** beside `next_crayon_set()`. A backward
+  cycle is byte-for-byte the same event as a forward one: first crayon, own
+  colour, colours face, exactly ONE resolved `color_picked`, and the brush never
+  moves. `PaletteDef.wrap_crayon_set()` needed no code — `wrapi` already wraps
+  negatives — but it is documented and asserted now, because "the cycle has a
+  back end" is a contract, not an implementation detail.
+- **Where the box's identity went.** The carton tile was the only thing that drew
+  "which box is out". It is replaced by two cheaper things:
+  1. **Pips on both bars** — one per box, current filled. Always visible, says
+     "box 2 of 6" without a number.
+  2. **`CrayonBoxFlash` (new, `scripts/components/crayon_box_flash.gd`)** — a
+     transient banner that pops over the strip on every cycle, shouts the name
+     ("Neon!") over a row of that box's colours, and takes itself away: pop
+     0.22 s (overshooting), hold 0.85 s, fade 0.45 s. Same shape as the BL-11
+     celebration, and the same rules — `MOUSE_FILTER_IGNORE`, absolute z, blocks
+     nothing, and hides itself on `APPLICATION_FOCUS_OUT` /
+     `WM_WINDOW_FOCUS_OUT` / `EXIT_TREE` (the web tab-switch case where no tween
+     ever runs again). Anchored full-rect over the palette and drawn about its
+     own centre, so it lands in the middle of the strip in both docks with no
+     placement code, and it scales itself down rather than run off a narrow one.
+     A permanent name label was rejected: it is a slab of text on a strip built
+     for a child who cannot read yet. Transient, it is a firework.
+- **The old tile is deleted**, and the palette smoke asserts
+  `crayon_box_button.gd` is gone, so bringing it back has to be a decision
+  somebody takes on purpose.
+- **The "two 88 px tiles share the short axis, a third overflows silently"
+  gotcha from BL-23 is obsolete** — that geometry is what this entry reworked.
+  The smoke's tile-fit block was rewritten around the new ends rather than
+  contorted to keep the old assertions green.
+- Affected: `palette_child.gd`, `palette_def.gd` (docs), new
+  `crayon_cycle_button.gd` + `crayon_box_flash.gd`, deleted
+  `crayon_box_button.gd`, palette smoke.
+
+### BL-33: Landscape column must show every crayon — no scrolling — `done`
+Logged 2026-08-07 (playtest: on a horizontal display the docked crayon column
+scrolled). BL-21 shipped that scroll as a known trade — "a BL-23 set can be any
+length" — and this entry reverses it for the shipped lineup. Done 2026-08-07,
+after BL-34 because the arrows decide how much length is left.
+- **The arithmetic that forced the design.** The smallest landscape logical
+  canvas is 1152x648 (`canvas_items` + `expand` keeps the base size as a floor on
+  both axes, so the landscape SHORT axis is the constraint). Minus the coloring
+  toolbar and the strip's margins, the docked column has ~530 px of length. Ten
+  crayons at the 64 px touch floor need 640 px + gaps **before** the tools are
+  paid for. One rank is therefore not arithmetically possible: **wrapping is not
+  a fallback here, it is the answer**, and the only open questions were how many
+  ranks and how wide the strip has to be to make them look like crayons.
+- **`PaletteChild._fit_crayons()`** — the whole fit, run on every rebuild, layout
+  flip and resize:
+  1. Budget the long axis: the strip's own rect, minus the tool band, minus the
+     end bar, minus the separations. Every term is a **constant**
+     (`STRIP_MARGIN`, `BODY_SEPARATION`, `CRAYON_SEPARATION`, the sections'
+     `get_combined_minimum_size()`), never a measured rect — a fit that read a
+     stale rect would oscillate. `BODY_SEPARATION` is applied to the scene's
+     containers *from the script*, so the number the budget uses and the number
+     the container uses cannot drift.
+  2. For ranks 1..`MAX_RANKS` (3), pitch = `(along − gaps) / per_rank`,
+     length = `(across − gaps) / ranks`. **The fewest ranks that clear the floor
+     on both axes wins** — one long rank reads better than two short ones, so an
+     extra rank is a concession, not a goal.
+  3. Clamp: never below `CrayonButton.MIN_TOUCH_TARGET` (64, non-negotiable),
+     never above `DEFAULT_SIZE`, and never longer than `CANONICAL_ASPECT` (2.59)
+     relative to its own width — a crayon squeezed towards a square stops reading
+     as a crayon.
+  4. If nothing clears the floor, keep the **least-bad** candidate (max of
+     `min(pitch, length)`) and only then set `_overflowing`, which is the one
+     thing that re-enables scrolling. A strip one pixel too short ends up a hair
+     under the floor, not falling off a cliff into three ranks of slivers.
+- **Shipped outcome**: portrait row = 1 rank of full-size crayons (unchanged);
+  docked column = **2 ranks of 5**, 65.6 px pitch at the worst canvas and 68 px
+  (full size) at any taller one. `ScrollContainer` modes are `DISABLED` in both
+  docks; the scroller stays as the crayons' host and as slide-to-select's hit
+  area, it simply has nothing to scroll. Crayons fill each rank in palette order
+  before starting the next (nested `BoxContainer`s, not a `GridContainer`, which
+  fills row-major and would zig-zag the colour order a child is learning).
+- **`CrayonButton` is resizable now**: `canonical_size`, and `LIFT_PX`,
+  `LIFT_HEADROOM`, `TOP_PAD`/`BOTTOM_PAD` and the press sink are all multiplied
+  by `length_scale()` (drawn length ÷ `DEFAULT_SIZE.y`). A shrunken crayon is the
+  same crayon smaller, not a full-size one with its head cut off — and the
+  invariant BL-16 bought survives at every size: `lift_headroom() >=
+  resting_lift() * SELECT_BOUNCE_SCALE`, so the box still reserves the bounce
+  PEAK and the scroller can never slice the one frame the animation exists for.
+  The smoke asserts the ratio now, not the constant. The canonical-space drawing
+  rule is untouched: `ORIENT_LEFT` still rotates before anything is drawn, and
+  everything above is expressed in canonical space, so it followed for free.
+- **The landscape column got its own thickness**: `COLUMN_THICKNESS` 260 vs the
+  row's `STRIP_THICKNESS` 212. Two ranks of a 212 px strip are 89 px crayons —
+  measured on screen, they read as coloured nubs. 260 buys 113 px ranks and the
+  silhouette back, out of the axis a landscape screen has most of. Portrait,
+  which has neither the problem nor the room, is untouched. (BL-21's "one number
+  for both" is therefore retired; the backlog entry sanctioned it explicitly.)
+- **Gotcha**: the fit is measured against a *worst-case* toolbar (96 px, vs the
+  ~74 px `coloring_page.tscn` actually produces), so the shipped margin is bigger
+  than the smoke's. Do not spend that margin without re-running check 5e — at the
+  smallest canvas the crayons land at 65.6 px against a 64 px floor, and the next
+  thing under the floor is a third rank that does not fit either.
+- Smokes: **palette 146 → 184** with BL-34. The BL-23 tool-tile block became a
+  fit block: every crayon AND every tool inside the strip's rect, nothing
+  scrolled, in all three layouts; plus a new **check 5e** that instantiates
+  throwaway palettes into strips of exactly the docked-column size at the
+  smallest supported landscape canvas (and the row at 1152, and a tall column)
+  and holds each to "all ten crayons, inside the strip, none below the floor,
+  both cycle bars still capping the ends, nothing scrolls in either direction".
+  **mobile 141 unchanged** with one assertion inverted: the portrait row now fits
+  rather than scrolls. paint 47 / flow 159 / shell 151 unchanged.
+- Affected: `palette_child.gd`, `crayon_button.gd`, `coloring_page.gd` (a stale
+  doc line), palette + mobile smokes.

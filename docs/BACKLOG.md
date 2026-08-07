@@ -81,49 +81,6 @@ requests the same way (godotengine/godot#76825). Not yet filed upstream for
   browsers. The game itself (shelf, coloring, saves) runs fine there.
 
 
-### BL-33: Landscape column must show every crayon — no scrolling — `open` (2026-08-07)
-Playtest: on a horizontal display the docked crayon column scrolls; every crayon
-must be visible at once, no scrollbar. BL-21 shipped that scroll as a known
-trade ("a BL-23 set can be any length") — this entry reverses the trade for the
-shipped lineup. Direction:
-- Size crayons dynamically: available strip length ÷ crayon count, clamped at
-  `CrayonButton.MIN_TOUCH_TARGET` (the 64 px floor is non-negotiable —
-  DESIGN.md §1).
-- If a set cannot fit at the floor (a long authored set on a short canvas),
-  wrap to a second rank inside `STRIP_THICKNESS` (212) rather than scroll —
-  scale the whole crayon down so two ranks fit, or widen the strip for the
-  column case only. Agent decides with smoke evidence; scrolling is the one
-  outcome that's off the table.
-- Portrait row gets the same treatment for free if it falls out naturally, but
-  landscape is the acceptance bar.
-- Coordinates with BL-34: the cycle arrows land at the strip's ends, which
-  changes what length is actually available to the crayons. Do BL-34 first or
-  together.
-- Acceptance: shipped ten-crayon lineup + both tool tiles fully visible in the
-  landscape column at the smallest supported canvas, zero scroll; palette
-  smoke gains fit checks in all layouts.
-- Affected: `scripts/components/palette_child.gd`, `crayon_button.gd`,
-  `scenes/components/palette_child.tscn`, palette smoke.
-
-### BL-34: Cycle-left / cycle-right arrows at the strip's ends — `open` (2026-08-07)
-Replace the single `CrayonBoxButton` (forward-only cycle) with a cycle-left and
-a cycle-right control sitting at the OUTER ends of the crayon strip — outside
-the crayons, one at each end of the long axis.
-- `PaletteDef.wrap_crayon_set()` already wraps; add the backward direction
-  (wrap negative) and a `prev_crayon_set()` beside `next_crayon_set()`.
-- Both arrows stay OUTSIDE the `ScrollContainer` so a slide-to-select can never
-  land on one (the BL-2/BL-23 rule, preserved).
-- This deliberately reworks the tool-tile geometry the smokes guard ("two 88 px
-  tiles share the strip's short axis; a third overflows silently"): arrows move
-  to the long-axis ends, freeing short-axis room. `IntensityButton` stays where
-  it is. Rewrite the tile-fit smoke checks around the new geometry rather than
-  contorting to keep the old ones green.
-- Decide where the current box's identity lives now that the tile that drew it
-  is gone: pips under an arrow, a transient box-name label on cycle (nice —
-  says "Neon!" as the strip swaps), or both.
-- Affected: `palette_child.gd`, `crayon_box_button.gd` (reshaped into arrow
-  buttons or replaced), `palette_def.gd`, palette smoke tile-fit block.
-
 ### BL-35: Crayon sets round 2 — same lineup, escalating finishes — `open` (2026-08-07)
 Playtest: the default box is right; the authored sets (Pastel/Neon/Earth/Candy/
 Spooky) read as washed out, dull, or dark — "more color options", not more fun.
@@ -251,3 +208,5 @@ Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md
 - **BL-29** — Toolbar crayon styling + save/start-over/undo-redo feedback
 - **BL-30** — Book-open/close transition; richer page-curl (arc, shading, settle)
 - **BL-31** — Crayon wax-stroke download animation in the pack shop
+- **BL-33** — Landscape column shows every crayon (dynamic sizing + ranks, no scroll)
+- **BL-34** — Cycle-left / cycle-right bars at the strip's ends (+ box-name flash)
