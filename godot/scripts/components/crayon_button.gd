@@ -46,15 +46,30 @@ extends BaseButton
 ## crayon blooms and its tip is lit, a textured crayon has visible wax grain, a
 ## glitter crayon has sparkles caught in it. All of it is drawn in the canonical
 ## space above, from the same primitives -- the drawing code was not forked.
+##
+## [b]BL-33 made the crayon resizable[/b], because the docked landscape column is
+## shorter than ten crayons at their drawn size and scrolling is off the table. The
+## palette hands each crayon a [member canonical_size] it worked out from the room
+## it actually has; everything the drawing does in absolute pixels -- the lift, the
+## bounce headroom, the end paddings -- is multiplied by [method length_scale], so
+## a half-length crayon is the same crayon, half the size, and not a full-size one
+## with its head cut off. [constant LIFT_HEADROOM] is still the space the box
+## reserves for the bounce peak; it is just reserved proportionally now.
 
 ## Minimum touch target for a crayon (DESIGN.md 1 "large touch targets"); the
-## global floor is 48 px, the crayon row is deliberately more generous.
+## global floor is 48 px, the crayon row is deliberately more generous. BL-33 is
+## allowed to shrink a crayon to this and no further -- it is the floor the fit
+## gives up and wraps to a second rank against.
 const MIN_TOUCH_TARGET := 64.0
 ## Default box for one crayon, in CANONICAL space (tip up). Width is the touch
 ## target; height gives the ~1:2.5 body proportion that reads as "crayon" rather
 ## than "stick". [method box_for] turns this into the control's real box for an
 ## orientation.
 const DEFAULT_SIZE := Vector2(68.0, 176.0)
+## Longest a crayon is ever drawn relative to its width. A crayon squeezed to a
+## square stops reading as a crayon, so [PaletteChild] keeps the ratio at or under
+## this when it sizes them (BL-33).
+const CANONICAL_ASPECT := DEFAULT_SIZE.y / DEFAULT_SIZE.x
 
 ## Drawn tip up; the lift rises. The bottom-of-the-canvas row (portrait).
 const ORIENT_UP := 0
@@ -135,7 +150,21 @@ var orientation: int = ORIENT_UP:
 		if orientation == resolved:
 			return
 		orientation = resolved
-		custom_minimum_size = box_for(resolved)
+		custom_minimum_size = box_for(resolved, canonical_size)
+		queue_redraw()
+
+## The box this crayon asks for, in CANONICAL space (x across the crayon, y along
+## it) -- [constant DEFAULT_SIZE] unless [PaletteChild] shrank it to fit the strip
+## (BL-33). Never below [constant MIN_TOUCH_TARGET] on either axis.
+var canonical_size: Vector2 = DEFAULT_SIZE:
+	set(value):
+		var resolved := Vector2(
+			maxf(value.x, MIN_TOUCH_TARGET), maxf(value.y, MIN_TOUCH_TARGET)
+		)
+		if canonical_size.is_equal_approx(resolved):
+			return
+		canonical_size = resolved
+		custom_minimum_size = box_for(orientation, resolved)
 		queue_redraw()
 
 ## Multiplier on [constant LIFT_PX] while the settle bounce plays (BL-16). 1.0 at
@@ -145,7 +174,7 @@ var _bounce_tween: Tween
 
 
 func _init() -> void:
-	custom_minimum_size = box_for(orientation)
+	custom_minimum_size = box_for(orientation, canonical_size)
 	focus_mode = Control.FOCUS_NONE
 	mouse_filter = Control.MOUSE_FILTER_STOP
 
@@ -158,13 +187,14 @@ func _ready() -> void:
 	button_up.connect(queue_redraw)
 
 
-## The control box one crayon needs in [param orientation]: the canonical box for
-## [constant ORIENT_UP], the same box on its side for [constant ORIENT_LEFT].
-static func box_for(orientation_id: int) -> Vector2:
+## The control box one crayon of [param canonical] needs in [param orientation]:
+## the canonical box for [constant ORIENT_UP], the same box on its side for
+## [constant ORIENT_LEFT].
+static func box_for(orientation_id: int, canonical := DEFAULT_SIZE) -> Vector2:
 	return (
-		Vector2(DEFAULT_SIZE.y, DEFAULT_SIZE.x)
+		Vector2(canonical.y, canonical.x)
 		if orientation_id == ORIENT_LEFT
-		else DEFAULT_SIZE
+		else canonical
 	)
 
 
@@ -175,12 +205,37 @@ func lift_direction() -> Vector2:
 	return Vector2.LEFT if orientation == ORIENT_LEFT else Vector2.UP
 
 
+## How much of a full-size crayon this one is drawn at, measured along its LONG
+## axis (BL-33). 1.0 for a crayon the palette had room to draw at
+## [constant DEFAULT_SIZE]; less when the strip made it share.
+func length_scale() -> float:
+	var drawn := size.x if orientation == ORIENT_LEFT else size.y
+	if drawn <= 0.0:
+		drawn = canonical_size.y
+	return clampf(drawn / DEFAULT_SIZE.y, 0.1, 1.0)
+
+
+## How far a selected crayon of THIS size rises out of the box at rest --
+## [constant LIFT_PX] scaled to its length, so a shrunken crayon lifts by the same
+## fraction of itself and not by half its own body.
+func resting_lift() -> float:
+	return LIFT_PX * length_scale()
+
+
+## Space this crayon's box keeps clear at its canonical top for the bounce peak.
+## Always at least [method resting_lift] x [constant SELECT_BOUNCE_SCALE], at every
+## size -- that is the invariant BL-16 bought and BL-33 had to keep while making
+## the box shrink.
+func lift_headroom() -> float:
+	return LIFT_HEADROOM * length_scale()
+
+
 ## How far this crayon is currently lifted out of its box, in pixels: 0 when it is
-## not the selection, [constant LIFT_PX] at rest, more while the bounce is at its
-## peak. Public so the palette smoke can measure the selection instead of trusting
-## a constant.
+## not the selection, [method resting_lift] at rest, more while the bounce is at
+## its peak. Public so the palette smoke can measure the selection instead of
+## trusting a constant.
 func current_lift() -> float:
-	return LIFT_PX * _lift_scale if selected else 0.0
+	return resting_lift() * _lift_scale if selected else 0.0
 
 
 ## True while the settle bounce is playing.
@@ -232,16 +287,20 @@ func _draw() -> void:
 
 
 func _draw_crayon(box: Vector2) -> void:
+	# Every absolute measurement below is a fraction of a full-length crayon
+	# (BL-33): shrinking the box shrinks the lift, the headroom and the paddings
+	# with it, so the silhouette is identical at every size.
+	var scale := clampf(box.y / DEFAULT_SIZE.y, 0.1, 1.0)
 	var lift := current_lift()
-	var press_sink := 4.0 if is_pressed() else 0.0
+	var press_sink := (4.0 if is_pressed() else 0.0) * scale
 	var width_scale := SELECTED_WIDTH_SCALE
 	if not selected:
 		width_scale = HOVER_WIDTH_SCALE if is_hovered() else IDLE_WIDTH_SCALE
 
 	var body_width := box.x * width_scale
 	var center_x := box.x * 0.5
-	var top := TOP_PAD + LIFT_HEADROOM - lift + press_sink
-	var bottom := box.y - BOTTOM_PAD
+	var top := (TOP_PAD + LIFT_HEADROOM) * scale - lift + press_sink
+	var bottom := box.y - BOTTOM_PAD * scale
 	var crayon_height := bottom - top
 	if crayon_height <= 0.0 or body_width <= 0.0:
 		return

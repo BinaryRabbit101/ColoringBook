@@ -39,8 +39,20 @@ extends Control
 ## colours and the light-to-dark ladder of the crayon in hand. See
 ## [method set_view] / [method select_intensity].
 ##
-## [b]BL-23 crayon sets[/b]: a [CrayonBoxButton] cycles the strip through the
-## default box and every authored [CrayonSetDef]. See [method set_crayon_set].
+## [b]BL-23 crayon sets[/b]: the strip cycles through the default box and every
+## authored [CrayonSetDef]. See [method set_crayon_set]. [b]BL-34 reshaped the
+## control[/b]: the single forward-only carton tile became a [CrayonCycleButton] at
+## each OUTER END of the strip's long axis -- back at the start, forward at the end,
+## both outside the crayon scroller -- and the box's identity moved to the pip rows
+## on those bars plus a transient [CrayonBoxFlash] banner that shouts the name on
+## every cycle.
+##
+## [b]BL-33 no-scroll fit[/b]: every crayon of the active box is visible at once, in
+## both docks. The strip works out how much length it has left after the arrows and
+## the intensity tile and sizes the crayons to fill it, down to
+## [constant CrayonButton.MIN_TOUCH_TARGET] and no further; below that it wraps to a
+## second (or third) RANK across the strip instead of scrolling. See
+## [method _fit_crayons].
 ##
 ## [b]BL-35 finishes[/b]: every box carries the SAME crayons and differs in how its
 ## paint looks -- classic wax, neon glow, textured wax, glitter, each louder than
@@ -94,13 +106,40 @@ const LAYOUT_ROW := 0
 ## The crayons run top to bottom down the SIDE of the canvas (BL-21, landscape).
 const LAYOUT_COLUMN := 1
 
-## Thickness of the palette strip across its short axis: the height of the
-## portrait row, the width of the landscape column. One number for both, so the
-## palette takes the same bite out of the screen whichever way it is docked.
+## Height of the portrait row -- the strip's short axis when it is docked along the
+## bottom, where the canvas has height to spare and the crayons stand up full size.
 const STRIP_THICKNESS := 212.0
+## Width of the landscape column. WIDER than the row is tall, and deliberately so
+## (BL-33): a landscape canvas is short, so the ten crayons have to wrap onto two
+## ranks, and two ranks of a 212 px strip are 89 px each -- a crayon that stubby
+## stops reading as a crayon. The extra 48 px buys back the silhouette, out of the
+## axis a landscape screen has most of. Portrait, which has neither the problem nor
+## the room, is untouched.
+const COLUMN_THICKNESS := 260.0
+
+## Margins the strip's [MarginContainer] keeps, across and along the strip. Read
+## here rather than measured, because [method _fit_crayons] has to budget the
+## crayons' room BEFORE the containers have laid anything out.
+const STRIP_MARGIN := Vector2(14.0, 12.0)
+## Separation between the strip's three sections (tool band, crayons, end arrow).
+## Applied to the scene's containers from here rather than authored in the .tscn,
+## because [method _crayon_room] budgets against it and a drift between the two
+## numbers would be a silently mis-sized strip.
+const BODY_SEPARATION := 10.0
+## Separation between crayons, and between ranks of them.
+const CRAYON_SEPARATION := 6.0
+## Most ranks the crayons may wrap onto before the strip gives up and scrolls
+## (BL-33). Three is already a wall of crayons; a set that cannot fit in three is
+## an authoring decision, not a layout to design for.
+const MAX_RANKS := 3
 
 var _palette: PaletteDef
 var _crayons: Array[CrayonButton] = []
+## Rank containers inside [member _row], one per rank of crayons.
+var _ranks: Array[BoxContainer] = []
+## True when even [constant MAX_RANKS] ranks of floor-sized crayons do not fit, so
+## the strip scrolls after all. Never true for the shipped lineup -- see BL-33.
+var _overflowing := false
 var _selected_index := -1
 var _selected_size_index := -1
 var _selected_size := 0.0
@@ -117,11 +156,18 @@ var _body: BoxContainer
 var _controls: BoxContainer
 var _row: BoxContainer
 var _scroll: ScrollContainer
-## The light-to-dark swap (BL-22) and the crayon-box cycle (BL-23). Built here,
-## like the pick bubble, so the palette stays one self-contained scene plus its
-## own code.
+## The light-to-dark swap (BL-22) and the crayon-box cycle (BL-23/BL-34). Built
+## here, like the pick bubble, so the palette stays one self-contained scene plus
+## its own code.
 var _intensity: IntensityButton
-var _box: CrayonBoxButton
+## Cycle bars at the two ends of the strip's long axis (BL-34). [member _prev]
+## shares the leading tool band with the intensity tile; [member _next] caps the
+## far end on its own. Both are OUTSIDE the crayon scroller, so a slide-to-select
+## can never land on one.
+var _prev: CrayonCycleButton
+var _next: CrayonCycleButton
+## The transient "Neon!" banner (BL-34).
+var _flash: CrayonBoxFlash
 ## Drag half of slide-to-select; the crayons themselves make the first pick.
 var _slide := PaletteSlideInput.new()
 ## BL-15's floating candidate bubble. Created here, never injected: the palette is
@@ -132,6 +178,11 @@ var _preview: PickPreview
 func _ready() -> void:
 	_resolve_nodes()
 	_apply_layout()
+	# The fit is a function of the room the parent gives the strip, so it has to be
+	# redone whenever that changes -- a window resize, an orientation flip, a
+	# toolbar growing a button.
+	if not resized.is_connected(_fit_crayons):
+		resized.connect(_fit_crayons)
 
 
 func _resolve_nodes() -> void:
@@ -143,18 +194,38 @@ func _resolve_nodes() -> void:
 		_scroll = get_node("Margin/Body/Scroll") as ScrollContainer
 	if _row == null:
 		_row = get_node("Margin/Body/Scroll/CrayonRow") as BoxContainer
-	if _box == null:
-		# First on the strip, because "which crayons" is the bigger question and the
-		# ladder is a detail of whichever answer is showing.
-		_box = CrayonBoxButton.new()
-		_box.name = "CrayonBoxButton"
-		_box.pressed.connect(next_crayon_set)
-		_controls.add_child(_box)
+	if _prev == null:
+		# The leading cycle bar shares the tool band with the intensity tile rather
+		# than taking a band of its own: the band costs the strip its LENGTH, and
+		# length is exactly what BL-33's ten visible crayons are short of.
+		_prev = CrayonCycleButton.new()
+		_prev.name = "CyclePrev"
+		_prev.direction = CrayonCycleButton.DIR_PREV
+		_prev.pressed.connect(prev_crayon_set)
+		_controls.add_child(_prev)
+		_controls.move_child(_prev, 0)
 	if _intensity == null:
 		_intensity = IntensityButton.new()
 		_intensity.name = "IntensityButton"
 		_intensity.pressed.connect(_on_intensity_pressed)
 		_controls.add_child(_intensity)
+	if _next == null:
+		# Capping the FAR end of the strip, after the scroller, so the two cycle
+		# controls sit at the two outer ends of the crayons and neither is reachable
+		# by a slide.
+		_next = CrayonCycleButton.new()
+		_next.name = "CycleNext"
+		_next.direction = CrayonCycleButton.DIR_NEXT
+		_next.pressed.connect(next_crayon_set)
+		_body.add_child(_next)
+	_body.add_theme_constant_override("separation", int(BODY_SEPARATION))
+	_row.add_theme_constant_override("separation", int(CRAYON_SEPARATION))
+	if _flash == null:
+		# Parented to the palette ROOT for the same reason as the bubble: it floats
+		# over the crayons and nothing must lay it out.
+		_flash = CrayonBoxFlash.new()
+		_flash.name = "CrayonBoxFlash"
+		add_child(_flash)
 	if _preview == null:
 		# Parented to the palette ROOT, not the scroller: the bubble has to float
 		# clear of both, and the root is a plain Control so nothing lays it out.
@@ -222,29 +293,35 @@ func _apply_layout() -> void:
 	# The strip is thick across its short axis and takes whatever it is given
 	# along its long one; the page view beside it is what expands.
 	custom_minimum_size = (
-		Vector2(STRIP_THICKNESS, 0.0) if column else Vector2(0.0, STRIP_THICKNESS)
+		Vector2(COLUMN_THICKNESS, 0.0) if column else Vector2(0.0, STRIP_THICKNESS)
 	)
 	size_flags_horizontal = Control.SIZE_FILL if column else Control.SIZE_EXPAND_FILL
 	size_flags_vertical = Control.SIZE_EXPAND_FILL if column else Control.SIZE_FILL
 
 	_body.vertical = column
-	_row.vertical = column
-	# The tool buttons run ACROSS the strip, perpendicular to the crayons, so they
-	# cost the strip its short axis and never eat crayon room along its long one.
+	# RANKS run across the strip; the crayons inside each rank run along it. With
+	# one rank (the usual case) this is exactly the single row BL-21 shipped.
+	_row.vertical = not column
+	for rank in _ranks:
+		rank.vertical = column
+	# The tool band runs ACROSS the strip, perpendicular to the crayons, and fills
+	# it, so the leading cycle bar can stretch into whatever the intensity tile
+	# leaves.
 	_controls.vertical = not column
-	# The strip scrolls ALONG its long axis and clips across the short one -- which
-	# is the constraint CrayonButton's lift headroom is sized against, in both
-	# orientations.
-	_scroll.horizontal_scroll_mode = (
-		ScrollContainer.SCROLL_MODE_DISABLED if column else ScrollContainer.SCROLL_MODE_AUTO
-	)
-	_scroll.vertical_scroll_mode = (
-		ScrollContainer.SCROLL_MODE_AUTO if column else ScrollContainer.SCROLL_MODE_DISABLED
-	)
+	_controls.size_flags_horizontal = Control.SIZE_FILL if column else Control.SIZE_SHRINK_CENTER
+	_controls.size_flags_vertical = Control.SIZE_SHRINK_CENTER if column else Control.SIZE_FILL
+
+	for arrow in [_prev, _next]:
+		if arrow == null:
+			continue
+		arrow.vertical = column
+		arrow.size_flags_horizontal = Control.SIZE_EXPAND_FILL if column else Control.SIZE_FILL
+		arrow.size_flags_vertical = Control.SIZE_FILL if column else Control.SIZE_EXPAND_FILL
 
 	var orientation := CrayonButton.ORIENT_LEFT if column else CrayonButton.ORIENT_UP
 	for crayon in _crayons:
 		crayon.orientation = orientation
+	_fit_crayons()
 
 	if _preview != null:
 		# The hand comes in from the side the crayons are docked on, so the bubble
@@ -253,6 +330,180 @@ func _apply_layout() -> void:
 		_preview.set_placement(
 			PickPreview.PLACE_LEFT if column else PickPreview.PLACE_ABOVE
 		)
+
+
+# ================================================ the no-scroll fit (BL-33) ==
+# BL-21 docked the crayons as a column on a landscape screen and let the strip
+# SCROLL when they did not all fit, which is what a short landscape canvas always
+# does: ten crayons at their drawn length need more than a 648 px canvas has left
+# once the toolbar has been paid for. Playtest verdict: a crayon a child cannot see
+# is a crayon that does not exist. So the strip now sizes the crayons to the room
+# it has instead of demanding room for the size it likes.
+#
+# Three rules, in order:
+#   1. Shrink. Length available to the crayons, divided by how many there are.
+#   2. Never below [constant CrayonButton.MIN_TOUCH_TARGET] (DESIGN.md 1). That
+#      floor is the one number here that is not negotiable.
+#   3. When the floor is reached, WRAP to another rank across the strip -- the
+#      crayons get shorter, not smaller than a fingertip -- up to
+#      [constant MAX_RANKS].
+# Scrolling is what happens only if all three run out, which the shipped ten-crayon
+# lineup never does in either dock. The strip's own thickness never changes: the
+# palette costs the screen exactly what it always did.
+
+## Sizes the crayons and lays them out in as many ranks as it takes for all of them
+## to be visible at once. Cheap and idempotent -- called on every rebuild, every
+## layout flip and every resize.
+func _fit_crayons() -> void:
+	_resolve_nodes()
+	var count := _crayons.size()
+	if count <= 0:
+		_apply_scroll_mode()
+		return
+	var column := is_column()
+	var room := _crayon_room()
+	var ranks := 1
+	var pitch := 0.0
+	var length := 0.0
+	var best := -INF
+	_overflowing = true
+	for candidate in range(1, MAX_RANKS + 1):
+		var per_rank := ceili(float(count) / float(candidate))
+		var candidate_pitch := (
+			(room.x - float(per_rank - 1) * CRAYON_SEPARATION) / float(per_rank)
+		)
+		var candidate_length := (
+			(room.y - float(candidate - 1) * CRAYON_SEPARATION) / float(candidate)
+		)
+		if candidate_pitch >= CrayonButton.MIN_TOUCH_TARGET \
+				and candidate_length >= CrayonButton.MIN_TOUCH_TARGET:
+			# The FEWEST ranks that fit wins: one long rank of crayons reads better
+			# than two short ones, so extra ranks are a concession, not a goal.
+			ranks = candidate
+			pitch = candidate_pitch
+			length = candidate_length
+			_overflowing = false
+			break
+		# Nothing has fitted yet. Remember the least-bad shape rather than whichever
+		# happened to be tried last: a strip one pixel too short should end up a
+		# hair under the floor and scrolling by a hair, not fall off a cliff into
+		# three ranks of slivers.
+		var worst := minf(candidate_pitch, candidate_length)
+		if worst > best:
+			best = worst
+			ranks = candidate
+			pitch = candidate_pitch
+			length = candidate_length
+
+	# A crayon is never drawn bigger than its canonical box, never thinner than a
+	# fingertip, and never squeezed into a square: past CANONICAL_ASPECT it stops
+	# reading as a crayon, so a rank with room to spare draws a full-size one and
+	# leaves the slack as air.
+	pitch = clampf(pitch, CrayonButton.MIN_TOUCH_TARGET, CrayonButton.DEFAULT_SIZE.x)
+	length = clampf(
+		length,
+		CrayonButton.MIN_TOUCH_TARGET,
+		minf(CrayonButton.DEFAULT_SIZE.y, pitch * CrayonButton.CANONICAL_ASPECT)
+	)
+
+	_build_ranks(ranks)
+	# Crayons fill each rank in palette order before starting the next, so the
+	# colours read down (or along) one rank at a time -- a grid filled the other way
+	# would zig-zag the order a child is learning.
+	var per_rank := maxi(ceili(float(count) / float(ranks)), 1)
+	var canonical := Vector2(pitch, length)
+	var orientation := CrayonButton.ORIENT_LEFT if column else CrayonButton.ORIENT_UP
+	for i in count:
+		var crayon := _crayons[i]
+		crayon.orientation = orientation
+		crayon.canonical_size = canonical
+		var rank := _ranks[mini(i / per_rank, ranks - 1)]
+		if crayon.get_parent() != rank:
+			if crayon.get_parent() != null:
+				crayon.get_parent().remove_child(crayon)
+			rank.add_child(crayon)
+	_apply_scroll_mode()
+
+
+## Length available to the crayons along the strip (x), and across it (y).
+##
+## Budgeted from the strip's own rect and the KNOWN minimum sizes of the two
+## sections that flank the crayons, never from measured child rects: the fit runs
+## before the containers have sorted, and a fit that read a stale rect would
+## oscillate.
+func _crayon_room() -> Vector2:
+	var column := is_column()
+	var inner := size - Vector2(STRIP_MARGIN.x * 2.0, STRIP_MARGIN.y * 2.0)
+	if inner.x <= 0.0 or inner.y <= 0.0:
+		# Before the first layout the strip has no size; fall back to its docked
+		# thickness so a standalone palette still builds something sane.
+		var thickness := COLUMN_THICKNESS if column else STRIP_THICKNESS
+		inner = Vector2(
+			thickness - STRIP_MARGIN.x * 2.0, thickness - STRIP_MARGIN.y * 2.0
+		)
+	var along := inner.y if column else inner.x
+	var across := inner.x if column else inner.y
+	# A hidden section costs nothing -- neither its size nor its separation -- which
+	# is how a palette with a single crayon box hands the arrows' length back to the
+	# crayons.
+	var band := _controls.get_combined_minimum_size()
+	along -= band.y if column else band.x
+	along -= BODY_SEPARATION
+	if _next.visible:
+		var cap := _next.get_combined_minimum_size()
+		along -= (cap.y if column else cap.x) + BODY_SEPARATION
+	return Vector2(maxf(along, CrayonButton.MIN_TOUCH_TARGET), maxf(across, CrayonButton.MIN_TOUCH_TARGET))
+
+
+## Makes [param count] rank containers exist inside the crayon host, reusing the
+## ones already there. Crayons are re-parented into them by [method _fit_crayons].
+func _build_ranks(count: int) -> void:
+	while _ranks.size() > count:
+		var extra: BoxContainer = _ranks.pop_back()
+		_row.remove_child(extra)
+		extra.queue_free()
+	while _ranks.size() < count:
+		var rank := BoxContainer.new()
+		rank.name = "Rank%d" % _ranks.size()
+		rank.vertical = is_column()
+		rank.alignment = BoxContainer.ALIGNMENT_CENTER
+		rank.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		rank.add_theme_constant_override("separation", int(CRAYON_SEPARATION))
+		rank.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		rank.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		_row.add_child(rank)
+		_ranks.append(rank)
+	for rank in _ranks:
+		rank.vertical = is_column()
+
+
+## The strip scrolls only when the fit gave up -- which the shipped lineup never
+## makes it do. A disabled scroller still hosts the crayons and still serves as
+## slide-to-select's hit area; it simply has nothing to scroll.
+func _apply_scroll_mode() -> void:
+	var column := is_column()
+	var mode := (
+		ScrollContainer.SCROLL_MODE_AUTO if _overflowing else ScrollContainer.SCROLL_MODE_DISABLED
+	)
+	_scroll.horizontal_scroll_mode = (
+		ScrollContainer.SCROLL_MODE_DISABLED if column else mode
+	)
+	_scroll.vertical_scroll_mode = (
+		mode if column else ScrollContainer.SCROLL_MODE_DISABLED
+	)
+
+
+## True when every crayon of the active box is on screen at once -- the BL-33
+## promise. False only if a set is long enough to defeat [constant MAX_RANKS] ranks
+## of floor-sized crayons, in which case the strip scrolls rather than clip.
+func fits_without_scrolling() -> bool:
+	return not _overflowing
+
+
+## How many ranks the crayons are laid out in (1 in the portrait row, 2 in the
+## docked landscape column at the shipped lineup).
+func get_rank_count() -> int:
+	return maxi(_ranks.size(), 1)
 
 
 # ===================================================== intensity (BL-22) ==
@@ -329,26 +580,41 @@ func _refresh_tools() -> void:
 		_intensity.base_color = get_base_color()
 		_intensity.active_step = _intensity_step
 		_intensity.showing_shades = is_showing_shades()
-	if _box != null:
-		_box.set_colors = _active_colors()
-		_box.set_index = _set_index
-		_box.set_count = _palette.crayon_set_count() if _palette != null else 1
-		_box.visible = _box.set_count > 1
-		_box.tooltip_text = (
-			"Crayons: %s" % _palette.get_crayon_set_name(_set_index) if _palette != null else ""
+	var boxes := _palette.crayon_set_count() if _palette != null else 1
+	for arrow in [_prev, _next]:
+		if arrow == null:
+			continue
+		arrow.set_index = _set_index
+		arrow.set_count = boxes
+		# Each bar previews the box IT would fetch, so the two ends of the strip
+		# answer "what happens if I press this" rather than repeating where we are.
+		var step := -1 if arrow.direction == CrayonCycleButton.DIR_PREV else 1
+		arrow.preview_colors = (
+			_palette.get_crayon_set_colors(_set_index + step)
+			if _palette != null else PackedColorArray()
 		)
+		# One box means no carousel: two arrows that always land back here would be
+		# a lie, and the strip gets their length back for crayons.
+		arrow.visible = boxes > 1
 
 
-# ======================================================= crayon sets (BL-23) ==
+# ================================================ crayon sets (BL-23, BL-34) ==
 # Mario-Paint-style fun: the default box plus every authored [CrayonSetDef] on
-# disk, cycled with the [CrayonBoxButton]. A set is COLOURS AND NOTHING ELSE --
-# the brush, the hardness and the completion threshold stay on the [PaletteDef]
-# -- so swapping boxes swaps the strip and touches nothing about how the game
-# plays. The intensity ladder comes along for free, because BL-22 computes it from
-# whatever base colour is in hand.
+# disk. A set is COLOURS AND NOTHING ELSE -- the brush, the hardness and the
+# completion threshold stay on the [PaletteDef] -- so swapping boxes swaps the
+# strip and touches nothing about how the game plays. The intensity ladder comes
+# along for free, because BL-22 computes it from whatever base colour is in hand.
+#
+# BL-34 turned the one forward-only tile into a CAROUSEL WITH TWO ENDS. Both
+# [CrayonCycleButton]s live outside the crayon [ScrollContainer] (the BL-2 rule: a
+# slide-to-select must never be able to land on a tool), at the two outer ends of
+# the strip's long axis, and a cycle in either direction is exactly the same event
+# it always was: first crayon, own colour, colours face, ONE resolved
+# [signal color_picked], and the brush never moves.
 
-## Puts box [param index] on the strip (wrapping), back on its first crayon, and
-## emits [signal brush_effect_picked] then [signal color_picked] for it.
+## Puts box [param index] on the strip (wrapping, in both directions), back on its
+## first crayon, and emits [signal brush_effect_picked] then [signal color_picked]
+## for it.
 ##
 ## The finish goes out FIRST and the colour second, in the same order
 ## [method set_palette] primes them, so a listener that reacts to the colour is
@@ -366,12 +632,19 @@ func set_crayon_set(index: int) -> void:
 	_view = VIEW_COLORS
 	_rebuild_strip()
 	brush_effect_picked.emit(get_selected_effect())
+	_announce_crayon_set()
 	color_picked.emit(get_selected_color())
 
 
-## The next box in the cycle. What the crayon-box control calls.
+## The next box in the cycle. What the trailing [CrayonCycleButton] calls.
 func next_crayon_set() -> void:
 	set_crayon_set(_set_index + 1)
+
+
+## The box BEFORE this one (BL-34). What the leading [CrayonCycleButton] calls;
+## from box 0 it wraps round to the last one.
+func prev_crayon_set() -> void:
+	set_crayon_set(_set_index - 1)
 
 
 func get_crayon_set_index() -> int:
@@ -392,11 +665,26 @@ func get_selected_effect() -> StringName:
 	return _palette.get_crayon_set_effect(_set_index)
 
 
-## The crayon-box cycle control (BL-23). Never null after [method _resolve_nodes];
-## hidden when there is only the default box to offer.
-func get_crayon_box_button() -> CrayonBoxButton:
+## The two cycle bars, leading end first (BL-34). Never null after
+## [method _resolve_nodes]; both hidden when there is only the default box.
+func get_cycle_buttons() -> Array[CrayonCycleButton]:
 	_resolve_nodes()
-	return _box
+	return [_prev, _next]
+
+
+## The transient box-name banner (BL-34). Never null after [method _resolve_nodes].
+func get_box_flash() -> CrayonBoxFlash:
+	_resolve_nodes()
+	return _flash
+
+
+## Says the new box's name over the strip, once, and lets it fade. The whole of the
+## box's identity that is not the pip rows -- and the only place its name is ever
+## written (BL-34).
+func _announce_crayon_set() -> void:
+	if _flash == null or _palette == null or _palette.crayon_set_count() <= 1:
+		return
+	_flash.flash("%s!" % get_crayon_set_name(), _active_colors())
 
 
 # ================================================== shared palette contract ==
@@ -412,6 +700,8 @@ func set_palette(def: PaletteDef) -> void:
 	_set_index = 0
 	_view = VIEW_COLORS
 	_clear_row()
+	if _flash != null:
+		_flash.hide_now()
 	if def == null:
 		_refresh_tools()
 		return
@@ -459,11 +749,13 @@ func _rebuild_strip() -> void:
 		# so the selection can then follow the finger (see PaletteSlideInput).
 		crayon.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
 		crayon.pressed.connect(_pick_at.bind(i))
-		_row.add_child(crayon)
 		_crayons.append(crayon)
 
-	_slide.set_targets(get_color_buttons(), _pick_at)
+	# Sizing and ranking is one job and it belongs to the fit, which is also what
+	# parents each crayon into a rank (BL-33).
 	_refresh_tools()
+	_fit_crayons()
+	_slide.set_targets(get_color_buttons(), _pick_at)
 
 
 ## What a press or a slide onto strip position [param index] means, which depends
@@ -560,13 +852,13 @@ func get_brush_size_controls() -> Array[Control]:
 	return []
 
 
-## The strip's tool tiles -- the crayon-box cycle and the intensity swap -- in the
-## order they sit on it. For layout and touch-target verification; the crayons
-## themselves are [method get_color_buttons].
+## Everything on the strip that is not a crayon -- the two cycle bars and the
+## intensity swap -- in the order they sit along it. For layout and touch-target
+## verification; the crayons themselves are [method get_color_buttons].
 func get_tool_buttons() -> Array[Control]:
 	_resolve_nodes()
 	var tools: Array[Control] = []
-	for control in [_box, _intensity]:
+	for control in [_prev, _intensity, _next]:
 		if control != null and control.visible:
 			tools.append(control)
 	return tools
@@ -627,6 +919,9 @@ func _clear_row() -> void:
 	_slide.set_targets(no_targets, Callable())
 	if _row == null:
 		return
-	for child in _row.get_children():
-		_row.remove_child(child)
-		child.queue_free()
+	# The ranks themselves are kept -- [method _fit_crayons] decides how many there
+	# should be -- but every crayon in them goes.
+	for rank in _ranks:
+		for child in rank.get_children():
+			rank.remove_child(child)
+			child.queue_free()

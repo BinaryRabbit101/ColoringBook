@@ -797,11 +797,17 @@ func _check_portrait() -> void:
 	_expect(smallest >= CrayonButton.MIN_TOUCH_TARGET,
 		"every crayon holds its %.0f px touch target in portrait (%.0f)"
 		% [CrayonButton.MIN_TOUCH_TARGET, smallest])
+	# BL-33 reversed BL-21's trade: the strip sizes its crayons to the room it has
+	# instead of scrolling past the ones that do not fit. On a phone that matters
+	# most -- a crayon off the end of the strip is a crayon that does not exist.
 	var scroll := palette.get_scroll()
 	_expect(
 		scroll != null
-		and scroll.horizontal_scroll_mode != ScrollContainer.SCROLL_MODE_DISABLED,
-		"the crayon row scrolls horizontally rather than shrinking its crayons"
+		and scroll.horizontal_scroll_mode == ScrollContainer.SCROLL_MODE_DISABLED
+		and palette.fits_without_scrolling()
+		and buttons.size() == palette.get_palette().color_count(),
+		"all %d crayons fit the portrait row at once, with nothing to scroll (BL-33)"
+		% buttons.size()
 	)
 	_expect(scroll != null and scroll.size.x <= viewport_size.x + 1.0,
 		"...and the scroll viewport fits the screen (%.0f of %.0f)"
@@ -867,9 +873,9 @@ func _check_portrait() -> void:
 		% [palette.global_position.x, page_view.get_global_rect().end.x])
 	_expect(palette.size.y > palette.size.x,
 		"...as a tall strip (%.0fx%.0f)" % [palette.size.x, palette.size.y])
-	_expect(palette.size.x <= PaletteChild.STRIP_THICKNESS + 1.0,
-		"...costing the canvas only the strip's %.0f px, never a slice of its height"
-		% PaletteChild.STRIP_THICKNESS)
+	_expect(palette.size.x <= PaletteChild.COLUMN_THICKNESS + 1.0,
+		"...costing the canvas only the column's %.0f px, never a slice of its height"
+		% PaletteChild.COLUMN_THICKNESS)
 	var docked := palette.get_color_buttons()
 	var narrowest_docked := INF
 	for button in docked:

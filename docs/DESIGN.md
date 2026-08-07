@@ -40,13 +40,17 @@ The crayon row grows three features (designed 2026-08-07):
   always *base color + intensity step*; `color_picked` carries the resolved color and
   nothing downstream of the palette changes.
 - **Crayon boxes (BL-23, rebuilt by BL-35).** Mario-Paint-style fun: additional authored
-  **crayon sets** beyond the default box, cycled with a control on the row. BL-23 shipped
-  five recolours (Pastel, Neon, Earth, Candy, Spooky) and the playtest verdict was "more
-  colour options, not more fun" — so **every box now carries the SAME crayon lineup and
-  differs in its FINISH**, each box louder than the one before: classic wax → **Neon Glow**
-  (strokes bloom) → **Textured Wax** (visible crayon grain) → **Glitter** (grain, drifting
-  rainbow bands and specks of glitter). A set authors a finish and, normally, no colours at
-  all — it inherits the palette's lineup.
+  **crayon sets** beyond the default box, cycled with a **cycle bar at each end of the
+  strip** (BL-34: back at one end, forward at the other, both outside the crayon
+  scroller). Which box is out is drawn as a pip row on the bars plus a transient name
+  banner on every cycle — no permanent label, because the strip is built for a child who
+  cannot read yet. BL-23 shipped five recolours (Pastel, Neon, Earth, Candy, Spooky) and
+  the playtest verdict was "more colour options, not more fun" — so **every box now
+  carries the SAME crayon lineup and differs in its FINISH**, each box louder than the
+  one before: classic wax → **Neon Glow** (strokes bloom) → **Textured Wax** (visible
+  crayon grain) → **Glitter** (grain, drifting rainbow bands and specks of glitter). A
+  set authors a finish and, normally, no colours at all — it inherits the palette's
+  lineup.
   - **A finish is how the paint LOOKS, never how the game PLAYS.** That is the exact width
     of BL-35's amendment to BL-23's "colours and nothing else": brush diameter, hardness
     and the completion threshold remain forbidden on a crayon set and remain on the base
@@ -64,6 +68,10 @@ The crayon row grows three features (designed 2026-08-07):
   (unchanged — it reads well). In **landscape the crayons dock on the side of the canvas**
   as a vertical column instead of eating the already-short screen height. Same palette
   scene, orientation-keyed layout (key off aspect ratio, not width — §3.5).
+- **Every crayon is visible, always (BL-33).** The strip never scrolls: it sizes its
+  crayons to the room it has (available length ÷ count, floored at the 64 px touch
+  target) and wraps onto a second rank across the strip when the floor is reached. A
+  crayon off the end of a scroller is a crayon that does not exist.
 
 ## 2. Player flow
 
