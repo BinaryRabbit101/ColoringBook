@@ -27,13 +27,21 @@ class StoreAuthoredSticker
 {
     public function __construct(private readonly StickerValidation $validation) {}
 
+    /**
+     * BL-38: `$anim` is the sprite-sheet grid when this sticker is animated.
+     * Null — not an empty object — is what "still drawing" means, all the way
+     * to the manifest.
+     *
+     * @param  array{hframes: int, vframes: int, frames: int, fps: float}|null  $anim
+     */
     public function handle(
         AuthoredStickerSet $set,
         Asset $image,
         string $stickerId,
         ?string $title = null,
+        ?array $anim = null,
     ): AuthoredSticker {
-        return DB::transaction(function () use ($set, $image, $stickerId, $title): AuthoredSticker {
+        return DB::transaction(function () use ($set, $image, $stickerId, $title, $anim): AuthoredSticker {
             $next = (int) ($set->stickers()->max('sticker_index') ?? -1) + 1;
 
             /** @var AuthoredSticker $sticker */
@@ -42,6 +50,7 @@ class StoreAuthoredSticker
                 'sticker_id' => $stickerId,
                 'title' => $title,
                 'image_asset_id' => $image->id,
+                'anim' => $anim,
             ]);
 
             $this->revalidate($sticker, $image);
@@ -58,6 +67,11 @@ class StoreAuthoredSticker
      * Shared with `UpdateAuthoredSticker` rather than duplicated: "the verdict
      * matches the art" is exactly the invariant that decays when there are two
      * copies of the code that maintains it.
+     *
+     * The verdict is read against the row's **current** `anim`, so changing the
+     * grid on a sheet that is already uploaded re-checks the sheet against the
+     * new grid — which is where "4×2 does not divide a 300 px-wide sheet" is
+     * actually noticed.
      */
     public function revalidate(AuthoredSticker $sticker, Asset $image): void
     {
@@ -66,7 +80,7 @@ class StoreAuthoredSticker
 
         $result = $bytes === null
             ? PackValidationResult::failed([__('the image is no longer on disk — upload it again.')])
-            : $this->validation->validateBytes($bytes);
+            : $this->validation->validateBytes($bytes, $sticker->anim);
 
         $sticker->forceFill([
             'image_asset_id' => $image->id,

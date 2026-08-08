@@ -34,7 +34,14 @@ class UpdateAuthoredSticker
     public function __construct(private readonly StoreAuthoredSticker $store) {}
 
     /**
-     * @param  array{title?: string|null, sticker_id?: string, sticker_index?: int, image?: Asset}  $changes
+     * @param  array{
+     *     title?: string|null,
+     *     sticker_id?: string,
+     *     sticker_index?: int,
+     *     image?: Asset,
+     *     anim?: array{hframes: int, vframes: int, frames: int, fps: float}|null,
+     * }  $changes  An `anim` key holding null turns an animated sticker back
+     *              into a still one; omitting the key leaves it alone.
      */
     public function handle(AuthoredSticker $sticker, array $changes): AuthoredSticker
     {
@@ -47,10 +54,22 @@ class UpdateAuthoredSticker
                 $sticker->sticker_id = $changes['sticker_id'];
             }
 
+            // BL-38. Changing the grid changes what the same bytes MEAN, so it
+            // re-validates for the same reason replacing the art does: the
+            // stored verdict has to describe the sheet as it will actually be
+            // sliced.
+            $animChanged = array_key_exists('anim', $changes) && $changes['anim'] !== $sticker->anim;
+
+            if ($animChanged) {
+                $sticker->anim = $changes['anim'];
+            }
+
             $sticker->save();
 
             if (array_key_exists('image', $changes)) {
                 $this->store->revalidate($sticker, $changes['image']);
+            } elseif ($animChanged) {
+                $this->store->revalidate($sticker, $sticker->imageAsset);
             }
 
             if (array_key_exists('sticker_index', $changes)) {

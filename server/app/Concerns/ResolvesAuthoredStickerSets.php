@@ -6,6 +6,7 @@ use App\Actions\Admin\StoreUploadedAsset;
 use App\Models\Asset;
 use App\Models\AuthoredSticker;
 use App\Models\AuthoredStickerSet;
+use App\Services\StickerAnim;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 
@@ -73,7 +74,13 @@ trait ResolvesAuthoredStickerSets
      * only when the request asked for it: three unrelated edits ride this
      * endpoint and a form submitting one must not clear the others.
      *
-     * @return array{title?: string|null, sticker_id?: string, sticker_index?: int, image?: Asset}
+     * @return array{
+     *     title?: string|null,
+     *     sticker_id?: string,
+     *     sticker_index?: int,
+     *     image?: Asset,
+     *     anim?: array{hframes: int, vframes: int, frames: int, fps: float}|null,
+     * }
      */
     protected function stickerChanges(Request $request): array
     {
@@ -98,6 +105,23 @@ trait ResolvesAuthoredStickerSets
             $changes['image'] = $image;
         }
 
+        // BL-38. Present-and-empty means "make it a still sticker again";
+        // absent means "leave it alone", which is what the reorder buttons post.
+        if ($request->has('anim')) {
+            $changes['anim'] = $this->resolveAnim($request);
+        }
+
         return $changes;
+    }
+
+    /**
+     * The sprite-sheet metadata a body asks for (BL-38), in the manifest's own
+     * shape — or null, which is what a still sticker is.
+     *
+     * @return array{hframes: int, vframes: int, frames: int, fps: float}|null
+     */
+    protected function resolveAnim(Request $request): ?array
+    {
+        return StickerAnim::normalise($request->input('anim'));
     }
 }

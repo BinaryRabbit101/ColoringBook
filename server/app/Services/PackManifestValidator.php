@@ -247,6 +247,72 @@ class PackManifestValidator
             } elseif (! array_key_exists($image, $files)) {
                 $errors[] = sprintf('%s image "%s" is not listed in files.', $stickerLabel, $image);
             }
+
+            $this->checkStickerAnim($sticker, $stickerLabel, $errors);
+        }
+    }
+
+    /**
+     * The optional `anim` object on a sticker entry (BL-38).
+     *
+     * **Absent is the normal case** and says "this is a still drawing" — the
+     * shape every sticker published before BL-38 has. What is checked here is
+     * only that a *present* one is the whole contract and internally consistent;
+     * whether the sheet's pixels agree with the grid is `StickerValidation`'s
+     * half, exactly as a page's pixels are `PackValidation`'s.
+     *
+     * @param  array<string, mixed>  $sticker
+     * @param  array<int, string>  $errors
+     */
+    private function checkStickerAnim(array $sticker, string $label, array &$errors): void
+    {
+        $raw = $sticker['anim'] ?? null;
+
+        if ($raw === null) {
+            return;
+        }
+
+        $anim = StickerAnim::normalise($raw);
+
+        if ($anim === null) {
+            $errors[] = sprintf(
+                '%s has an anim that is not {%s} with positive numbers.',
+                $label,
+                implode(', ', StickerAnim::KEYS),
+            );
+
+            return;
+        }
+
+        if ($anim['frames'] > $anim['hframes'] * $anim['vframes']) {
+            $errors[] = sprintf(
+                '%s anim says %d frames but a %dx%d sheet only holds %d.',
+                $label,
+                $anim['frames'],
+                $anim['hframes'],
+                $anim['vframes'],
+                $anim['hframes'] * $anim['vframes'],
+            );
+        }
+
+        if ($anim['fps'] < StickerAnim::MIN_FPS || $anim['fps'] > StickerAnim::MAX_FPS) {
+            $errors[] = sprintf(
+                '%s anim fps is %s, outside %d-%d.',
+                $label,
+                rtrim(rtrim(number_format($anim['fps'], 2, '.', ''), '0'), '.'),
+                StickerAnim::MIN_FPS,
+                StickerAnim::MAX_FPS,
+            );
+        }
+
+        if ($anim['hframes'] > StickerAnim::MAX_GRID || $anim['vframes'] > StickerAnim::MAX_GRID) {
+            $errors[] = sprintf(
+                '%s anim grid is %dx%d, over the %d cell-per-side ceiling.',
+                $label,
+                $anim['hframes'],
+                $anim['vframes'],
+                StickerAnim::MAX_GRID,
+            );
         }
     }
 

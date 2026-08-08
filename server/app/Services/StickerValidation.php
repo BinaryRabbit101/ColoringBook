@@ -28,15 +28,30 @@ namespace App\Services;
  *    is legal, just unusual, and the operator is looking at a preview.
  * 4. **Something is actually drawn.** A fully transparent image is an export
  *    that went wrong, and it is an error: there is nothing to stick down.
+ *
+ * ## Animated stickers (BL-38)
+ *
+ * An animated sticker is one sprite-sheet PNG carrying `hframes * vframes`
+ * cells, so every size check above moves **onto the frame**: a 4×2 sheet of
+ * 256 px frames is a 1024×512 file in which every frame is exactly right, and
+ * checking the file against `sticker_max_px` would refuse it for being the
+ * shape a sprite sheet is. The sheet gets its own roomier ceiling instead, and
+ * two new checks join: the grid has to divide the sheet evenly (a half-pixel
+ * column is a frame with a sliver of its neighbour in it, and the game slices
+ * by `hframes`/`vframes` without looking), and `frames` cannot exceed the cells
+ * there are to hold them.
  */
 class StickerValidation
 {
     /**
      * Every problem with one sticker image, in the operator's language.
      *
+     * `$anim` is the sprite-sheet grid, or null for a still sticker.
+     *
      * @param  string  $path  an absolute path to the image
+     * @param  array{hframes: int, vframes: int, frames: int, fps: float}|null  $anim
      */
-    public function validateFile(string $path): PackValidationResult
+    public function validateFile(string $path, ?array $anim = null): PackValidationResult
     {
         RegionImage::assertSupported();
 
@@ -50,10 +65,13 @@ class StickerValidation
             return PackValidationResult::failed([__('the image could not be read.')]);
         }
 
-        return $this->validateBytes($bytes);
+        return $this->validateBytes($bytes, $anim);
     }
 
-    public function validateBytes(string $bytes): PackValidationResult
+    /**
+     * @param  array{hframes: int, vframes: int, frames: int, fps: float}|null  $anim
+     */
+    public function validateBytes(string $bytes, ?array $anim = null): PackValidationResult
     {
         RegionImage::assertSupported();
 
@@ -67,23 +85,12 @@ class StickerValidation
 
         $width = imagesx($image);
         $height = imagesy($image);
-        $minimum = (int) config('coloringbook.admin.sticker_min_px');
-        $maximum = (int) config('coloringbook.admin.sticker_max_px');
 
-        $errors = [];
+        $errors = $anim === null
+            ? $this->checkStill($width, $height)
+            : $this->checkSheet($width, $height, $anim);
+
         $warnings = [];
-
-        if ($width < $minimum || $height < $minimum) {
-            $errors[] = __('it is :wx:h, and a sticker must be at least :min px on both sides — smaller than that it is a smudge on a 2048 px page.', [
-                'w' => $width, 'h' => $height, 'min' => $minimum,
-            ]);
-        }
-
-        if ($width > $maximum || $height > $maximum) {
-            $errors[] = __('it is :wx:h, over the :max px ceiling for a sticker.', [
-                'w' => $width, 'h' => $height, 'max' => $maximum,
-            ]);
-        }
 
         if ($errors === []) {
             $alpha = $this->alphaProfile($image, $width, $height);
@@ -98,6 +105,80 @@ class StickerValidation
         imagedestroy($image);
 
         return new PackValidationResult($errors, $warnings);
+    }
+
+    /**
+     * One drawing, one file: the size bounds as BL-37 wrote them.
+     *
+     * @return list<string>
+     */
+    private function checkStill(int $width, int $height): array
+    {
+        $minimum = (int) config('coloringbook.admin.sticker_min_px');
+        $maximum = (int) config('coloringbook.admin.sticker_max_px');
+
+        $errors = [];
+
+        if ($width < $minimum || $height < $minimum) {
+            $errors[] = __('it is :wx:h, and a sticker must be at least :min px on both sides — smaller than that it is a smudge on a 2048 px page.', [
+                'w' => $width, 'h' => $height, 'min' => $minimum,
+            ]);
+        }
+
+        if ($width > $maximum || $height > $maximum) {
+            $errors[] = __('it is :wx:h, over the :max px ceiling for a sticker.', [
+                'w' => $width, 'h' => $height, 'max' => $maximum,
+            ]);
+        }
+
+        return $errors;
+    }
+
+    /**
+     * A sprite sheet (BL-38): the grid divides the file, the frames fit in the
+     * cells, and ONE FRAME is the thing measured against the size bounds.
+     *
+     * @param  array{hframes: int, vframes: int, frames: int, fps: float}  $anim
+     * @return list<string>
+     */
+    private function checkSheet(int $width, int $height, array $anim): array
+    {
+        $errors = [];
+        $sheetMax = (int) config('coloringbook.admin.sticker_sheet_max_px');
+
+        if ($width > $sheetMax || $height > $sheetMax) {
+            $errors[] = __('the sheet is :wx:h, over the :max px ceiling for a sprite sheet.', [
+                'w' => $width, 'h' => $height, 'max' => $sheetMax,
+            ]);
+        }
+
+        if ($width % $anim['hframes'] !== 0 || $height % $anim['vframes'] !== 0) {
+            // The game slices by hframes/vframes without looking, so a grid
+            // that does not divide the sheet puts a sliver of the next frame
+            // down the edge of every one of them.
+            $errors[] = __('the sheet is :wx:h, which a :colsx:rows grid does not divide evenly — every frame would carry a sliver of the next one.', [
+                'w' => $width, 'h' => $height, 'cols' => $anim['hframes'], 'rows' => $anim['vframes'],
+            ]);
+
+            return $errors;
+        }
+
+        if ($anim['frames'] > $anim['hframes'] * $anim['vframes']) {
+            $errors[] = __('it says :frames frames but a :colsx:rows sheet only holds :cells.', [
+                'frames' => $anim['frames'],
+                'cols' => $anim['hframes'],
+                'rows' => $anim['vframes'],
+                'cells' => $anim['hframes'] * $anim['vframes'],
+            ]);
+        }
+
+        return [
+            ...$errors,
+            ...$this->checkStill(
+                intdiv($width, $anim['hframes']),
+                intdiv($height, $anim['vframes']),
+            ),
+        ];
     }
 
     /**
@@ -168,7 +249,12 @@ class StickerValidation
                     : (string) $position;
 
                 $result = $result->merge(
-                    $this->prefix($this->validateFile($absolute), sprintf('%s / %s', $uid, $id)),
+                    $this->prefix(
+                        // BL-38: an entry carrying `anim` is a sprite sheet, and
+                        // the size bounds are measured on one frame of it.
+                        $this->validateFile($absolute, StickerAnim::of($sticker)),
+                        sprintf('%s / %s', $uid, $id),
+                    ),
                 );
             }
         }
