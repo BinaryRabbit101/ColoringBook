@@ -20,39 +20,11 @@ catalog + free-pack DLC delivery, paint-layer sync, admin upload/validation/
 preview/publish. 416 tests green. Still open: Phase 0 client work (`book_uid`,
 save v2, `user://dlc` discovery, runtime textures), payments (Phase 6), and
 deploy to the mini-pc.
+- 2026-08-07: **payments (Phase 6) deliberately deferred** — the user will pick
+  the provider/pricing/COPPA-consent shape when ready; everything else in this
+  entry has shipped in the meantime (deploy, sync, DLC, authoring, erasure).
 - Affected: `server/` (Laravel app in this repo), `docs/DLC_SERVER.md`,
   `docs/SERVER_BUILD_PLAN.md`
-
-### BL-32: Web build — HTTPRequest hangs on Chromium/Edge 151 — `open`
-Found 2026-08-07 during the BL-25/BL-26 live verification. On Edge 151
-(Chromium), **every** Godot `HTTPRequest` in the web build hangs after the
-response arrives: the browser completes the request (200/401 visible in the
-network log), but `request_completed` never fires — no result, no timeout —
-so the shop sits at "Looking for new books…" and sign-in at "Contacting the
-server…" forever. **Not caused by any of this repo's code or the server**,
-proven three ways:
-1. Yesterday's known-good build (commit 5423037, verified working in-browser
-   2026-08-06) now hangs identically against the live server.
-2. The same old build hangs identically against a plain local `php -S`
-   file server (a bare 404 response — no nginx, no proxy, no API).
-3. Page-level JS in the same tab is fine: `fetch()` + `body.getReader()`
-   completes in ~150 ms with the full body and `done: true`, and the
-   `transfer-encoding: chunked` header IS exposed (so the glue's chunked
-   detection isn't the break).
-The engine binary is the stock 4.5.1 web template both days; the browser
-auto-updated to 151 in between. Precedent: Chromium 113 broke Godot HEAD
-requests the same way (godotengine/godot#76825). Not yet filed upstream for
-151 as of 2026-08-07.
-- Caveats: reproduced only under the claude-in-chrome automation extension in
-  Edge 151 — **first step is a hand test in a human-driven browser** (phone
-  Safari, Chrome, Firefox) to separate "Chromium 151 broke it" from
-  "extension interference". Native (desktop) API traffic is fully green
-  (backend 180 / sync 87 smokes against the real server).
-- Options if confirmed browser-wide: newer export templates (4.5.2+/4.6) if
-  upstream fixes it; file the upstream issue with the §3 evidence; or a
-  JS-bridge workaround in the web shell (heavy — last resort).
-- Affected: web export only; blocks sign-in/downloads/sync in affected
-  browsers. The game itself (shelf, coloring, saves) runs fine there.
 
 ## Completed — archived
 
@@ -97,3 +69,6 @@ Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md
 - **BL-37** — Sticker packs served by the API server (the manifest learns a content kind)
 - **BL-38** — Animated crayon finishes (Shimmer, Twinkle) — the effect-mask channel,
   a second SubViewport saved as a second PNG
+- **BL-32** — Web HTTPRequest "hang on Edge 151" — resolved as environmental:
+  real browsers are fine; the hang only exists under the claude-in-chrome
+  automation extension

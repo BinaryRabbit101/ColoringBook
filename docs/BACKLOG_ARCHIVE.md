@@ -2306,3 +2306,25 @@ and cycled by exactly the machinery BL-34/BL-36 built.
   `crayon_button.gd`, `scripts/screens/coloring_page.gd`, `autoload/game_state.gd`,
   `resources/palettes/sets/{shimmer,twinkle}.tres` (new), paint + flow + palette
   smokes, DESIGN.md §1/§3.2, coloring-mechanics skill.
+
+### BL-32: Web build — HTTPRequest "hangs on Chromium/Edge 151" — `resolved — environmental` (2026-08-07)
+Found 2026-08-07 during the BL-25/BL-26 live verification: under automation,
+**every** Godot `HTTPRequest` in the web build hung after the response arrived —
+the browser completed the request (200/401 in the network log) but
+`request_completed` never fired, so the shop and sign-in waited forever. Proven
+at the time to be no fault of this repo or the server (a known-good day-old
+build hung identically, page-level `fetch()` in the same tab was fine).
+- **Resolution: the hand test settled it.** The user tested the live build in a
+  real, human-driven browser on 2026-08-07 and everything works — sign-in, shop,
+  downloads. Chromium/Edge 151 did NOT break Godot's web `HTTPRequest`; the hang
+  only reproduces when the page is driven under the **claude-in-chrome
+  automation extension**, which interferes with the engine's XHR completion
+  events. Nothing to fix in the repo, nothing to file upstream.
+- **The lasting lesson (for future sessions):** in-browser verification of the
+  web build's NETWORK paths cannot be done through the automation extension —
+  the game boots and paints fine under it, but sign-in/shop/downloads will
+  falsely appear hung. Verify network features with the native smokes
+  (backend/sync against the real server) plus a human hand test in a real
+  browser; treat any extension-driven "the shop hangs" as this caveat until a
+  human reproduces it.
+- Affected: nothing shipped — evidence and the tooling caveat only.
