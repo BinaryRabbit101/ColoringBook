@@ -113,6 +113,11 @@ Route::middleware(['auth:sanctum', 'abilities:'.config('coloringbook.admin.abili
                 Route::patch('/', [BookController::class, 'update'])->name('update');
                 Route::delete('/', [BookController::class, 'destroy'])->name('destroy');
 
+                // BL-38: the artist's optional cover art. Uploaded on the book
+                // PATCH (multipart `cover`, or `cover_asset_ulid`), cleared with
+                // `remove_cover`, and read back here.
+                Route::get('cover', [BookController::class, 'cover'])->name('cover');
+
                 Route::post('publish', [BookController::class, 'publish'])->name('publish');
 
                 Route::get('pages', [BookPageController::class, 'index'])->name('pages.index');
@@ -127,6 +132,11 @@ Route::middleware(['auth:sanctum', 'abilities:'.config('coloringbook.admin.abili
                         Route::delete('/', [BookPageController::class, 'destroy'])->name('destroy');
                         Route::get('status', [BookPageController::class, 'status'])->name('status');
                         Route::get('preview', [BookPageController::class, 'preview'])->name('preview');
+
+                        // BL-38: the page's own uploads, as files. `preview` is
+                        // the composited region overlay; these are the art.
+                        Route::get('display', [BookPageController::class, 'display'])->name('display');
+                        Route::get('mask', [BookPageController::class, 'mask'])->name('mask');
                     });
             });
 

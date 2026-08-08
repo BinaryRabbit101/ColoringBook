@@ -84,16 +84,30 @@ class PublishAuthoredBook
      * Lay the pack out on disk and describe it — §7.2's layout, verbatim:
      *
      * ```
+     * books/<book_uid>/cover.png              only when the artist supplied one
      * books/<book_uid>/page_01.png            the display image
      * books/<book_uid>/page_01_mask.png       only when the page has a mask
      * books/<book_uid>/page_01_idmap.png
      * books/<book_uid>/page_01_regions.json
      * ```
      *
-     * The pack cover and the book cover are both page one's display art rather
-     * than a separate upload: a one-book pack has nothing else to be a cover,
-     * and content addressing means the same blob wearing two `assets.kind` hats
-     * costs one file.
+     * ## The cover (BL-38)
+     *
+     * The pack cover and the book cover are the same path and there are two
+     * things it can be:
+     *
+     * 1. **The artist's cover image**, when the book has one — shipped as
+     *    `books/<book_uid>/cover.png` and named by both `cover` fields. This is
+     *    what the game's bookshelf grid and the book open/close animation want:
+     *    art drawn to be a cover rather than a page that happens to be first.
+     * 2. **Page one's display art**, when it does not — which is exactly what
+     *    every book published before BL-38 shipped, so old packs stay valid and
+     *    a book nobody has drawn a cover for publishes the pack it always did.
+     *
+     * `cover` is therefore never absent from a manifest this publisher writes;
+     * the *optionality* lives on the authored row. The game's own "no cover ⇒
+     * fall back to the first page" rule is the third layer, for a pack built
+     * some other way.
      *
      * @param  Collection<int, AuthoredPage>  $pages
      * @return array<string, mixed>
@@ -102,7 +116,7 @@ class PublishAuthoredBook
     {
         $files = [];
         $manifestPages = [];
-        $cover = null;
+        $cover = $this->placeCover($book, $directory, $files);
 
         foreach ($pages as $page) {
             $stem = sprintf('books/%s/%s', $book->book_uid, $page->fileStem());
@@ -148,6 +162,39 @@ class PublishAuthoredBook
             ]],
             'files' => $files,
         ];
+    }
+
+    /**
+     * The artist's cover art, laid into the pack (BL-38) — or null when the
+     * book has none, which is the case the caller falls back from.
+     *
+     * A missing blob is a **refusal, not a silent fallback**: the operator
+     * uploaded a cover and would otherwise be shown a published pack wearing
+     * page one, with nothing anywhere saying why.
+     *
+     * @param  array<string, array{bytes: int, sha256: string}>  $files
+     */
+    private function placeCover(AuthoredBook $book, string $directory, array &$files): ?string
+    {
+        $asset = $book->coverAsset;
+
+        if ($asset === null) {
+            return null;
+        }
+
+        $path = sprintf('books/%s/cover.png', $book->book_uid);
+        $target = $directory.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, $path);
+
+        if (! $this->workspace->materialise($asset, $target)) {
+            throw self::refusal([__('The cover image is no longer on disk — upload it again, or remove it.')]);
+        }
+
+        $files[$path] = [
+            'bytes' => (int) filesize($target),
+            'sha256' => (string) hash_file('sha256', $target),
+        ];
+
+        return $path;
     }
 
     /**

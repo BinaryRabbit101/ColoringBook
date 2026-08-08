@@ -2,6 +2,7 @@
 
 namespace App\Actions\Authoring;
 
+use App\Models\Asset;
 use App\Models\AuthoredBook;
 use Illuminate\Support\Facades\DB;
 
@@ -19,11 +20,16 @@ use Illuminate\Support\Facades\DB;
  *
  * Nothing here reaches published bytes: a title change shows up when the next
  * version is published, exactly like a page change.
+ *
+ * BL-38 adds the **cover**, and it is a `sometimes` key like the others: an
+ * absent `cover` leaves the book's cover alone, a `cover` holding null clears
+ * it, and clearing it is not a hole — the publisher falls back to page one's
+ * display art, which is the cover every book had before this existed.
  */
 class UpdateAuthoredBook
 {
     /**
-     * @param  array{title?: string, blurb?: string|null, is_free?: bool}  $changes
+     * @param  array{title?: string, blurb?: string|null, is_free?: bool, cover?: Asset|null}  $changes
      */
     public function handle(AuthoredBook $book, array $changes): AuthoredBook
     {
@@ -42,6 +48,10 @@ class UpdateAuthoredBook
 
             if (array_key_exists('is_free', $changes)) {
                 $pack->is_free = $changes['is_free'];
+            }
+
+            if (array_key_exists('cover', $changes)) {
+                $book->cover_asset_id = $changes['cover']?->id;
             }
 
             $book->save();

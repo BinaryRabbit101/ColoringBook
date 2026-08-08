@@ -7,6 +7,7 @@ use App\Actions\Authoring\StoreAuthoredPage;
 use App\Actions\Authoring\UpdateAuthoredPage;
 use App\Concerns\ResolvesAuthoredBooks;
 use App\Concerns\ResolvesAuthoringAssets;
+use App\Concerns\ServesAuthoringImages;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\StorePageRequest;
 use App\Http\Requests\Admin\UpdatePageRequest;
@@ -34,7 +35,7 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class BookPageController extends Controller
 {
-    use ResolvesAuthoredBooks, ResolvesAuthoringAssets;
+    use ResolvesAuthoredBooks, ResolvesAuthoringAssets, ServesAuthoringImages;
 
     public function show(string $book, int $index): InertiaResponse
     {
@@ -116,5 +117,40 @@ class BookPageController extends Controller
             'Content-Type' => 'image/png',
             'Cache-Control' => 'private, max-age=3600',
         ]);
+    }
+
+    /**
+     * The page's own detail image (BL-38) — what the restructured book screen
+     * puts a thumbnail of beside every row. The region overlay above is a
+     * different picture answering a different question; this one is simply
+     * "which drawing is this".
+     */
+    public function display(string $book, int $index): Response
+    {
+        return $this->artwork($book, $index, mask: false);
+    }
+
+    /**
+     * The page's masking image, when it has one — a **404 when it does not**,
+     * which is a normal page and not an error. The screen shows an empty slot
+     * rather than asking.
+     */
+    public function mask(string $book, int $index): Response
+    {
+        return $this->artwork($book, $index, mask: true);
+    }
+
+    private function artwork(string $book, int $index, bool $mask): Response
+    {
+        $page = $this->authoredPage($this->authoredBook($book), $index);
+        $asset = $mask ? $page->maskAsset : $page->displayAsset;
+
+        abort_if($asset === null, Response::HTTP_NOT_FOUND);
+
+        $bytes = $this->assetBytes($asset);
+
+        abort_if($bytes === null, Response::HTTP_NOT_FOUND);
+
+        return $this->assetImage($asset, $bytes);
     }
 }

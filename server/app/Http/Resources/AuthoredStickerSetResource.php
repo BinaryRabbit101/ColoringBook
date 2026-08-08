@@ -40,15 +40,18 @@ class AuthoredStickerSetResource extends JsonResource
 
         $pack = $this->pack;
         $published = null;
+        $publishedAt = null;
 
         foreach ($pack->versions as $version) {
             /** @var PackVersion $version */
             if ($version->published_at !== null && ($published === null || $version->version > $published)) {
                 $published = $version->version;
+                $publishedAt = $version->published_at;
             }
         }
 
         $blockers = $this->publishBlockers($stickers);
+        $modifiedAt = $this->lastModifiedAt($stickers);
 
         $payload = [
             'set_uid' => $this->set_uid,
@@ -64,6 +67,18 @@ class AuthoredStickerSetResource extends JsonResource
                 fn (AuthoredSticker $sticker): bool => ! $sticker->isPublishable(),
             )->count(),
             'latest_published_version' => $published,
+
+            // BL-38, the same two questions the book list asks: when did this
+            // last ship, and is there anything here that has not.
+            'last_published_at' => $publishedAt?->toIso8601String(),
+            'last_modified_at' => $modifiedAt?->toIso8601String(),
+            'modified_since_publish' => $publishedAt === null
+                || ($modifiedAt !== null && $modifiedAt->greaterThan($publishedAt)),
+
+            'animated_sticker_count' => $stickers->filter(
+                fn (AuthoredSticker $sticker): bool => $sticker->isAnimated(),
+            )->count(),
+
             'publishable' => $blockers === [],
             'blockers' => $blockers,
             'created_at' => $this->created_at?->toIso8601String(),

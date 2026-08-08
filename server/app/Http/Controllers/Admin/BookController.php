@@ -7,6 +7,8 @@ use App\Actions\Authoring\DeleteAuthoredBook;
 use App\Actions\Authoring\PublishAuthoredBook;
 use App\Actions\Authoring\UpdateAuthoredBook;
 use App\Concerns\ResolvesAuthoredBooks;
+use App\Concerns\ResolvesAuthoringAssets;
+use App\Concerns\ServesAuthoringImages;
 use App\Exceptions\ApiException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\StoreBookRequest;
@@ -17,6 +19,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response as InertiaResponse;
+use Symfony\Component\HttpFoundation\Response;
 
 /**
  * Web authoring in the browser (BL-24, §10.3) — the session door.
@@ -29,12 +32,12 @@ use Inertia\Response as InertiaResponse;
  */
 class BookController extends Controller
 {
-    use ResolvesAuthoredBooks;
+    use ResolvesAuthoredBooks, ResolvesAuthoringAssets, ServesAuthoringImages;
 
     public function index(): InertiaResponse
     {
         $books = AuthoredBook::query()
-            ->with(['pack.versions', 'pages'])
+            ->with(['pack.versions', 'pages', 'coverAsset'])
             ->orderBy('title')
             ->get();
 
@@ -48,7 +51,7 @@ class BookController extends Controller
     public function show(Request $request, string $book): InertiaResponse
     {
         $authored = $this->authoredBook($book, withPages: true);
-        $authored->loadMissing('pack.versions');
+        $authored->loadMissing(['pack.versions', 'coverAsset']);
 
         return Inertia::render('admin/Book', [
             'book' => new AuthoredBookResource($authored, withPages: true),
@@ -76,14 +79,31 @@ class BookController extends Controller
 
     public function update(UpdateBookRequest $request, string $book, UpdateAuthoredBook $update): RedirectResponse
     {
-        /** @var array{title?: string, blurb?: string|null, is_free?: bool} $changes */
-        $changes = $request->validated();
+        /** @var array<string, mixed> $validated */
+        $validated = $request->validated();
 
-        $update->handle($this->authoredBook($book), $changes);
+        $update->handle($this->authoredBook($book), $this->bookChanges($request, $validated));
 
         Inertia::flash('toast', ['type' => 'success', 'message' => __('Book updated.')]);
 
         return to_route('admin.books.show', ['book' => $book]);
+    }
+
+    /**
+     * The book's cover art (BL-38). A plain `<img src>` target, so it has to be
+     * a session-authenticated route rather than the token API's.
+     */
+    public function cover(string $book): Response
+    {
+        $asset = $this->authoredBook($book)->coverAsset;
+
+        abort_if($asset === null, Response::HTTP_NOT_FOUND);
+
+        $bytes = $this->assetBytes($asset);
+
+        abort_if($bytes === null, Response::HTTP_NOT_FOUND);
+
+        return $this->assetImage($asset, $bytes);
     }
 
     public function destroy(string $book, DeleteAuthoredBook $delete): RedirectResponse

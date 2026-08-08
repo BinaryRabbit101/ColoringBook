@@ -72,6 +72,10 @@ Route::middleware(['auth', EnsureAdmin::class])
                 Route::patch('/', [BookController::class, 'update'])->name('update');
                 Route::delete('/', [BookController::class, 'destroy'])->name('destroy');
 
+                // BL-38: the artist's cover art, as an <img src> target. The
+                // upload rides the book PATCH beside the title.
+                Route::get('cover', [BookController::class, 'cover'])->name('cover');
+
                 Route::post('publish', [BookController::class, 'publish'])->name('publish');
 
                 Route::post('pages', [BookPageController::class, 'store'])->name('pages.store');
@@ -85,6 +89,12 @@ Route::middleware(['auth', EnsureAdmin::class])
                         Route::delete('/', [BookPageController::class, 'destroy'])->name('destroy');
                         Route::get('status', [BookPageController::class, 'status'])->name('status');
                         Route::get('preview', [BookPageController::class, 'preview'])->name('preview');
+
+                        // BL-38: the page's own art, for the book screen's
+                        // thumbnails. `preview` composites the region overlay;
+                        // these two are the files themselves.
+                        Route::get('display', [BookPageController::class, 'display'])->name('display');
+                        Route::get('mask', [BookPageController::class, 'mask'])->name('mask');
                     });
             });
 

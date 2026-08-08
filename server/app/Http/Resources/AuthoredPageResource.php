@@ -76,6 +76,21 @@ class AuthoredPageResource extends JsonResource
             'preview_url' => $this->isMapped()
                 ? route($this->routePrefix.'books.pages.preview', ['book' => $bookUid, 'index' => $this->page_index])
                 : null,
+
+            // BL-38: the two thumbnails the restructured book screen shows.
+            // The overlay above answers "did the mapping work"; these answer
+            // "which drawing is this", which is what the operator is scanning a
+            // page list for. `mask_url` is null on a page with no mask — the
+            // normal case — so the screen renders an empty add-a-mask slot
+            // rather than a broken image.
+            // Never null: a page cannot exist without its detail image.
+            'display_url' => route($this->routePrefix.'books.pages.display', [
+                'book' => $bookUid,
+                'index' => $this->page_index,
+            ]),
+            'mask_url' => $this->hasMask()
+                ? route($this->routePrefix.'books.pages.mask', ['book' => $bookUid, 'index' => $this->page_index])
+                : null,
             'status_url' => route($this->routePrefix.'books.pages.status', [
                 'book' => $bookUid,
                 'index' => $this->page_index,

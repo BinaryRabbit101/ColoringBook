@@ -7,6 +7,9 @@ use App\Actions\Authoring\DeleteAuthoredBook;
 use App\Actions\Authoring\PublishAuthoredBook;
 use App\Actions\Authoring\UpdateAuthoredBook;
 use App\Concerns\ResolvesAuthoredBooks;
+use App\Concerns\ResolvesAuthoringAssets;
+use App\Concerns\ServesAuthoringImages;
+use App\Exceptions\ApiException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\StoreBookRequest;
 use App\Http\Requests\Admin\UpdateBookRequest;
@@ -24,14 +27,14 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class BookController extends Controller
 {
-    use ResolvesAuthoredBooks;
+    use ResolvesAuthoredBooks, ResolvesAuthoringAssets, ServesAuthoringImages;
 
     private const ROUTE_PREFIX = 'api.v1.admin.';
 
     public function index(): JsonResponse
     {
         $books = AuthoredBook::query()
-            ->with(['pack.versions', 'pages'])
+            ->with(['pack.versions', 'pages', 'coverAsset'])
             ->orderBy('title')
             ->get();
 
@@ -70,12 +73,36 @@ class BookController extends Controller
 
     public function update(UpdateBookRequest $request, string $book, UpdateAuthoredBook $update): JsonResponse
     {
-        /** @var array{title?: string, blurb?: string|null, is_free?: bool} $changes */
-        $changes = $request->validated();
+        /** @var array<string, mixed> $validated */
+        $validated = $request->validated();
 
-        $updated = $update->handle($this->authoredBook($book), $changes);
+        $updated = $update->handle($this->authoredBook($book), $this->bookChanges($request, $validated));
 
         return response()->json(['book' => new AuthoredBookResource($updated, false, self::ROUTE_PREFIX)]);
+    }
+
+    /**
+     * The book's cover art (BL-38), as `image/png`.
+     *
+     * A book with no cover is a **404, not an empty response**: the fallback to
+     * page one's art is the publisher's job and the game's, not this route's,
+     * and an authoring screen showing an empty cover slot has to be able to
+     * tell "no cover" from "a cover that failed to load".
+     */
+    public function cover(string $book): Response
+    {
+        $asset = $this->authoredBook($book)->coverAsset;
+        $bytes = $asset === null ? null : $this->assetBytes($asset);
+
+        if ($asset === null || $bytes === null) {
+            throw new ApiException(
+                'COVER_NOT_FOUND',
+                __('That book has no cover image.'),
+                Response::HTTP_NOT_FOUND,
+            );
+        }
+
+        return $this->assetImage($asset, $bytes);
     }
 
     public function destroy(string $book, DeleteAuthoredBook $delete): JsonResponse
