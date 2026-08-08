@@ -70,12 +70,14 @@ const REPLACED_BY_ARROWS := "res://scripts/components/crayon_box_button.gd"
 const MIN_COLOR_DISTANCE := 0.25
 ## Authored crayon sets that ship: BL-35 replaced BL-23's five recolours (Pastel,
 ## Neon, Earth, Candy, Spooky -- "more colour options, not more fun") with three
-## boxes of the SAME crayons in escalating finishes.
-const EXPECTED_EXTRA_SETS := 3
+## boxes of the SAME crayons in escalating finishes, and BL-38 added the two
+## ANIMATED boxes on top of them (Shimmer, Twinkle).
+const EXPECTED_EXTRA_SETS := 5
 ## The finish ladder the shipped boxes walk, dullest first: box 0 is the default
 ## crayon box in plain wax, then one box per authored set.
 const FINISH_LADDER: Array[StringName] = [
-	BrushFinish.CLASSIC, BrushFinish.GLOW, BrushFinish.GRAIN, BrushFinish.GLITTER
+	BrushFinish.CLASSIC, BrushFinish.GLOW, BrushFinish.GRAIN, BrushFinish.GLITTER,
+	BrushFinish.SHIMMER, BrushFinish.TWINKLE
 ]
 const SET_NAMES: PackedStringArray = ["Neon Glow", "Textured Wax", "Glitter"]
 
@@ -627,13 +629,37 @@ func _check_crayon_sets() -> void:
 		"the boxes escalate: %s" % [", ".join(_finish_names(ladder))])
 	_expect(_def.get_crayon_set_effect(0) == BrushFinish.CLASSIC,
 		"...starting with today's plain wax, which the default box keeps untouched")
+	# BL-38 inverted this. Phase 1 asserted every shipped finish was bakeable; phase 2
+	# asserts the ladder ENDS with the animated ones, because a box that keeps moving
+	# is louder than any box that stops and the escalation is the whole design.
 	var animated := PackedStringArray()
-	for finish in ladder:
+	var first_animated := -1
+	for i in ladder.size():
+		if BrushFinish.is_animated(ladder[i]):
+			animated.append(String(ladder[i]))
+			if first_animated < 0:
+				first_animated = i
+	_expect(animated.size() == 2,
+		"the ladder ships TWO animated boxes on top of the four bakeable ones (%s)" % [animated])
+	_expect(first_animated == ladder.size() - animated.size(),
+		"...and they are the LAST boxes in the cycle, not sprinkled through it (first at %d of %d)"
+		% [first_animated, ladder.size()])
+	var bakeable_still := true
+	for i in first_animated:
+		bakeable_still = bakeable_still and not BrushFinish.is_animated(ladder[i])
+	_expect(bakeable_still,
+		"...and every box below them is still BAKEABLE, so those pages need no mask at all")
+	var payloads_split := true
+	for finish in BrushFinish.LADDER:
+		var payload := BrushFinish.mask_payload(finish)
+		# A bakeable finish's payload is ZERO, which is what makes classic wax
+		# painted over a shimmer erase it rather than merely cover it.
 		if BrushFinish.is_animated(finish):
-			animated.append(String(finish))
-	_expect(animated.is_empty(),
-		"every shipped finish is BAKEABLE, so the saved PNG carries it (phase 2 is"
-		+ " animated finishes) -- live ones found: %s" % [animated])
+			payloads_split = payloads_split and (payload.r > 0.0 or payload.g > 0.0)
+		else:
+			payloads_split = payloads_split and payload.r == 0.0 and payload.g == 0.0
+	_expect(payloads_split,
+		"an animated box writes an effect-mask payload and a bakeable one writes zeros")
 
 	# --- set_palette primes the finish, like the size and the colour ----------
 	_expect(_effects.size() == 1 and _effects[0] == BrushFinish.CLASSIC,

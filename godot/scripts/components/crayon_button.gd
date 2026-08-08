@@ -326,6 +326,10 @@ func _draw_crayon(box: Vector2) -> void:
 	# the finish is what the box IS, not feedback about what was picked.
 	if finish == BrushFinish.GLOW:
 		_draw_finish_bloom(silhouette, centre)
+	# BL-38: an ANIMATED box glows a little too, because "this one is alive" has to
+	# be legible in a strip of ten crayons at arm's length.
+	if BrushFinish.is_animated(finish):
+		_draw_finish_bloom(silhouette, centre)
 
 	# Body + tip in one silhouette, then shading and wrapper on top of it.
 	draw_colored_polygon(silhouette, crayon_color)
@@ -378,6 +382,11 @@ func _draw_crayon(box: Vector2) -> void:
 			_draw_finish_glitter(Rect2(center_x - half, top, body_width, bottom - top))
 		BrushFinish.GLOW:
 			_draw_finish_hot_tip(center_x, top, tip_base, tip_width, half)
+		BrushFinish.SHIMMER:
+			_draw_finish_sheen(body_box)
+		BrushFinish.TWINKLE:
+			_draw_finish_sheen(body_box)
+			_draw_finish_glitter(Rect2(center_x - half, top, body_width, bottom - top))
 
 	# Silhouette outline last, so nothing overdraws it. A selected crayon gets a
 	# bright rim just outside it as well (BL-15): the dark edge alone disappears
@@ -510,6 +519,35 @@ func _draw_finish_glitter(body: Rect2) -> void:
 			Color(1.0, 1.0, 1.0, 0.92)
 		)
 		draw_circle(centre, arm * 0.18, Color(1.0, 1.0, 1.0, 1.0))
+
+
+## BL-38's animated boxes: a bright SHEEN band lying across the barrel, the still
+## frame of the highlight that will travel across the stroke.
+##
+## A band rather than a sparkle because that is what the finish actually does, and a
+## still preview of a moving thing has to show its SHAPE -- a crayon that animated
+## in the strip would be one more thing moving on a screen that already has a
+## bouncing selection, and BL-16's lesson was that a strip full of motion reads as
+## noise, not as an invitation.
+func _draw_finish_sheen(body: Rect2) -> void:
+	if body.size.x <= 0.0 or body.size.y <= 0.0:
+		return
+	var band_height := maxf(body.size.y * 0.13, 4.0)
+	var lean := body.size.x * 0.34
+	var y := body.position.y + body.size.y * 0.30
+	for i in 3:
+		var offset := float(i) * band_height * 0.62
+		var thickness := band_height * (1.0 - float(i) * 0.26)
+		var alpha := 0.62 - float(i) * 0.17
+		draw_colored_polygon(
+			PackedVector2Array([
+				Vector2(body.position.x, y + offset + lean * 0.5),
+				Vector2(body.position.x + body.size.x, y + offset - lean * 0.5),
+				Vector2(body.position.x + body.size.x, y + offset - lean * 0.5 + thickness),
+				Vector2(body.position.x, y + offset + lean * 0.5 + thickness),
+			]),
+			Color(1.0, 1.0, 1.0, alpha)
+		)
 
 
 ## [param polygon] scaled about [param center]. Keeps the tapered crayon shape.

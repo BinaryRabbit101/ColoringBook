@@ -56,6 +56,19 @@ extends Control
 ## and it changes nothing about the mechanic: the lock, the clip and the lifecycle
 ## are byte-identical for every finish.
 ##
+## [b]BL-38 added a second paint layer[/b], the EFFECT MASK, and it is the only
+## structural change the painting stack has taken since BL-17. It is a SubViewport
+## beside the paint one, stamped by the same brush shader through the same region
+## discard, holding "how alive is this wax" instead of "what colour is this wax";
+## [code]paint_display.gdshader[/code] on the PaintSprite animates the paint layer
+## wherever the mask is non-zero. Everything the rest of the component does is
+## unchanged -- the lock, the clip, the lifecycle, the recipes and above all
+## [method get_paint_image], which still returns the wax and only the wax, so
+## coverage and completion cannot see the animation. The layer stays DORMANT (two
+## pixels, never rendered) until an animated finish is actually in hand, so a page
+## coloured out of the four bakeable boxes costs exactly what it always did. See the
+## "effect mask" section below.
+##
 ## [b]The "base" image is the page's DISPLAY art[/b] ([member PageDef.display_image_path]):
 ## the drawing the player sees, with paint appearing beneath its line work. A page
 ## may also have been MAPPED from a separate masking image (BL-9), and since BL-12
@@ -83,6 +96,13 @@ signal paint_blocked(page_position: Vector2)
 
 const BRUSH_SHADER: Shader = preload("res://scenes/components/brush.gdshader")
 const LINE_ART_SHADER: Shader = preload("res://scenes/components/line_art.gdshader")
+## BL-38. Draws the paint layer and, where the effect mask says so, animates it.
+## With no mask it is the default canvas_item shader written out longhand.
+const PAINT_DISPLAY_SHADER: Shader = preload("res://scenes/components/paint_display.gdshader")
+## The effect viewport's size while it is DORMANT. Two pixels rather than the page,
+## because a page that never holds an animated finish must not pay for a second
+## page-sized render target (BL-38's mobile rule).
+const DORMANT_EFFECT_SIZE := Vector2i(2, 2)
 
 ## Distance between brush dabs, as a fraction of the brush RADIUS. 0.25 means a
 ## dab every quarter radius, so consecutive dabs overlap by ~87% of their width:
@@ -168,9 +188,16 @@ class PaintRestoreQuad extends Node2D:
 ## ID-map clip are identical for every finish, and a glow halo is discarded outside
 ## the locked region fragment by fragment like any other paint. An unknown id
 ## resolves to [constant BrushFinish.CLASSIC] rather than painting nothing.
+##
+## [b]BL-38: an ANIMATED finish also wakes the effect layer here[/b], the moment the
+## palette hands one over -- frames before the player can possibly press. Waking it
+## resizes a SubViewport and arms a clear, and neither is a thing to be doing inside
+## [method begin_stroke].
 @export var brush_effect: StringName = BrushFinish.CLASSIC:
 	set(value):
 		brush_effect = BrushFinish.resolve(value)
+		if BrushFinish.is_animated(brush_effect):
+			_activate_effect_layer()
 ## When false, a press starts NO stroke: [method begin_stroke] refuses and emits
 ## [signal paint_blocked] instead. Nothing else changes -- pan, zoom, the
 ## two-finger gestures, and every pixel already on the page are untouched, because
@@ -215,11 +242,28 @@ class PaintRestoreQuad extends Node2D:
 @export_range(1.0, 64.0, 0.1) var max_zoom_factor: float = 8.0
 ## Opacity of the whole debug overlay (see [method set_debug_overlay_visible]).
 @export_range(0.0, 1.0, 0.01) var debug_overlay_alpha: float = 0.45
+## BL-38. False freezes every animated finish at t = 0 -- the wax keeps the look it
+## was stamped with, and stops moving.
+##
+## It is a DISPLAY switch and nothing else: the paint layer, the effect mask, the
+## saved PNGs, the recipes and the coverage tracker are all byte-identical either
+## way, which is what the smoke's "coverage cannot see the animation" check proves.
+## Kept public because a settings toggle, a reduced-motion preference and a
+## low-end fallback would all reach for the same lever.
+@export var effect_animation_enabled: bool = true:
+	set(value):
+		effect_animation_enabled = value
+		_apply_display_material()
 
 # ------------------------------------------------------------- node handles --
 
 @onready var _paint_viewport: SubViewport = $PaintViewport
 @onready var _paint_canvas: PaintCanvas = $PaintViewport/PaintCanvas
+## BL-38's effect mask: a second paint layer, the same size as the first, holding
+## "how alive is this wax" instead of "what colour is this wax". Dormant (two
+## pixels, never rendered) until an animated finish is actually in hand.
+@onready var _effect_viewport: SubViewport = $EffectViewport
+@onready var _effect_canvas: PaintCanvas = $EffectViewport/EffectCanvas
 @onready var _page_root: Node2D = $PageRoot
 @onready var _paper: Sprite2D = $PageRoot/Paper
 @onready var _paint_sprite: Sprite2D = $PageRoot/PaintSprite
@@ -259,6 +303,12 @@ var _last_recipe: Dictionary = {}
 ## point and carried in the recipe: the grain angle and the glitter layout are
 ## functions of it, so a replay that re-uses it re-stamps the same pixels.
 var _effect_seed := 0.0
+## BL-38. True once this page has woken the effect mask -- i.e. an animated finish
+## has been in hand, or a saved mask has been restored. While false the second
+## SubViewport is two pixels and never rendered, and the display shader is a
+## pass-through, so a page coloured entirely out of the four bakeable boxes costs
+## exactly what it cost before phase 2 existed.
+var _effect_active := false
 ## True while [method rebuild_paint] is re-laying a page. Nothing else in the
 ## component reacts to it; it exists so the parent can refuse to read the paint
 ## layer (or start another rebuild) half way through one.
@@ -389,6 +439,11 @@ func load_page_textures(
 	_paint_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_paint_canvas.configure(BRUSH_SHADER, _id_texture, page_size_f)
 
+	# BL-38: a new page starts with no animated wax on it, and the mask that belongs
+	# to the page we are LEAVING must not survive into it. The screen restores this
+	# page's own saved mask afterwards, exactly as it restores the paint layer.
+	_reset_effect_layer()
+
 	_paper.texture = _make_white_texture()
 	_paper.centered = false
 	_paper.scale = page_size_f
@@ -396,6 +451,7 @@ func load_page_textures(
 
 	_paint_sprite.centered = false
 	_paint_sprite.texture = _paint_viewport.get_texture()
+	_apply_display_material()
 
 	_line_art_sprite.centered = false
 	_line_art_sprite.texture = base
@@ -523,6 +579,125 @@ func _apply_mask_layer(mask_texture: Texture2D) -> void:
 		return
 	_mask_sprite.texture = mask_texture
 	_mask_sprite.visible = true
+
+
+# ======================================================= the effect mask (BL-38) ==
+# The animated half of the finish ladder, and the answer to BL-38's whole question:
+# WHERE DOES A LIVE EFFECT LIVE SO IT SURVIVES A SAVE?
+#
+# It lives in a second SubViewport, the same size as the paint one, stamped by the
+# same brush shader through the same region `discard`, holding a per-pixel payload
+# ("how much travelling sheen, how much winking speck, at what phase") instead of a
+# colour. `paint_display.gdshader` samples it on the PaintSprite and animates only
+# where it is non-zero.
+#
+# Four consequences, and every one of them is why this beat persisting recipes:
+#
+#   * The clip is free and exact. The mask cannot mark a pixel the wax did not
+#     cover, because the same shader wrote both through the same ID-map test.
+#   * Coverage cannot see it. `CoverageTracker` reads the PAINT viewport; this one
+#     is a different render target that nothing in the coverage path touches.
+#   * Persistence is a PNG. A page-sized RGBA8 image beside the paint PNG, restored
+#     by the same premultiplied one-frame composite. No replay, no unbounded
+#     metadata, no ordering to reconstruct.
+#   * Paint over it and it goes away. A classic stamp writes zeros through the same
+#     alpha blend, so ordinary wax over shimmer stops shimmering with no bookkeeping
+#     anywhere.
+#
+# It is DORMANT until it is needed: two pixels, never rendered, display shader in
+# pass-through. Waking it costs one resize and one cleared frame, and happens when
+# an animated finish reaches [member brush_effect] or a saved mask is restored.
+
+## Wakes the effect mask. Idempotent, and cheap enough to call from a setter.
+func _activate_effect_layer() -> void:
+	if _effect_active or not _loaded:
+		return
+	_effect_active = true
+	_effect_viewport.size = _page_size
+	_effect_viewport.transparent_bg = true
+	_effect_viewport.disable_3d = true
+	_effect_viewport.gui_disable_input = true
+	_effect_viewport.handle_input_locally = false
+	_effect_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ONCE
+	_effect_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	_effect_canvas.configure(
+		BRUSH_SHADER, _id_texture, Vector2(_page_size), PaintCanvas.TARGET_MASK
+	)
+	_apply_display_material()
+
+
+## Puts the effect mask back to sleep and forgets everything in it. Page load only:
+## the mask is per PAGE, exactly like the paint layer and the stickers.
+func _reset_effect_layer() -> void:
+	_effect_active = false
+	if is_instance_valid(_effect_canvas):
+		_effect_canvas.discard_pending()
+	if is_instance_valid(_effect_viewport):
+		_effect_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		_effect_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ONCE
+		_effect_viewport.size = DORMANT_EFFECT_SIZE
+	_apply_display_material()
+
+
+## Keeps the PaintSprite's display shader in step with the layer's state.
+##
+## The sprite carries this material even on a page with no animated wax on it,
+## because a material that appeared and disappeared would be a second render path
+## to keep honest. With [code]effect_enabled[/code] false the shader is one texture
+## fetch and one multiply -- what the sprite did with no material at all.
+func _apply_display_material() -> void:
+	if not is_instance_valid(_paint_sprite):
+		return
+	var display := _paint_sprite.material as ShaderMaterial
+	if display == null:
+		display = ShaderMaterial.new()
+		display.shader = PAINT_DISPLAY_SHADER
+		_paint_sprite.material = display
+	display.set_shader_parameter("page_size", Vector2(_page_size))
+	display.set_shader_parameter("effect_enabled", _effect_active)
+	display.set_shader_parameter("effect_animated", effect_animation_enabled)
+	if is_instance_valid(_effect_viewport):
+		display.set_shader_parameter("effect_mask", _effect_viewport.get_texture())
+
+
+## True once this page has animated wax on it (or a restored mask that has).
+func is_effect_layer_active() -> bool:
+	return _effect_active
+
+
+## The effect mask, read back SYNCHRONOUSLY, or null when the layer is dormant.
+## Same rules as [method get_paint_image]: save points and dev harnesses only.
+func get_effect_image() -> Image:
+	if not _loaded or not _effect_active:
+		return null
+	return _effect_viewport.get_texture().get_image()
+
+
+## Non-blocking twin of [method get_effect_image]. Returns false -- without calling
+## back -- when the layer is dormant or the async path is unavailable, which is the
+## caller's cue to fall back to the blocking read (or to skip it: a dormant layer
+## has nothing worth saving).
+func request_effect_image(callback: Callable) -> bool:
+	if not _loaded or not _effect_active:
+		return false
+	return AsyncReadback.request(_effect_viewport, callback)
+
+
+## Composites a saved effect mask back in, waking the layer first. The premultiplied
+## one-frame trick from [method composite_image], for exactly the same reason: over a
+## freshly cleared target it is bit-exact, and the mask's channels are numbers a
+## darkening blend would quietly corrupt.
+func composite_effect_image(image: Image) -> bool:
+	if not _loaded or image == null or not is_inside_tree():
+		return false
+	if image.get_width() != _page_size.x or image.get_height() != _page_size.y:
+		push_warning(
+			"PageView: cannot composite a %dx%d effect mask into a %s page."
+			% [image.get_width(), image.get_height(), _page_size]
+		)
+		return false
+	_activate_effect_layer()
+	return await _composite_into(_effect_viewport, image)
 
 
 # ================================================================ region data ==
@@ -692,18 +867,42 @@ func _stamp(points: PackedVector2Array) -> void:
 	# centres again later from the pointer path would be a second implementation of
 	# continue_stroke() and would drift from it the day either one changes.
 	_recipe_points.append_array(points)
-	_paint_canvas.queue_stamps(
+	_queue_stamps(
 		points, _brush_radius(), brush_color, _locked_id_color, brush_hardness,
 		_effect_params(brush_effect, _effect_seed)
 	)
 
 
+## Hands one batch of dabs to the paint canvas and -- once the effect mask is awake
+## -- to the mask canvas as well (BL-38).
+##
+## [b]Every stamp goes to both, not just the animated ones.[/b] That is the whole
+## erase story: classic wax carries a zero payload, so painting it over a shimmer
+## stroke writes zeros into the mask through the same alpha blend that wrote ones,
+## and the shimmer stops. A mask that only animated finishes wrote to would leave a
+## sheen travelling under paint that has covered it.
+func _queue_stamps(
+	points: PackedVector2Array,
+	radius: float,
+	color: Color,
+	id_color: Vector3,
+	hardness: float,
+	effect: Dictionary
+) -> void:
+	_paint_canvas.queue_stamps(points, radius, color, id_color, hardness, effect)
+	if _effect_active:
+		_effect_canvas.queue_stamps(points, radius, color, id_color, hardness, effect)
+
+
 ## The shader parameters for finish [param effect] at [param seed] (BL-35). One
 ## place, so a live stamp and a replayed one cannot describe the same finish
-## differently.
+## differently. BL-38 added the mask payload (which [method BrushFinish.params_for]
+## supplies) plus the stroke's animation PHASE, derived from the same seed rather
+## than stored beside it.
 static func _effect_params(effect: StringName, seed_value: float) -> Dictionary:
 	var params := BrushFinish.params_for(effect)
 	params["seed"] = seed_value
+	params["phase"] = BrushFinish.phase_for_seed(seed_value)
 	return params
 
 
@@ -754,7 +953,13 @@ func stamp_recipe(recipe: Dictionary) -> bool:
 	var points: PackedVector2Array = recipe.get("points", PackedVector2Array())
 	if points.is_empty():
 		return false
-	_paint_canvas.queue_stamps(
+	var effect: StringName = recipe.get("effect", BrushFinish.CLASSIC)
+	# BL-38: replaying an animated stroke onto a page whose mask went to sleep (a
+	# fresh load, then a redo) has to wake it first, or the wax would come back
+	# without the thing that made it that box.
+	if BrushFinish.is_animated(effect):
+		_activate_effect_layer()
+	_queue_stamps(
 		points,
 		maxf(float(recipe.get("diameter", brush_size)) * 0.5, 0.5),
 		recipe.get("color", brush_color),
@@ -762,9 +967,7 @@ func stamp_recipe(recipe: Dictionary) -> bool:
 		float(recipe.get("hardness", brush_hardness)),
 		# A recipe with no finish (one recorded before BL-35, or by a test that only
 		# cares about geometry) is classic wax at seed 0 -- the shader's default path.
-		_effect_params(
-			recipe.get("effect", BrushFinish.CLASSIC), float(recipe.get("effect_seed", 0.0))
-		)
+		_effect_params(effect, float(recipe.get("effect_seed", 0.0)))
 	)
 	return true
 
@@ -791,6 +994,14 @@ func composite_image(image: Image) -> bool:
 			% [image.get_width(), image.get_height(), _page_size]
 		)
 		return false
+	return await _composite_into(_paint_viewport, image)
+
+
+## The one-frame premultiplied composite, over whichever render target (BL-38 gave
+## it a second caller -- the effect mask -- and the arithmetic must be the same one,
+## because a mask restored through a MIX blend would come back with its channels
+## multiplied by their own alpha a second time).
+func _composite_into(viewport: SubViewport, image: Image) -> bool:
 	# One frame so CLEAR_MODE_ONCE has actually cleared the target before we draw.
 	await get_tree().process_frame
 	await RenderingServer.frame_post_draw
@@ -798,10 +1009,10 @@ func composite_image(image: Image) -> bool:
 		return false
 	var quad := PaintRestoreQuad.new(ImageTexture.create_from_image(image), Vector2(_page_size))
 	quad.name = "PaintRestoreQuad"
-	_paint_viewport.add_child(quad)
+	viewport.add_child(quad)
 	await get_tree().process_frame
 	await RenderingServer.frame_post_draw
-	_paint_viewport.remove_child(quad)
+	viewport.remove_child(quad)
 	quad.queue_free()
 	return true
 
@@ -822,11 +1033,19 @@ func composite_image(image: Image) -> bool:
 ## frame -- one canvas item, one material), which is why the history depth is
 ## bounded. Returns false if the page is not loaded, a stroke is down, or another
 ## rebuild is already running.
-func rebuild_paint(baseline: Image, recipes: Array) -> bool:
+## [param effect_baseline] (BL-38) is the saved EFFECT MASK the visit opened with,
+## the mask layer's exact counterpart to [param baseline]. Passing null on a page
+## that has animated wax on it would rebuild the colours and lose the animation.
+func rebuild_paint(baseline: Image, recipes: Array, effect_baseline: Image = null) -> bool:
 	if not _loaded or _replaying or _stroke_active or not is_inside_tree():
 		return false
 	_replaying = true
 	clear_paint()
+	if effect_baseline != null:
+		# Wake it BEFORE the clear frame below, so its CLEAR_MODE_ONCE is armed on
+		# the same frame the paint layer's is and the composite lands on a target
+		# that is genuinely all-zero.
+		_activate_effect_layer()
 	if baseline != null:
 		await composite_image(baseline)
 	else:
@@ -837,13 +1056,20 @@ func rebuild_paint(baseline: Image, recipes: Array) -> bool:
 	if not is_inside_tree() or not _loaded:
 		_replaying = false
 		return false
+	if effect_baseline != null:
+		await composite_effect_image(effect_baseline)
+		if not is_inside_tree() or not _loaded:
+			_replaying = false
+			return false
 
 	var queued := 0
 	for recipe in recipes:
 		if stamp_recipe(recipe):
 			queued += 1
 	var budget := queued + MAX_REBUILD_SLACK_FRAMES
-	while _paint_canvas.has_pending() and budget > 0 and is_inside_tree():
+	# Both canvases flush one batch per frame, in the same frames, so waiting for
+	# the pair costs no more frames than waiting for the paint layer alone.
+	while has_pending_paint() and budget > 0 and is_inside_tree():
 		budget -= 1
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
@@ -864,6 +1090,12 @@ func clear_paint() -> void:
 		return
 	_paint_canvas.discard_pending()
 	_paint_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ONCE
+	# BL-38: the animation is part of the picture, so wiping the picture wipes it.
+	# The layer stays AWAKE -- the player still has an animated box in hand and the
+	# next stroke would only wake it again.
+	if _effect_active:
+		_effect_canvas.discard_pending()
+		_effect_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ONCE
 
 
 ## Reads the paint layer back to the CPU, SYNCHRONOUSLY. Blocks the main thread
@@ -898,9 +1130,13 @@ func is_async_paint_readback_available() -> bool:
 	return AsyncReadback.is_available()
 
 
-## True while stamps are queued but not yet rendered into the SubViewport.
+## True while stamps are queued but not yet rendered into the SubViewport -- either
+## of them (BL-38): a readback taken while the mask still had a batch pending would
+## save a page whose colours and whose animation disagreed.
 func has_pending_paint() -> bool:
-	return _loaded and _paint_canvas.has_pending()
+	if not _loaded:
+		return false
+	return _paint_canvas.has_pending() or (_effect_active and _effect_canvas.has_pending())
 
 
 # ============================================================== debug overlay ==

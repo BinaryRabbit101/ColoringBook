@@ -338,6 +338,11 @@ var _restoring := false
 ## further, which is exactly the "the restored PNG is baseline, not an undoable
 ## stroke" rule. Dropped on page change and on Start over.
 var _baseline_paint: Image
+## The page's baseline EFFECT MASK (BL-38) -- the animated half of the same
+## sentence. A rebuild that restored the colours and not the mask would take the
+## shimmer off strokes the player never undid, so the two are always passed
+## together and are always the same visit's.
+var _baseline_effect: Image
 ## Everything the player DID during this page visit, oldest first (BL-17, widened
 ## by BL-36). One timeline, two kinds of entry:
 ## [codeblock]
@@ -765,8 +770,15 @@ func _restore_saved_paint(page_index: int) -> void:
 		return
 	var image := GameState.load_page_paint(_book, page_index)
 	if image == null:
+		# BL-38: no paint means no animated paint either -- and a stray mask from a
+		# page whose colours were erased would animate nothing at all, so it is not
+		# worth a compositing frame.
 		paint_restored.emit(page_index, false)
 		return
+	# BL-38's half. Loaded HERE, beside the paint, so the two can never come from
+	# different saves; composited AFTER it, below, for the same reason the paint
+	# restore waits for a cleared target.
+	var effect_image := GameState.load_page_effect(_book, page_index)
 
 	var generation := _page_generation
 	_restoring = true
@@ -791,6 +803,31 @@ func _restore_saved_paint(page_index: int) -> void:
 		return
 
 	await _page_view.composite_image(image)
+
+	if generation != _page_generation or not is_inside_tree() or not is_instance_valid(_page_view):
+		_restoring = false
+		return
+
+	# BL-38: the animation comes back with the picture. A mask that is not this
+	# page's size is dropped rather than stretched (PageView refuses it) -- the
+	# colours are a separate file and are already safely in.
+	if effect_image != null:
+		var page_size_now := _page_view.get_page_size()
+		if (
+			effect_image.get_width() == page_size_now.x
+			and effect_image.get_height() == page_size_now.y
+		):
+			await _page_view.composite_effect_image(effect_image)
+			if generation != _page_generation or not is_inside_tree():
+				_restoring = false
+				return
+			_baseline_effect = effect_image
+		else:
+			push_warning(
+				"ColoringPage: saved effect mask for page %d is %dx%d but the page is %s; the"
+				% [page_index + 1, effect_image.get_width(), effect_image.get_height(), page_size_now]
+				+ " page comes back still."
+			)
 
 	if generation != _page_generation or _coverage == null:
 		_restoring = false
@@ -862,7 +899,10 @@ func _persist_page(page_index: int) -> bool:
 	if _has_nothing_to_persist(page_index):
 		return false
 	var image := _page_view.get_paint_image()
-	return _write_paint(page_index, image)
+	# BL-38: the app is quitting, so both readbacks are the blocking kind. The
+	# second one only exists at all when the page has animated wax on it -- see
+	# _write_paint.
+	return _write_paint(page_index, image, _page_view.get_effect_image())
 
 
 func _persist_page_async(page_index: int) -> bool:
@@ -883,13 +923,32 @@ func _persist_page_async(page_index: int) -> bool:
 	var image := await _read_paint_async()
 	if generation != _page_generation or not is_inside_tree():
 		return false
-	return _write_paint(page_index, image)
+	var effect := await _read_effect_async()
+	if generation != _page_generation or not is_inside_tree():
+		return false
+	return _write_paint(page_index, image, effect)
 
 
-func _write_paint(page_index: int, image: Image) -> bool:
+## Writes the page's layers and records its status.
+##
+## [b]BL-38's save-point arithmetic, written down.[/b] The one-readback rule
+## survives as "one readback PER LAYER, at a save point, never in the paint loop":
+## a page with no animated wax on it costs exactly one, as it always has, because
+## [method PageView.get_effect_image] returns null while the effect layer is dormant
+## and nothing is written. A page that HAS animated wax costs two readbacks and two
+## PNGs, which is the price of the box and is paid only by the pages that wear it.
+##
+## The [param effect] file is DELETED when the layer went dormant (or the mask came
+## back null): a page whose shimmer has been coloured over must not keep animating
+## the next time it is opened, and the mask on disk is the only thing that would.
+func _write_paint(page_index: int, image: Image, effect: Image = null) -> bool:
 	if image == null:
 		return false
 	var saved := GameState.save_page_paint(_book, page_index, image)
+	if effect != null:
+		GameState.save_page_effect(_book, page_index, effect)
+	else:
+		GameState.erase_page_effect(_book, page_index)
 	GameState.mark_page_status(_book, page_index, _status_for_page(page_index))
 	if saved and page_index == GameState.current_page_index:
 		_paint_dirty = false
@@ -1365,7 +1424,9 @@ func _apply_history(undone: bool, entry: Dictionary) -> bool:
 
 	var recipes := _stroke_recipes()
 	if undone:
-		await _page_view.rebuild_paint(_baseline_paint, recipes)
+		# BL-38: the mask baseline travels with the paint baseline. Undo re-draws the
+		# page, and "the page" has included its animation since phase 2.
+		await _page_view.rebuild_paint(_baseline_paint, recipes, _baseline_effect)
 	else:
 		_page_view.stamp_recipe(entry[HISTORY_RECIPE])
 		await _settle_paint()
@@ -1420,6 +1481,7 @@ func _clear_history() -> void:
 	_redo_history.clear()
 	_undo_floor = 0
 	_baseline_paint = null
+	_baseline_effect = null
 	_replaying = false
 
 
@@ -1909,6 +1971,35 @@ func _read_paint_async() -> Image:
 	if delivery.is_empty():
 		push_warning(
 			"ColoringPage: the async paint readback did not arrive within %d frames."
+			% MAX_READBACK_FRAMES
+		)
+		return null
+	return delivery[0]
+
+
+## The EFFECT MASK, read back without blocking (BL-38), or null when this page has
+## no animated wax on it -- which is the common case and costs nothing at all.
+##
+## Deliberately NOT counted in [member _last_readback_usec] and friends: those
+## numbers are the mobile pass's stall budget for the COVERAGE readback, they are
+## asserted right after a coverage cycle, and folding a save-point read into them
+## would make the headline measurement mean something else.
+func _read_effect_async() -> Image:
+	if not _page_view.is_effect_layer_active():
+		return null
+	var delivery: Array[Image] = []
+	var queued := _page_view.request_effect_image(func(image: Image) -> void:
+		delivery.append(image)
+	)
+	if not queued:
+		return _page_view.get_effect_image()
+	var frames := 0
+	while delivery.is_empty() and frames < MAX_READBACK_FRAMES and is_inside_tree():
+		frames += 1
+		await get_tree().process_frame
+	if delivery.is_empty():
+		push_warning(
+			"ColoringPage: the async effect readback did not arrive within %d frames."
 			% MAX_READBACK_FRAMES
 		)
 		return null

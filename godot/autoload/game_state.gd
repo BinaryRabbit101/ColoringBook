@@ -479,6 +479,29 @@ func get_paint_path_for_key(key: String, page_index: int) -> String:
 	return get_paint_root().path_join(book_slug(key)).path_join("page_%02d.png" % (page_index + 1))
 
 
+## Absolute path of one page's saved EFFECT MASK (BL-38), the animated finishes'
+## second PNG. Beside the paint layer, in the same directory, with a
+## [code]_fx[/code] suffix -- so the two travel together, are erased together, and a
+## book whose paint directory is deleted loses both.
+##
+## [b]Why a second file and not a second channel of the first.[/b] The paint PNG is
+## the picture: it is what a coverage restore reads, what WP11 syncs, and what a
+## human would open to see what the child drew. Widening it would mean every reader
+## of it had to know about animation. A page with no animated wax on it simply has
+## no such file, which is also what makes "the four bakeable boxes cost exactly what
+## they cost before" true on disk as well as in memory.
+func get_effect_path(book: BookDef, page_index: int) -> String:
+	return get_effect_path_for_key(book_key(book), page_index)
+
+
+func get_effect_path_for_key(key: String, page_index: int) -> String:
+	if key == "":
+		return ""
+	return (
+		get_paint_root().path_join(book_slug(key)).path_join("page_%02d_fx.png" % (page_index + 1))
+	)
+
+
 # ------------------------------------------------------------- page entries --
 # One slot of a book's `pages` array. Kept behind these four helpers so the shape
 # is written down in exactly one place -- and so the pre-BL-10 form (a bare status
@@ -740,6 +763,8 @@ func erase_page_progress(book: BookDef, page_index: int) -> bool:
 	var path := get_paint_path(book, page_index)
 	if path != "" and FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
+	# BL-38: blank paper does not shimmer either.
+	erase_page_effect(book, page_index)
 	var entry := _entry_for(book, true)
 	var page := _page_slot(entry["pages"], page_index)
 	page[PAGE_STATUS_KEY] = STATUS_UNTOUCHED
@@ -853,6 +878,62 @@ func load_page_paint(book: BookDef, page_index: int) -> Image:
 func has_page_paint(book: BookDef, page_index: int) -> bool:
 	var path := get_paint_path(book, page_index)
 	return path != "" and FileAccess.file_exists(path)
+
+
+# ------------------------------------------------------- effect masks (BL-38) --
+# The animated finishes' half of the picture. Same shape as the paint layer above,
+# same save POINTS, same "an expensive readback, so only a save point may call it"
+# rule -- and one extra rule of its own: [b]a page with no animated wax on it never
+# writes one, and deletes the one it had.[/b] Otherwise a child who shimmered a
+# page and then coloured over it would keep paying for a megabyte of zeros for ever.
+
+## Writes one page's effect mask as a PNG. [param image] comes from
+## [method PageView.get_effect_image] / [method PageView.request_effect_image].
+func save_page_effect(book: BookDef, page_index: int, image: Image) -> bool:
+	if book == null or image == null or page_index < 0:
+		return false
+	var path := get_effect_path(book, page_index)
+	if path == "":
+		return false
+	_ensure_dir(path.get_base_dir())
+	var error := image.save_png(path)
+	if error != OK:
+		push_error("GameState: could not write effect mask '%s' (error %d)." % [path, error])
+		return false
+	return true
+
+
+## The saved effect mask for a page, or null when there is none. A page whose mask
+## will not load starts with its animation off and its colours intact -- the paint
+## PNG is a separate file and is unaffected, which is the other half of why they are
+## two files.
+func load_page_effect(book: BookDef, page_index: int) -> Image:
+	if book == null or page_index < 0:
+		return null
+	var path := get_effect_path(book, page_index)
+	if path == "" or not FileAccess.file_exists(path):
+		return null
+	var image := Image.load_from_file(path)
+	if image == null:
+		push_warning("GameState: effect mask '%s' did not load; the page comes back still." % path)
+		return null
+	if image.get_format() != Image.FORMAT_RGBA8:
+		image.convert(Image.FORMAT_RGBA8)
+	return image
+
+
+func has_page_effect(book: BookDef, page_index: int) -> bool:
+	var path := get_effect_path(book, page_index)
+	return path != "" and FileAccess.file_exists(path)
+
+
+## Deletes one page's effect mask. Called when a page is saved with a dormant
+## effect layer (the animation is genuinely gone), and by every erase path.
+func erase_page_effect(book: BookDef, page_index: int) -> bool:
+	var path := get_effect_path(book, page_index)
+	if path == "" or not FileAccess.file_exists(path):
+		return false
+	return DirAccess.remove_absolute(path) == OK
 
 
 # ------------------------------------------------------------- save / load ----
@@ -1176,6 +1257,9 @@ func _forget_pages_beyond(key: String, page_count: int, old_size: int) -> void:
 		var path := get_paint_path_for_key(key, index)
 		if path != "" and FileAccess.file_exists(path):
 			DirAccess.remove_absolute(path)
+		var effect_path := get_effect_path_for_key(key, index)
+		if effect_path != "" and FileAccess.file_exists(effect_path):
+			DirAccess.remove_absolute(effect_path)
 	print_verbose("GameState: trimmed %d stale page entr(ies) from '%s'."
 		% [old_size - page_count, key])
 

@@ -16,6 +16,11 @@ render_mode blend_mix, unshaded;
 // clipped fragment by fragment exactly like the core of the dab. A finish can
 // never leak across a line.
 //
+// BL-38 gave the same shader a SECOND JOB: with `effect_target == TARGET_MASK` it
+// draws the identical dab into the effect-mask SubViewport, writing the finish's
+// animation payload instead of wax. One shader, so the mask cannot cover a pixel
+// the wax does not, and the region discard below owns both passes.
+//
 // FINISHES ARE BAKED HERE (BL-35 phase 1). The paint layer is flattened into the
 // SubViewport and saved as a PNG, so an effect computed at stamp time persists for
 // free -- no effect channel, no per-stroke metadata for the restore path to keep.
@@ -56,8 +61,32 @@ const int MODE_CLASSIC = 0;
 const int MODE_GLOW = 1;
 const int MODE_GRAIN = 2;
 const int MODE_GLITTER = 3;
+// BL-38's animated finishes. Their BASE is baked here exactly like the four above --
+// so a frozen page still reads as satin wax / glitter, and so the coverage tracker
+// sees the same paint layer it has always seen. What keeps moving lives in the
+// effect mask, which this same shader writes on a second pass (see TARGET_MASK).
+const int MODE_SHIMMER = 4;
+const int MODE_TWINKLE = 5;
 
 uniform int effect_mode = 0;
+
+// ---------------------------------------------------- the effect mask (BL-38)
+// Which LAYER this batch is drawing into. The two passes are the same dab, the
+// same soft edge and above all the SAME region discard -- only the colour written
+// at the very end differs. That is the whole reason the animated sheen can never
+// cross a region boundary: it is not composited over the page, it is stamped into
+// a mask that was clipped by the ID map fragment for fragment.
+const int TARGET_WAX = 0;
+const int TARGET_MASK = 1;
+uniform int effect_target = 0;
+
+// The mask payload for this batch (BrushFinish.mask_payload): red = travelling
+// sheen, green = winking specks, blue = the stroke's own phase. Every finish writes
+// one, and a bakeable finish's is zero -- which is how ordinary wax painted on top
+// of a shimmer takes the shimmer off again, through the ordinary alpha blend.
+uniform float effect_sheen = 0.0;
+uniform float effect_spark = 0.0;
+uniform float effect_phase = 0.0;
 // How much bigger than the DAB the quad was drawn (BrushFinish.quad_scale). 1.0
 // for every finish that stays inside the brush; the glow spills, so its quad is
 // wider and this scales the radial distance back into dab-radius units. A dab
@@ -108,6 +137,15 @@ float wax_grain(vec2 dir) {
 	float streak = value_noise(g) * 0.66 + value_noise(g * 2.7) * 0.34;
 	float tooth = value_noise(page_position * 0.85);
 	return clamp(streak * 0.76 + tooth * 0.24, 0.0, 1.0);
+}
+
+// The SATIN tooth (BL-38's shimmer base): the same idea as wax_grain, stretched
+// longer and much lower in contrast, so the wax reads as polished rather than
+// scratchy and the travelling sheen has something to slide over.
+float silk_grain(vec2 dir) {
+	vec2 across = vec2(-dir.y, dir.x);
+	vec2 g = vec2(dot(page_position, dir) * 0.019, dot(page_position, across) * 0.21);
+	return clamp(value_noise(g) * 0.72 + value_noise(g * 3.3) * 0.28, 0.0, 1.0);
 }
 
 void vertex() {
@@ -190,6 +228,52 @@ void fragment() {
 		speck *= smoothstep(1.0, 0.72, d);
 		wax = mix(wax, vec3(1.0), speck * 0.92);
 		alpha = max(falloff, speck);
+	} else if (effect_mode == MODE_SHIMMER) {
+		if (d > 1.0) {
+			discard;
+		}
+		// Satin wax: a long, low-contrast tooth and a lift towards white, so the
+		// BAKED half already reads as something polished. The sheen that travels
+		// over it is not here -- it cannot be, it would be flattened the moment it
+		// was stamped. It is in the mask, and paint_display.gdshader moves it.
+		float silk = silk_grain(dir);
+		wax = mix(wax * 0.94, clamp(wax * 1.20 + vec3(0.07), vec3(0.0), vec3(1.0)), silk);
+		alpha = falloff;
+	} else if (effect_mode == MODE_TWINKLE) {
+		if (d > 1.0) {
+			discard;
+		}
+		// The loudest box: glitter that will actually sparkle. The specks are baked
+		// so the wax is glittery with the animation frozen (and so a page saved on a
+		// device without the display shader still looks like glitter); the WINK is
+		// the mask's green channel, driven by TIME in the display shader.
+		float twinkle_tooth = wax_grain(dir);
+		wax = mix(wax * 0.80, clamp(wax * 1.14, vec3(0.0), vec3(1.0)), twinkle_tooth);
+		const float TWINKLE_CELL = 17.0;
+		vec2 twinkle_cell = floor(page_position / TWINKLE_CELL);
+		vec2 twinkle_jitter = vec2(hash21(twinkle_cell + 2.3), hash21(twinkle_cell + 4.7));
+		float fleck = 0.0;
+		if (hash21(twinkle_cell + effect_seed) > 0.40) {
+			float fleck_radius = mix(1.8, 4.4, hash21(twinkle_cell + 6.1));
+			fleck = clamp(
+				1.0 - length(page_position - (twinkle_cell + twinkle_jitter) * TWINKLE_CELL)
+					/ fleck_radius,
+				0.0, 1.0
+			);
+			fleck = pow(fleck, 0.5) * effect_strength;
+		}
+		fleck *= smoothstep(1.0, 0.70, d);
+		wax = mix(wax, vec3(1.0), fleck * 0.95);
+		alpha = max(falloff, fleck);
+	}
+
+	// --- the effect mask (BL-38) -------------------------------------------
+	// Same dab, same discard, same alpha; only the colour changes. Writing the
+	// payload HERE rather than in a shader of its own is what guarantees the mask
+	// and the wax cover exactly the same pixels -- a mask that was a fraction of a
+	// pixel wider would let a sheen sit on a boundary it must never touch.
+	if (effect_target == TARGET_MASK) {
+		wax = vec3(effect_sheen, effect_spark, effect_phase);
 	}
 
 	if (alpha <= 0.0) {

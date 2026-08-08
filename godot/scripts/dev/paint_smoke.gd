@@ -82,6 +82,7 @@ func _run() -> void:
 	await _check_painting_disabled()
 	await _check_stroke_replay()
 	await _check_brush_finishes()
+	await _check_animated_finishes()
 
 	print("=== %d/%d checks passed ===" % [_checks - _failures, _checks])
 	if "--stay" in OS.get_cmdline_user_args():
@@ -417,6 +418,18 @@ func _check_brush_finishes() -> void:
 	var grain := await _stamp_finish(BrushFinish.GRAIN, FINISH_DAB)
 	var glitter := await _stamp_finish(BrushFinish.GLITTER, FINISH_DAB)
 
+	# A digest of each bakeable finish's dab, printed rather than asserted: rendered
+	# bytes are GPU-specific, so these are a regression tool for one machine, not a
+	# contract for every machine. Measured on the BL-38 dev box (RTX 5060, Vulkan
+	# Forward Mobile) immediately BEFORE and AFTER BL-38 added two shader modes and
+	# the effect-mask target, and identical across the two -- which is the evidence
+	# that phase 2 changed no pixel of phase 1:
+	#   classic=2161738159 glow=3362623779 grain=1121124693 glitter=3754632733
+	print("[golden] classic=%d glow=%d grain=%d glitter=%d" % [
+		hash(classic.get_data()), hash(glow.get_data()),
+		hash(grain.get_data()), hash(glitter.get_data()),
+	])
+
 	var classic_px := _painted_pixels(classic)
 	var glow_px := _painted_pixels(glow)
 	_expect(glow_px > classic_px * 2,
@@ -481,6 +494,214 @@ func _check_brush_finishes() -> void:
 
 	_page_view.brush_effect = BrushFinish.CLASSIC
 	await _clear()
+
+
+## BL-38: the ANIMATED finishes, and the effect-mask channel they live in.
+##
+## Five things have to be true at once, and they are the five constraints the entry
+## refused to move on. (1) The mask sleeps until it is needed and never marks a pixel
+## the wax does not cover. (2) It is clipped by the region exactly like the wax, so a
+## travelling sheen can never cross a line. (3) The PAINT layer -- the thing coverage
+## and completion read -- does not move, with the animation running or frozen, so
+## coverage cannot see the animation even in principle. (4) The composited SCREEN
+## does move, or none of this is a feature. (5) Undo, redo and a restore round-trip
+## BOTH layers byte for byte, or a page reopened is not the page that was left.
+func _check_animated_finishes() -> void:
+	print("\n-- check 11: animated finishes & the effect mask (BL-38) --")
+	# A fresh page, because check 10 walked the whole ladder and woke the layer.
+	_expect(_page_view.load_page(BASE_IMAGE, ID_MAP, REGIONS_JSON),
+		"reloaded the page, so the effect layer starts where a real page load leaves it")
+	await _settle()
+	_page_view.brush_size = BRUSH_DIAMETER
+	_page_view.brush_color = FINISH_COLOR
+	_page_view.brush_effect = BrushFinish.CLASSIC
+
+	# --- (1) dormant until an animated box is actually in hand ------------------
+	_expect(not _page_view.is_effect_layer_active(),
+		"a freshly loaded page has NO effect layer -- the four bakeable boxes pay nothing")
+	_expect(_page_view.get_effect_image() == null,
+		"...and a dormant layer has no image, so a save point costs one readback, as always")
+	_page_view.begin_stroke(FINISH_DAB)
+	_page_view.end_stroke()
+	await _settle()
+	_expect(not _page_view.is_effect_layer_active(),
+		"painting classic wax does not wake it either")
+
+	_page_view.brush_effect = BrushFinish.SHIMMER
+	_expect(_page_view.is_effect_layer_active(),
+		"picking an ANIMATED box wakes it -- at the pick, frames before the first press")
+	await _clear()
+
+	# --- (2) the region clip owns the mask, not just the wax --------------------
+	var line_x := _find_line_pixel().x
+	var boundary_stroke_end := Vector2(line_x - 8.0, 250.5)
+	_page_view.begin_stroke(Vector2(line_x - 150.0, 250.5))
+	_page_view.continue_stroke(boundary_stroke_end)
+	_page_view.end_stroke()
+	var shimmer_paint := await _read_paint()
+	var shimmer_mask := await _read_effect()
+	_expect(shimmer_mask != null, "an animated stroke leaves an effect mask to read back")
+	if shimmer_mask == null:
+		return
+	var mask_counts := _count_painted_by_region(shimmer_mask)
+	var mask_leaks := _describe_leaks(mask_counts, 4)
+	_expect(int(mask_counts.get(4, 0)) > 0 and mask_leaks == "",
+		"the mask is marked in the locked region (%d px) and NOWHERE across the line%s"
+		% [int(mask_counts.get(4, 0)), "" if mask_leaks == "" else " -- " + mask_leaks])
+	_expect(_mask_within_paint(shimmer_mask, shimmer_paint) == 0,
+		"the mask never marks a pixel the wax does not cover (%d stray texels)"
+		% _mask_within_paint(shimmer_mask, shimmer_paint))
+	_expect(_max_channel(shimmer_mask, 0) > 200,
+		"...and Shimmer wrote its SHEEN into the mask's red channel (peak %d)"
+		% _max_channel(shimmer_mask, 0))
+	_expect(_max_channel(shimmer_mask, 1) == 0,
+		"...and nothing into green, which is the other finish's channel (peak %d)"
+		% _max_channel(shimmer_mask, 1))
+
+	# --- (3) the paint layer is STILL, however long the animation runs ----------
+	var still_a := shimmer_paint.get_data()
+	for i in 24:
+		await get_tree().process_frame
+	var still_b := (await _read_paint()).get_data()
+	_expect(still_a == still_b,
+		"24 frames of animation later the PAINT layer is byte-identical -- coverage"
+		+ " reads this image and cannot see the animation")
+	_page_view.effect_animation_enabled = false
+	for i in 8:
+		await get_tree().process_frame
+	var frozen := (await _read_paint()).get_data()
+	_expect(frozen == still_a,
+		"...and freezing the animation does not change it either, so coverage is the"
+		+ " same number with the animation on and off")
+
+	# --- (4) but the SCREEN does move -------------------------------------------
+	_page_view.brush_effect = BrushFinish.TWINKLE
+	_page_view.begin_stroke(Vector2(700.5, 250.5))
+	for x in range(720, 880, 20):
+		_page_view.continue_stroke(Vector2(x + 0.5, 250.5))
+	_page_view.end_stroke()
+	await _settle()
+	var frozen_first := await _screen_bytes()
+	var frozen_second := await _screen_bytes()
+	_expect(frozen_first == frozen_second,
+		"with effect_animation_enabled off the composited page is a still image")
+	_page_view.effect_animation_enabled = true
+	var live_first := await _screen_bytes()
+	var live_second := await _screen_bytes()
+	_expect(live_first != live_second,
+		"with it on the page is ALIVE -- the same pixels differ from frame to frame")
+
+	# --- (5) undo, redo and a restore carry BOTH layers -------------------------
+	await _clear()
+	_page_view.brush_effect = BrushFinish.SHIMMER
+	_page_view.begin_stroke(Vector2(700.5, 250.5))
+	for x in range(720, 860, 20):
+		_page_view.continue_stroke(Vector2(x + 0.5, 250.5))
+	_page_view.end_stroke()
+	var recipe_a := _page_view.take_last_stroke_recipe()
+	_expect(StringName(recipe_a.get("effect", &"")) == BrushFinish.SHIMMER,
+		"the recipe names the animated finish, like any other ('%s')" % recipe_a.get("effect"))
+	var paint_a := (await _read_paint()).get_data()
+	var mask_a := (await _read_effect()).get_data()
+
+	_page_view.brush_effect = BrushFinish.TWINKLE
+	_page_view.begin_stroke(Vector2(264.5, 264.5))
+	_page_view.continue_stroke(Vector2(264.5, 210.5))
+	_page_view.end_stroke()
+	var recipe_b := _page_view.take_last_stroke_recipe()
+	var paint_b := (await _read_paint()).get_data()
+	var mask_b := (await _read_effect()).get_data()
+	_expect(mask_a != mask_b, "precondition: the twinkle stroke really changed the mask")
+
+	_page_view.brush_effect = BrushFinish.CLASSIC
+	await _page_view.rebuild_paint(null, [recipe_a])
+	_expect((await _read_paint()).get_data() == paint_a
+			and (await _read_effect()).get_data() == mask_a,
+		"undoing an animated stroke rebuilds the wax AND the mask byte for byte")
+	_page_view.stamp_recipe(recipe_b)
+	_expect((await _read_paint()).get_data() == paint_b
+			and (await _read_effect()).get_data() == mask_b,
+		"...and redoing it re-stamps both -- undo/redo is pixel-stable with animation on")
+
+	# --- ordinary wax over animated wax takes the animation off -----------------
+	_page_view.brush_effect = BrushFinish.CLASSIC
+	_page_view.begin_stroke(Vector2(700.5, 250.5))
+	for x in range(720, 860, 20):
+		_page_view.continue_stroke(Vector2(x + 0.5, 250.5))
+	_page_view.end_stroke()
+	var over := await _read_effect()
+	_expect(over.get_pixel(780, 250).r8 < 24,
+		"classic wax painted over a shimmer ERASES it (mask red %d, was %d)"
+		% [over.get_pixel(780, 250).r8, 255])
+
+	# --- the mask survives the save it will actually be given -------------------
+	var to_save := await _read_effect()
+	var png := to_save.save_png_to_buffer()
+	var reloaded := Image.new()
+	_expect(reloaded.load_png_from_buffer(png) == OK,
+		"the effect mask encodes as a PNG, the same file the paint layer is (%d bytes)"
+		% png.size())
+	reloaded.convert(Image.FORMAT_RGBA8)
+	_expect(reloaded.get_data() == to_save.get_data(),
+		"...and comes back off disk byte for byte")
+	var paint_before_restore := (await _read_paint()).duplicate()
+	await _page_view.rebuild_paint(paint_before_restore, [], reloaded)
+	_expect((await _read_effect()).get_data() == to_save.get_data(),
+		"a page reopened comes back with the animation it was left with -- the"
+		+ " restore composite is bit-exact for the mask too")
+
+	# --- and the baked halves look like what they claim -------------------------
+	var shimmer_dab := await _stamp_finish(BrushFinish.SHIMMER, FINISH_DAB)
+	var twinkle_dab := await _stamp_finish(BrushFinish.TWINKLE, FINISH_DAB)
+	_expect(_core_spread(shimmer_dab) > 0.01,
+		"Shimmer BAKES a satin tooth, so a frozen page is not flat wax (spread %.4f)"
+		% _core_spread(shimmer_dab))
+	_expect(_brightest_core(twinkle_dab) > FINISH_COLOR.get_luminance() + 0.25,
+		"Twinkle BAKES its specks, so the glitter is there before the wink is (%.3f vs %.3f)"
+		% [_brightest_core(twinkle_dab), FINISH_COLOR.get_luminance()])
+
+	_page_view.brush_effect = BrushFinish.CLASSIC
+	await _clear()
+
+
+## The paint layer's effect mask, settled and in RGBA8. Null while dormant.
+func _read_effect() -> Image:
+	await _settle()
+	var image := _page_view.get_effect_image()
+	if image == null:
+		return null
+	if image.get_format() != Image.FORMAT_RGBA8:
+		image.convert(Image.FORMAT_RGBA8)
+	return image
+
+
+## The whole composited window, one frame at a time. Two calls are two different
+## frames, which is what makes "the page is alive" testable without a clock.
+func _screen_bytes() -> PackedByteArray:
+	await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	return get_viewport().get_texture().get_image().get_data()
+
+
+## Texels marked in [param mask] that have no wax under them in [param paint].
+## Must be zero: the mask is stamped by the same shader through the same discard.
+func _mask_within_paint(mask: Image, paint: Image) -> int:
+	var mask_bytes := mask.get_data()
+	var paint_bytes := paint.get_data()
+	var stray := 0
+	for i in _page_width * _page_height:
+		if mask_bytes[i * 4 + 3] > 0 and paint_bytes[i * 4 + 3] == 0:
+			stray += 1
+	return stray
+
+
+## Peak value of one channel over the whole mask (0 = r, 1 = g, 2 = b).
+func _max_channel(image: Image, channel: int) -> int:
+	var bytes := image.get_data()
+	var peak := 0
+	for i in _page_width * _page_height:
+		peak = maxi(peak, bytes[i * 4 + channel])
+	return peak
 
 
 ## One dab of [param finish] at [param at], as its own layer. Returns the paint
