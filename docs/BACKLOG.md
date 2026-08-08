@@ -26,6 +26,141 @@ deploy to the mini-pc.
 - Affected: `server/` (Laravel app in this repo), `docs/DLC_SERVER.md`,
   `docs/SERVER_BUILD_PLAN.md`
 
+## Completed — awaiting archive
+
+### BL-47: Four more animated crayon boxes, on a style-level mask decode — `done`
+Logged 2026-08-08. BL-38 shipped two animated boxes and, without meaning to, a
+ceiling: the effect mask hard-coded exactly two animation families, one per
+colour channel, and a fifth idea had nowhere to live. Done 2026-08-08 —
+**Embers**, **Ocean glass**, **Aurora** and **Firefly dust**, and the one
+architectural change that made room for them.
+
+- **THE EXTENSION: the mask's red and green are STYLE LEVELS, not amounts.** Red
+  now names a member of the FIELD family (a page-space light washing over the
+  wax), green a member of the SPECK family (points of light on a page-space cell
+  grid). Red: `0.15` embers, `0.35` soft white sheen, `0.55` ocean caustics,
+  `0.80` aurora, `1.00` full white sheen. Green: `0.5` firefly drift, `1.0` wink
+  in place. Blue is still the per-stroke phase. Two channels, six boxes.
+- **Why the level survives the blend, exactly — and it is exact, not close.** The
+  mask is stamped with ordinary alpha blending, so a texel holds
+  `payload * coverage` in rgb and `coverage` in alpha; `paint_display.gdshader`
+  reads mask.a for nothing else, and that spare channel is the whole trick.
+  First stamp on a transparent target is `payload * a` over `a`; a second stamp
+  of the same payload is `payload * (a + a'(1-a))` over `(a + a'(1-a))`. The
+  ratio is the authored level at any coverage, however many of the ~8
+  overlapping dabs are down — which matters most at the feathered dab edge,
+  where the raw channel is nearly nothing and the ratio is all there is. The
+  decode rounds it to the NEAREST level.
+  - **The one place it can misfire is fringe, and fringe is free.** Where strokes
+    of two different styles overlap-blend, the normalised value lands between two
+    levels and nearest-level picks one of them. Those texels are where one soft
+    edge lies over another; they carry a coverage-weighted amount of nearly zero,
+    and a wrong animation at zero brightness is not a wrong pixel.
+  - **Proved with pixels, not with algebra.** `paint_smoke` check 11b stamps a
+    real stroke of each new family, runs it up to a real region boundary, reads
+    the mask back off the GPU and asserts that *every* covered texel decodes to
+    the authored level — 9381 of them per finish, zero wrong. It also prints the
+    raw bytes, so a render target that ever started converting colour spaces
+    would announce itself there rather than as a mystery.
+- **The two levels BL-38 shipped did not move.** `1.00` and `0.35` in red, `1.00`
+  in green are the numbers already sitting in every `page_NN_fx.png` on a
+  player's disk. A saved page decodes to the look it was saved with, and the
+  smoke asserts those three levels stay in the tables so a future round cannot
+  quietly repaint saved work.
+- **The boxes**, each with a baked base in `brush.gdshader` (so the frozen page
+  and the saved PNG read right) and an animation style in the display shader:
+  - **Embers** `&"embers"`, sheen level 0.15. Base: a cooled CRUST — the grain
+    box's tooth with much deeper grooves (0.55× the crayon's colour against
+    grain's 0.70×) and a faint warm lift on the ridges. Animation: a coarse
+    page-space noise field read at a slowly ORBITING offset on a 7 s cycle,
+    tinted `vec3(1.0, 0.55, 0.25)` — patches breathe, like coals being blown on.
+    The orbit is deliberate: a linear drift walks off into fresh noise forever
+    and reads as texture sliding past, not as breathing. **The subtlest box in the
+    game** — measured at a peak frame-to-frame delta of 25/255 against shimmer's
+    88 and twinkle's 150.
+  - **Ocean glass** `&"ocean"`, 0.55. Base: `silk_grain` at low contrast with a
+    cool lift toward white — wet glass. Animation: two noise fields at different
+    scales drifting different ways, MULTIPLIED and then sharpened with a `pow`.
+    The product is what makes it move like water instead of like two clouds.
+  - **Aurora** `&"aurora"`, 0.80. Base: shimmer's satin, one notch gentler, on
+    purpose — the curtain is meant to be the difference, so a frozen aurora page
+    should read as quiet polished wax waiting for it. Animation: shimmer's
+    travelling band ~3.5× wider and ~3.4× slower, and it HUE-SHIFTS the wax
+    (`hue_shift()` ported from `brush.gdshader`) instead of washing it white,
+    with only a whisper of added brightness. GLOBAL in page space like shimmer's
+    band, for shimmer's reason: two aurora strokes that touch show ONE curtain.
+    - **Gotcha, and it shipped wrong once.** The swing was damped by the
+      curtain's Gaussian envelope *and* mixed by the same envelope — squaring it
+      — which turned an intended ~20° rotation into a measured ~5°. The envelope
+      is the mix WEIGHT; the angle is `sin(1.6u) * swing` and nothing else. Peak
+      effective rotation is `sin(1.6u)·exp(-u²/2)` = 0.71 at u ≈ 0.72, times the
+      swing times the level: ~0.35 rad, measured on screen as a 223°→238° hue
+      sweep as the curtain passes.
+  - **Firefly dust** `&"firefly"`, spark level 0.5. Base: twinkle's flecked wax
+    turned right down — softer tooth, 26 px grid against twinkle's 17, 38% of
+    cells carrying a mote, smaller motes, a much weaker lift toward white. A
+    frozen firefly page has to read as faint dust; if it read as glitter the box
+    would be twinkle with a different animation instead of its own quieter idea.
+    Animation: the speck WANDERS — per cell a drift rate and a phase (the cell's
+    own plus the stroke's, out of mask.b), sin/cos wander, and each speck swells
+    and fades as it goes. **Twinkle puts its wink exactly on its baked fleck; a
+    wanderer must not** — it starts near the baked mote and drifts off it, so its
+    home is the same hash pulled into the middle half of the cell, which is also
+    what keeps it inside the cell that draws it. Only fragments inside a cell draw
+    that cell's speck, so a speck that strayed over the edge would be sliced in
+    half by the boundary it crossed.
+- **The ladder is loudness order, and the new boxes went INSIDE the animated tail
+  rather than on the end**: classic → Neon glow → Textured wax → Glitter →
+  **Embers → Ocean glass → Aurora** → Shimmer → **Firefly dust** → Twinkle. Ten
+  boxes; `sort_order` 32/34/36 and 45 slot between the existing 30/40/50 with no
+  renumbering. Twinkle is still the last word. The palette smoke's BL-38
+  assertion — "the ladder ENDS with exactly two animated boxes" — became six, and
+  its SHAPE did not move: the animated boxes are a contiguous tail, however many
+  there are, which is the point of having written it that way.
+- **What did NOT change, and this is the measure of the extension.** No GDScript
+  outside `brush_finish.gd` and the two smokes; `PageView`, `PaintCanvas`,
+  `ColoringPage`, the palette contract, the save format and the region clip are
+  untouched, because the sheen/spark uniforms already carried arbitrary payloads
+  and both passes already went through the same stamp shader. The four bakeable
+  finishes are byte-identical: `classic=2161738159 glow=3362623779
+  grain=1121124693 glitter=3754632733`, the same digests BL-38 recorded on the
+  same dev box. Every BL-38 rule keeps its teeth — frozen (`t = 0`) is a valid
+  still frame, every light contribution is multiplied by the wax's own alpha
+  (including the aurora's rotation, or a transparent texel would get a curtain on
+  it), nothing per-frame on the CPU, and `effect_enabled = false` is still one
+  fetch and one multiply.
+- **Crayon previews** cost four `match` arms and no new drawing code, from the
+  same primitives in the same canonical space, so the landscape dock's quarter
+  turn is free (BL-21's rule). Each shows the finish's SHAPE, never its motion —
+  BL-16's lesson that a strip full of moving things reads as noise.
+- **Smokes: paint 97 → 120, palette 241 → 247**; flow 258, shell 158, mobile 141
+  and dlc 131 unchanged and green. Paint gained check 11b (above) plus, per new
+  finish, the authored level landing in the mask to the byte, the region clip
+  holding, the baked base being a STILL image with the animation frozen, and
+  classic wax rubbing the level off through the ordinary blend. Palette gained
+  the six-box animated tail in loudness order, each new id being KNOWN rather
+  than merely resolvable (`resolve()` turning a typo into classic wax would let a
+  misspelled `.tres` ship as silent wax and pass every other check), each payload
+  being a member of a level table, and the decode round-tripping it.
+  - **The counts recorded in the skill were stale before this round** — measured
+    on this tree at HEAD, palette was 241 (recorded 237), flow 258 (234), shell
+    158 (151) and dlc 131 (116). Corrected in the skill along with this entry.
+- **Gotcha: `PackedFloat32Array` cannot hold a level table you intend to compare
+  for equality.** `0.35` goes in and `0.3499999940395355` comes out, so `.has()`
+  finds nothing and `is_equal_approx` against a `Vector2` component fails the
+  same way. The tables are `Array[float]` and the smoke's authored pairs are
+  plain float arrays, for that reason and no other.
+- **Gotcha (harness): six windowed smokes run back to back steal each other's
+  focus**, and the two palette checks that synthesise real touch events at real
+  screen coordinates went red once because of it. Green three runs in a row on
+  its own. When a windowed smoke fails an INPUT check in a batch, re-run it alone
+  before believing it.
+- Affected: `scripts/components/brush_finish.gd`,
+  `scenes/components/brush.gdshader`, `scenes/components/paint_display.gdshader`,
+  `scripts/components/crayon_button.gd`,
+  `resources/palettes/sets/{embers,ocean_glass,aurora,firefly_dust}.tres` (new),
+  paint + palette smokes, coloring-mechanics skill.
+
 ## Completed — archived
 
 Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md):

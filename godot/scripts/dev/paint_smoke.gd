@@ -667,8 +667,119 @@ func _check_animated_finishes() -> void:
 		"Twinkle BAKES its specks, so the glitter is there before the wink is (%.3f vs %.3f)"
 		% [_brightest_core(twinkle_dab), FINISH_COLOR.get_luminance()])
 
+	await _check_mask_style_levels(line_x)
+
 	_page_view.brush_effect = BrushFinish.CLASSIC
 	await _clear()
+
+
+## BL-47: the mask's red and green are STYLE LEVELS now, and the whole extension
+## rests on one claim -- that the level a stamp wrote can be read back out of the
+## blended texel exactly, by dividing out the mask's own alpha. That claim is an
+## argument about how alpha blending composes; this is the measurement.
+##
+## It is deliberately made against a REAL mask off the GPU rather than against
+## arithmetic: a stroke of eight-deep overlapping dabs, run right up to a region
+## boundary so the sample includes both the feathered dab edge (where the raw channel
+## is nearly nothing and the ratio has to carry it) and the hard edge the discard
+## cut. If the recovery were merely approximate, embers would animate as a shimmer
+## somewhere along that line and nothing else in the suite would notice.
+func _check_mask_style_levels(line_x: float) -> void:
+	print("\n-- check 11b: mask style levels decode off a real mask (BL-47) --")
+	# One field style and the speck style, which are the two families the decode
+	# splits. Aurora is picked for the field because 0.80 is the level with the
+	# tightest neighbour (1.00 shimmer, a midpoint of 0.90 away) -- if any level
+	# survives eight blended dabs, the awkward one is the one worth proving.
+	for finish in [BrushFinish.EMBERS, BrushFinish.AURORA, BrushFinish.FIREFLY]:
+		await _clear()
+		_page_view.brush_effect = finish
+		_page_view.begin_stroke(Vector2(line_x - 150.0, 250.5))
+		_page_view.continue_stroke(Vector2(line_x - 8.0, 250.5))
+		_page_view.end_stroke()
+		var mask := await _read_effect()
+		if mask == null:
+			_expect(false, "'%s' left an effect mask to read back" % finish)
+			continue
+		var authored := BrushFinish.mask_payload(finish)
+		# The raw bytes first: the stamp really did write the authored level, not
+		# some gamma-curved cousin of it. Printed as well as asserted, because a
+		# render target that ever started converting colour spaces would show up here
+		# first and would be very hard to read from a bare PASS/FAIL.
+		var peak_r := _max_channel(mask, 0)
+		var peak_g := _max_channel(mask, 1)
+		print("[levels] %s wrote r=%d g=%d (authored %.2f / %.2f -> %d / %d)" % [
+			finish, peak_r, peak_g, authored.r, authored.g,
+			roundi(authored.r * 255.0), roundi(authored.g * 255.0),
+		])
+		_expect(absi(peak_r - roundi(authored.r * 255.0)) <= 1
+				and absi(peak_g - roundi(authored.g * 255.0)) <= 1,
+			"'%s' stamps its authored LEVEL into the mask, to the byte (r %d, g %d)"
+			% [finish, peak_r, peak_g])
+		var leaks := _describe_leaks(_count_painted_by_region(mask), 4)
+		_expect(leaks == "",
+			"...clipped by the region like every other stamp%s"
+			% ["" if leaks == "" else " -- " + leaks])
+		# The decode, over every texel the wax actually covers. Fringe texels below
+		# 8/255 of coverage are skipped on purpose: they are where two levels could
+		# in principle round to the wrong neighbour, and they carry a coverage-
+		# weighted amount of nearly nothing, which is the trade BL-47 took knowingly.
+		var decoded := _decode_mask_levels(mask, authored, 8)
+		_expect(int(decoded["checked"]) > 500 and int(decoded["wrong"]) == 0,
+			"...and every one of its %d covered texels decodes back to that level"
+			% int(decoded["checked"])
+			+ (" (%d wrong)" % int(decoded["wrong"]) if int(decoded["wrong"]) > 0 else ""))
+
+		# The paint layer is still a still image, for a new finish exactly as for the
+		# two BL-38 shipped. This is the claim coverage rests on and it is per finish,
+		# not per shader: a baked base that somehow read TIME would break it here.
+		var live := (await _read_paint()).get_data()
+		_page_view.effect_animation_enabled = false
+		for i in 6:
+			await get_tree().process_frame
+		var frozen := (await _read_paint()).get_data()
+		_page_view.effect_animation_enabled = true
+		_expect(live == frozen,
+			"'%s' bakes a STILL base -- the paint layer is byte-identical frozen" % finish)
+
+		# ...and ordinary wax rubs it off, through the ordinary blend and no
+		# bookkeeping. The four new payloads are new numbers, but zero is still zero.
+		_page_view.brush_effect = BrushFinish.CLASSIC
+		_page_view.begin_stroke(Vector2(line_x - 150.0, 250.5))
+		_page_view.continue_stroke(Vector2(line_x - 8.0, 250.5))
+		_page_view.end_stroke()
+		var erased := await _read_effect()
+		# Sampled down the MIDDLE of the stroke, not as a peak over the page: the
+		# classic pass rubs out what it covers, and what it covers is a dab profile,
+		# so the outermost fringe of the original stroke keeps a sliver of its level.
+		# That sliver is the correct answer -- the wax there is still animated wax,
+		# only faintly -- and it is what a max would report instead.
+		var rubbed := erased.get_pixel(int(line_x) - 80, 250)
+		_expect(rubbed.r8 < 24 and rubbed.g8 < 24,
+			"...and classic wax over it ERASES the level (r %d, g %d)"
+			% [rubbed.r8, rubbed.g8])
+
+
+## Decodes every sufficiently covered texel of [param mask] and counts how many come
+## back as something other than [param authored]. { "checked": int, "wrong": int }.
+func _decode_mask_levels(mask: Image, authored: Color, min_alpha: int) -> Dictionary:
+	var bytes := mask.get_data()
+	var checked := 0
+	var wrong := 0
+	for i in _page_width * _page_height:
+		var coverage := bytes[i * 4 + 3]
+		if coverage < min_alpha:
+			continue
+		checked += 1
+		var decoded := BrushFinish.decode_mask_payload(Color(
+			bytes[i * 4] / 255.0,
+			bytes[i * 4 + 1] / 255.0,
+			bytes[i * 4 + 2] / 255.0,
+			coverage / 255.0
+		))
+		if not is_equal_approx(float(decoded["field"]), authored.r) \
+				or not is_equal_approx(float(decoded["speck"]), authored.g):
+			wrong += 1
+	return {"checked": checked, "wrong": wrong}
 
 
 ## The paint layer's effect mask, settled and in RGBA8. Null while dormant.

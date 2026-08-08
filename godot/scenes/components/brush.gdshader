@@ -9,8 +9,9 @@ render_mode blend_mix, unshaded;
 //   2. HARD-clips the dab to the locked region by sampling the ID map and
 //      discarding every fragment whose ID-map texel differs from the locked
 //      region's id_color, and
-//   3. applies the crayon box's FINISH (BL-35) -- glow, grain or glitter -- to the
-//      colour and alpha the dab lays down.
+//   3. applies the crayon box's FINISH (BL-35) -- the bloom, the tooth, the specks,
+//      the crust -- to the colour and alpha the dab lays down. An ANIMATED finish
+//      bakes its BASE here too (BL-38, BL-47); only the movement lives elsewhere.
 // The clip is a discard, never a blend, so region boundaries stay hard-edged
 // no matter how soft the brush is -- and that includes a glow halo, which is
 // clipped fragment by fragment exactly like the core of the dab. A finish can
@@ -67,6 +68,15 @@ const int MODE_GLITTER = 3;
 // effect mask, which this same shader writes on a second pass (see TARGET_MASK).
 const int MODE_SHIMMER = 4;
 const int MODE_TWINKLE = 5;
+// BL-47's four. Same rule again: the BASE is baked here, the movement is a style
+// LEVEL in the mask (see the payload uniforms below). Two of these bake a base very
+// close to one above -- aurora's satin is shimmer's, a touch gentler -- and that is
+// fine and deliberate: the bake mode and the mask level are different axes, so two
+// boxes may share a look when they are still and part company when they move.
+const int MODE_EMBERS = 6;
+const int MODE_OCEAN = 7;
+const int MODE_AURORA = 8;
+const int MODE_FIREFLY = 9;
 
 uniform int effect_mode = 0;
 
@@ -80,10 +90,16 @@ const int TARGET_WAX = 0;
 const int TARGET_MASK = 1;
 uniform int effect_target = 0;
 
-// The mask payload for this batch (BrushFinish.mask_payload): red = travelling
-// sheen, green = winking specks, blue = the stroke's own phase. Every finish writes
-// one, and a bakeable finish's is zero -- which is how ordinary wax painted on top
-// of a shimmer takes the shimmer off again, through the ordinary alpha blend.
+// The mask payload for this batch (BrushFinish.mask_payload): red = the FIELD style
+// level, green = the SPECK style level, blue = the stroke's own phase. BL-47 turned
+// the first two from amounts into quantised LEVELS -- 0.15 embers / 0.35 soft sheen
+// / 0.55 caustics / 0.80 aurora / 1.00 full sheen in red, 0.5 drift / 1.0 wink in
+// green -- which is what let four more animated boxes share two channels. Nothing
+// changes HERE: this pass writes the number it is given, and the decode that turns
+// it back into a style lives in paint_display.gdshader, where the numbers are
+// repeated as midpoint thresholds. Every finish writes a payload, and a bakeable
+// finish's is zero -- which is how ordinary wax painted on top of a shimmer takes
+// the shimmer off again, through the ordinary alpha blend.
 uniform float effect_sheen = 0.0;
 uniform float effect_spark = 0.0;
 uniform float effect_phase = 0.0;
@@ -265,6 +281,76 @@ void fragment() {
 		fleck *= smoothstep(1.0, 0.70, d);
 		wax = mix(wax, vec3(1.0), fleck * 0.95);
 		alpha = max(falloff, fleck);
+	} else if (effect_mode == MODE_EMBERS) {
+		if (d > 1.0) {
+			discard;
+		}
+		// A cooled CRUST: the same tooth as textured wax, but the grooves go much
+		// deeper (0.55x the crayon's own colour, against grain's 0.70x) so the wax
+		// reads as dark and crazed rather than merely scratchy, and the ridges carry
+		// a faint warm lift -- the heat still in the top of the coal. The glow that
+		// breathes through the cracks is NOT here: it is the mask's 0.15 field level,
+		// and baking it would flatten it the moment it was stamped.
+		float crust = wax_grain(dir);
+		wax = mix(
+			wax * 0.55,
+			clamp(wax * 1.06 + vec3(0.055, 0.026, 0.0), vec3(0.0), vec3(1.0)),
+			crust
+		);
+		// The grooves are a COLOUR, not an alpha hole (BL-35's corollary): a hole
+		// would be filled in by the next of the eight dabs that covers this pixel.
+		alpha = falloff * mix(0.88, 1.0, crust);
+	} else if (effect_mode == MODE_OCEAN) {
+		if (d > 1.0) {
+			discard;
+		}
+		// Polished: silk_grain at even lower contrast than shimmer's, with the lift
+		// pulled towards white along the COOL axis, so the still page reads as wet
+		// glass and the caustics have something smooth to ripple over.
+		float glass = silk_grain(dir);
+		wax = mix(
+			wax * 0.97,
+			clamp(wax * 1.14 + vec3(0.045, 0.065, 0.09), vec3(0.0), vec3(1.0)),
+			glass
+		);
+		alpha = falloff;
+	} else if (effect_mode == MODE_AURORA) {
+		if (d > 1.0) {
+			discard;
+		}
+		// Satin, like shimmer's, one notch gentler. It is deliberately close: the
+		// aurora's whole point is that the CURTAIN is the difference, and a frozen
+		// aurora page should read as quiet polished wax waiting for it -- not as a
+		// third kind of tooth competing with the colour that is about to sweep over.
+		float satin = silk_grain(dir);
+		wax = mix(wax * 0.96, clamp(wax * 1.13 + vec3(0.05), vec3(0.0), vec3(1.0)), satin);
+		alpha = falloff;
+	} else if (effect_mode == MODE_FIREFLY) {
+		if (d > 1.0) {
+			discard;
+		}
+		// Twinkle's flecked base, turned right down: a softer tooth, a SPARSER grid
+		// (26 px against twinkle's 17), fewer cells carrying a fleck, smaller flecks
+		// and a much weaker lift towards white. A frozen firefly page has to read as
+		// faint dust caught in the wax -- if it read as glitter, the box would be
+		// twinkle with a different animation instead of its own quieter idea.
+		float dust_tooth = wax_grain(dir);
+		wax = mix(wax * 0.88, clamp(wax * 1.07, vec3(0.0), vec3(1.0)), dust_tooth);
+		const float DUST_CELL = 26.0;
+		vec2 dust_cell = floor(page_position / DUST_CELL);
+		vec2 dust_jitter = vec2(hash21(dust_cell + 2.3), hash21(dust_cell + 4.7));
+		float mote = 0.0;
+		if (hash21(dust_cell + effect_seed) > 0.62) {
+			float mote_radius = mix(1.1, 2.6, hash21(dust_cell + 6.1));
+			mote = clamp(
+				1.0 - length(page_position - (dust_cell + dust_jitter) * DUST_CELL) / mote_radius,
+				0.0, 1.0
+			);
+			mote = pow(mote, 0.62) * effect_strength;
+		}
+		mote *= smoothstep(1.0, 0.70, d);
+		wax = mix(wax, vec3(1.0), mote * 0.62);
+		alpha = max(falloff, mote);
 	}
 
 	// --- the effect mask (BL-38) -------------------------------------------

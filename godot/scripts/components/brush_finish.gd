@@ -25,6 +25,12 @@ extends RefCounted
 ## [method mask_payload] is what a stamp writes there. See BACKLOG_ARCHIVE BL-38 for
 ## why that beat persisting per-stroke recipes.
 ##
+## [b]Phase 3 (BL-47) added four more animated boxes[/b] -- Embers, Ocean glass,
+## Aurora and Firefly dust -- and needed exactly one architectural change to fit
+## them: the mask's red and green stopped being raw amounts and became QUANTIZED
+## STYLE LEVELS, so each channel carries a whole FAMILY of animations instead of one.
+## See the [constant MASK_FIELD_LEVELS] block for the decode and why it is exact.
+##
 ## [b]Why the effects are functions of PAGE POSITION, not of the dab.[/b] A stroke
 ## overlaps its own dabs by ~87% ([constant PageView.STAMP_SPACING_RATIO]), so an
 ## effect that varied per dab would be re-blended eight times over at every pixel
@@ -55,23 +61,48 @@ const GRAIN := &"grain"
 ## rainbow bands, plus bright specks of glitter caught in the wax. The loudest of
 ## the BAKEABLE finishes, and the last box that stops moving when the stroke does.
 const GLITTER := &"glitter"
-## Box 5, and the first ANIMATED one (BL-38): satin wax with a sheen that travels
-## across the page, over and over. Baked base plus [member mask_sheen] in the effect
-## mask's red channel.
+## Box 5 (BL-47 slotted three quieter animated boxes below it), and the FIRST
+## animated one by loudness: dark cooled-crust wax whose patches breathe warm, like
+## coals being blown on. The subtlest box in the game -- from across the room a page
+## of embers looks like ordinary dark wax that will not quite hold still.
+const EMBERS := &"embers"
+## Box 6: polished glass with sunlight rippling through shallow water over it --
+## two drifting noise fields multiplied and sharpened into caustics.
+const OCEAN := &"ocean"
+## Box 7: a curtain of light crossing the page. It is the only finish that changes
+## the wax's HUE rather than adding brightness to it -- the sheen reads as slowly
+## changing colour instead of white glare, which is what makes it louder than the
+## ocean and quieter than the shimmer.
+const AURORA := &"aurora"
+## Box 8, the first ANIMATED one BL-38 shipped: satin wax with a sheen that travels
+## across the page, over and over. Baked base plus a full-strength white-sheen level
+## in the effect mask's red channel.
 const SHIMMER := &"shimmer"
-## Box 6, the loudest box in the game: glitter that actually sparkles. Baked glitter
-## base plus [member mask_spark] in the effect mask's green channel, which the
-## display shader turns into specks that wink in and out.
+## Box 9: faint dust whose specks WANDER instead of winking where they are. Twinkle's
+## machinery at half the payload and half the volume -- the specks drift, swell and
+## fade rather than blinking, so it reads as a slow drift of light over the wax.
+const FIREFLY := &"firefly"
+## Box 10, the loudest box in the game: glitter that actually sparkles. Baked glitter
+## base plus a full-strength wink level in the effect mask's green channel, which the
+## display shader turns into specks that wink in and out where they sit.
 const TWINKLE := &"twinkle"
 
 ## Shader [code]effect_mode[/code] values. Kept next to the ids so the two cannot
-## drift; the shader has the same numbers in its own comments.
+## drift; the shader has the same numbers in its own comments. They are BAKE modes --
+## which base a stamp lays into the paint layer -- and are deliberately NOT the same
+## axis as the mask style levels below, because two boxes can share a baked base and
+## animate differently (aurora and shimmer both bake satin) and one box can bake its
+## own base and animate on a level another box also uses.
 const MODE_CLASSIC := 0
 const MODE_GLOW := 1
 const MODE_GRAIN := 2
 const MODE_GLITTER := 3
 const MODE_SHIMMER := 4
 const MODE_TWINKLE := 5
+const MODE_EMBERS := 6
+const MODE_OCEAN := 7
+const MODE_AURORA := 8
+const MODE_FIREFLY := 9
 
 ## id -> { mode, quad_scale, strength, display_name, animated, sheen, spark }.
 ##
@@ -80,10 +111,13 @@ const MODE_TWINKLE := 5
 ## halo). The shader divides back out, so a dab radius still means the same thing at
 ## every scale and only the halo gets the extra room.
 ##
-## [code]sheen[/code] / [code]spark[/code] (BL-38) are the EFFECT MASK payload: the
-## red and green a stamp of this finish writes into the mask layer, i.e. how much
-## travelling sheen and how much winking glitter the display shader gives that wax
-## afterwards. Zero for every bakeable finish -- which is exactly why painting
+## [code]sheen[/code] / [code]spark[/code] (BL-38, re-read by BL-47) are the EFFECT
+## MASK payload: the red and green a stamp of this finish writes into the mask layer.
+## Until BL-47 they were raw AMOUNTS and the mask hard-coded exactly two animation
+## families; now they are [b]STYLE LEVELS[/b] drawn from [constant MASK_FIELD_LEVELS]
+## and [constant MASK_SPECK_LEVELS] -- see the block above those tables for why one
+## channel can carry a whole family of animations and still be recovered exactly.
+## Zero is still zero and still means "not alive", which is exactly why painting
 ## classic wax over a shimmer stroke takes the shimmer off again: the classic stamp
 ## writes zeros into the same mask, through the same blend, at the same coverage.
 const FINISHES := {
@@ -124,14 +158,62 @@ const FINISHES := {
 		"sheen": 0.0,
 		"spark": 0.0,
 	},
+	EMBERS: {
+		"mode": MODE_EMBERS,
+		"quad_scale": 1.0,
+		"strength": 1.0,
+		"display_name": "Embers",
+		"animated": true,
+		# Level 0.15: the warm breathing field. The QUIETEST level of the loudest
+		# channel, which is also why it is the lowest number in the table -- the
+		# decode's nearest-level rule reads best when the ladder and the numbers
+		# climb together.
+		"sheen": 0.15,
+		"spark": 0.0,
+	},
+	OCEAN: {
+		"mode": MODE_OCEAN,
+		"quad_scale": 1.0,
+		"strength": 1.0,
+		"display_name": "Ocean glass",
+		"animated": true,
+		# Level 0.55: caustics.
+		"sheen": 0.55,
+		"spark": 0.0,
+	},
+	AURORA: {
+		"mode": MODE_AURORA,
+		"quad_scale": 1.0,
+		"strength": 1.0,
+		"display_name": "Aurora",
+		"animated": true,
+		# Level 0.80: the hue-shifting curtain. The one field style that does not add
+		# white light, so its LEVEL is what tells the display shader to rotate the wax
+		# instead of brightening it.
+		"sheen": 0.80,
+		"spark": 0.0,
+	},
 	SHIMMER: {
 		"mode": MODE_SHIMMER,
 		"quad_scale": 1.0,
 		"strength": 1.0,
 		"display_name": "Shimmer",
 		"animated": true,
+		# Level 1.00: the full white sheen. Unmoved from BL-38 on purpose -- every
+		# page_NN_fx.png already on a player's disk decodes to exactly this look.
 		"sheen": 1.0,
 		"spark": 0.0,
+	},
+	FIREFLY: {
+		"mode": MODE_FIREFLY,
+		"quad_scale": 1.0,
+		"strength": 1.0,
+		"display_name": "Firefly dust",
+		"animated": true,
+		# Speck level 0.50: specks that WANDER. No field at all -- the dust is the
+		# whole finish, and a sheen under it would drown it.
+		"sheen": 0.0,
+		"spark": 0.5,
 	},
 	TWINKLE: {
 		"mode": MODE_TWINKLE,
@@ -139,17 +221,71 @@ const FINISHES := {
 		"strength": 1.0,
 		"display_name": "Twinkle",
 		"animated": true,
-		# The twinkle box carries a little sheen as well: its specks wink over wax
-		# that is itself alive, which is what makes it the LOUDER of the two.
+		# Field level 0.35 -- the SOFT white sheen -- plus speck level 1.00. The
+		# twinkle box carries a little sheen as well: its specks wink over wax that is
+		# itself alive, which is what makes it the loudest box in the game. 0.35 is
+		# also unmoved from BL-38, for the same saved-PNG reason as shimmer's 1.00.
 		"sheen": 0.35,
 		"spark": 1.0,
 	},
 }
 
 ## The finishes in ladder order, dullest first. What an authoring tool would offer
-## and what the smoke walks. BL-38's two ANIMATED finishes top it -- a box that
-## keeps moving is louder than any box that stops.
-const LADDER: Array[StringName] = [CLASSIC, GLOW, GRAIN, GLITTER, SHIMMER, TWINKLE]
+## and what the smoke walks. The ANIMATED finishes top it -- a box that keeps moving
+## is louder than any box that stops -- and BL-47 slotted its four new ones INSIDE
+## that animated tail by loudness rather than appending them: embers barely moves,
+## twinkle is still the last word.
+const LADDER: Array[StringName] = [
+	CLASSIC, GLOW, GRAIN, GLITTER, EMBERS, OCEAN, AURORA, SHIMMER, FIREFLY, TWINKLE
+]
+
+# ------------------------------------------------- mask style levels (BL-47) --
+# THE EXTENSION THAT MADE FOUR MORE ANIMATED BOXES POSSIBLE.
+#
+# BL-38 read the effect mask's red as "how much travelling white sheen" and its
+# green as "how much winking speck": two channels, two hard-coded animations, and
+# no room for a fifth idea. BL-47 re-reads the same two channels as QUANTIZED STYLE
+# LEVELS -- red names a member of the FIELD family (a page-space light that washes
+# over the wax), green names a member of the SPECK family (points of light on a
+# page-space cell grid) -- so one channel now carries a whole family and the display
+# shader picks the animation from the level rather than from the channel.
+#
+# [b]Why the payload survives the blend, exactly.[/b] The mask is stamped with
+# ordinary alpha blending, so a texel holds `payload * coverage` in rgb and the same
+# `coverage` in alpha -- the display shader never reads `mask.a` for anything else,
+# and that spare channel is the whole trick. First stamp on a transparent target:
+# `dst.rgb = payload * a`, `dst.a = a`, so `dst.rgb / dst.a` is the payload exactly.
+# A second stamp of the SAME payload gives `payload * (a + a'(1-a))` over
+# `a + a'(1-a)` -- exactly again, at any coverage, however many dabs deep. So the
+# normalised value is the authored level even at a feathered dab edge, where the raw
+# channel is nearly nothing.
+#
+# [b]Where two styles overlap-blend, nearest-level picks one of them[/b] -- the
+# blend of 0.15 and 0.80 is not a level, and the decode rounds it to whichever is
+# closer. That is deliberate and it is invisible: the only texels that can misfire
+# are the fringe where one stroke's soft edge lies over another's, and a fringe texel
+# carries a coverage-weighted amount of nearly zero. A wrong ANIMATION at zero
+# BRIGHTNESS is not a wrong pixel.
+#
+# The two tables are the contract with `paint_display.gdshader`, which carries the
+# same numbers as decode thresholds at their midpoints. Change one, change both --
+# and never change a level that has shipped, because every `page_NN_fx.png` already
+# written decodes through this table.
+
+## The RED channel's field styles, ascending. 0.15 embers, 0.35 soft white sheen,
+## 0.55 ocean caustics, 0.80 aurora curtain, 1.00 full white sheen.
+## Array[float] rather than PackedFloat32Array on purpose: these numbers are
+## compared for EQUALITY against authored payloads, and a 32-bit round trip turns
+## 0.35 into 0.3499999940395355, which is not the same constant any more.
+const MASK_FIELD_LEVELS: Array[float] = [0.15, 0.35, 0.55, 0.80, 1.0]
+## The GREEN channel's speck styles, ascending. 0.5 firefly drift, 1.0 wink in place.
+const MASK_SPECK_LEVELS: Array[float] = [0.5, 1.0]
+## Below this the channel is treated as unwritten -- the same floor the display
+## shader gates on, so the two agree about which texels have a style at all.
+const MASK_CHANNEL_FLOOR := 0.002
+## Guards the divide for a texel with coverage but no payload. Never reached in
+## practice: the floor above rejects those texels first.
+const MASK_COVERAGE_EPSILON := 0.0001
 
 
 ## True when [param id] names a finish this build knows how to paint.
@@ -213,6 +349,45 @@ static func is_animated(id: StringName) -> bool:
 static func mask_payload(id: StringName, phase: float = 0.0) -> Color:
 	var entry: Dictionary = FINISHES[resolve(id)]
 	return Color(float(entry["sheen"]), float(entry["spark"]), clampf(phase, 0.0, 1.0), 1.0)
+
+
+## The nearest entry of [param levels] to [param value]. The decode rule, in one
+## place, so GDScript and the shader cannot disagree about where a boundary is.
+static func _nearest_level(levels: Array[float], value: float) -> float:
+	var best := levels[0]
+	var best_gap := absf(value - best)
+	for level in levels:
+		var gap := absf(value - level)
+		if gap < best_gap:
+			best_gap = gap
+			best = level
+	return best
+
+
+## Which FIELD style a normalised red channel names (BL-47). [param normalized] is
+## [code]mask.r / mask.a[/code] -- the payload the stamp wrote, recovered.
+static func decode_mask_field(normalized: float) -> float:
+	return _nearest_level(MASK_FIELD_LEVELS, normalized)
+
+
+## Which SPECK style a normalised green channel names (BL-47).
+static func decode_mask_speck(normalized: float) -> float:
+	return _nearest_level(MASK_SPECK_LEVELS, normalized)
+
+
+## The style levels a mask texel was STAMPED with, recovered from the blended texel:
+## { "field": float, "speck": float }, zero for a channel that was never written.
+##
+## This is the GDScript twin of the decode in [code]paint_display.gdshader[/code],
+## and it exists so the smoke can prove the recovery empirically rather than by
+## argument -- stamp a stroke, read the mask back, assert the level that comes out is
+## the level [method mask_payload] put in.
+static func decode_mask_payload(texel: Color) -> Dictionary:
+	var coverage := maxf(texel.a, MASK_COVERAGE_EPSILON)
+	return {
+		"field": decode_mask_field(texel.r / coverage) if texel.r > MASK_CHANNEL_FLOOR else 0.0,
+		"speck": decode_mask_speck(texel.g / coverage) if texel.g > MASK_CHANNEL_FLOOR else 0.0,
+	}
 
 
 ## The animated finishes, in ladder order. Empty would mean phase 2 was reverted.

@@ -387,6 +387,18 @@ func _draw_crayon(box: Vector2) -> void:
 		BrushFinish.TWINKLE:
 			_draw_finish_sheen(body_box)
 			_draw_finish_glitter(Rect2(center_x - half, top, body_width, bottom - top))
+		# BL-47's four, previewed from the SAME primitives -- there is still no second
+		# drawing path and still no art asset, which is what keeps the landscape dock's
+		# quarter turn free. Each shows the finish's SHAPE, never its motion (BL-16: a
+		# strip full of moving things reads as noise, not as an invitation).
+		BrushFinish.EMBERS:
+			_draw_finish_grain(body_box)
+		BrushFinish.OCEAN:
+			_draw_finish_sheen(body_box)
+		BrushFinish.AURORA:
+			_draw_finish_sheen(body_box)
+		BrushFinish.FIREFLY:
+			_draw_finish_glitter(Rect2(center_x - half, top, body_width, bottom - top))
 
 	# Silhouette outline last, so nothing overdraws it. A selected crayon gets a
 	# bright rim just outside it as well (BL-15): the dark edge alone disappears

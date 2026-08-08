@@ -70,16 +70,32 @@ const REPLACED_BY_ARROWS := "res://scripts/components/crayon_box_button.gd"
 const MIN_COLOR_DISTANCE := 0.25
 ## Authored crayon sets that ship: BL-35 replaced BL-23's five recolours (Pastel,
 ## Neon, Earth, Candy, Spooky -- "more colour options, not more fun") with three
-## boxes of the SAME crayons in escalating finishes, and BL-38 added the two
-## ANIMATED boxes on top of them (Shimmer, Twinkle).
-const EXPECTED_EXTRA_SETS := 5
+## boxes of the SAME crayons in escalating finishes, BL-38 added the two ANIMATED
+## boxes on top of them (Shimmer, Twinkle), and BL-47 added four more animated ones
+## slotted through that tail by loudness (Embers, Ocean Glass, Aurora, Firefly Dust).
+const EXPECTED_EXTRA_SETS := 9
 ## The finish ladder the shipped boxes walk, dullest first: box 0 is the default
 ## crayon box in plain wax, then one box per authored set.
 const FINISH_LADDER: Array[StringName] = [
 	BrushFinish.CLASSIC, BrushFinish.GLOW, BrushFinish.GRAIN, BrushFinish.GLITTER,
-	BrushFinish.SHIMMER, BrushFinish.TWINKLE
+	BrushFinish.EMBERS, BrushFinish.OCEAN, BrushFinish.AURORA, BrushFinish.SHIMMER,
+	BrushFinish.FIREFLY, BrushFinish.TWINKLE
 ]
-const SET_NAMES: PackedStringArray = ["Neon Glow", "Textured Wax", "Glitter"]
+const SET_NAMES: PackedStringArray = [
+	"Neon Glow", "Textured Wax", "Glitter",
+	"Embers", "Ocean Glass", "Aurora", "Shimmer", "Firefly Dust", "Twinkle",
+]
+## BL-47's four, and the [field, speck] mask style LEVELS each one authors. The pair
+## is the contract the display shader decodes against, and the smoke asserts both
+## halves of it. Plain float arrays rather than a `Vector2`, because these are
+## compared for EQUALITY against the level tables and `Vector2` stores 32-bit
+## components -- 0.15 would come back as 0.15000000596 and match nothing.
+const NEW_FINISHES := {
+	BrushFinish.EMBERS: [0.15, 0.0],
+	BrushFinish.OCEAN: [0.55, 0.0],
+	BrushFinish.AURORA: [0.80, 0.0],
+	BrushFinish.FIREFLY: [0.0, 0.5],
+}
 
 ## BL-36: the repo's dev-fixture sticker sets. Exactly one -- the free "Starter
 ## Stickers" set the BL-37 pack is built from. Every other set a player has comes
@@ -639,8 +655,15 @@ func _check_crayon_sets() -> void:
 			animated.append(String(ladder[i]))
 			if first_animated < 0:
 				first_animated = i
-	_expect(animated.size() == 2,
-		"the ladder ships TWO animated boxes on top of the four bakeable ones (%s)" % [animated])
+	# BL-47 widened this from two to six. The SHAPE of the assertion did not move,
+	# which is the point of having written it this way: the animated boxes are a
+	# contiguous tail, however many of them there are.
+	_expect(animated.size() == 6,
+		"the ladder ships SIX animated boxes on top of the four bakeable ones (%s)" % [animated])
+	_expect(animated == PackedStringArray([
+			"embers", "ocean", "aurora", "shimmer", "firefly", "twinkle"]),
+		"...in loudness order -- embers barely moves, twinkle is still the last word (%s)"
+		% [animated])
 	_expect(first_animated == ladder.size() - animated.size(),
 		"...and they are the LAST boxes in the cycle, not sprinkled through it (first at %d of %d)"
 		% [first_animated, ladder.size()])
@@ -660,6 +683,61 @@ func _check_crayon_sets() -> void:
 			payloads_split = payloads_split and payload.r == 0.0 and payload.g == 0.0
 	_expect(payloads_split,
 		"an animated box writes an effect-mask payload and a bakeable one writes zeros")
+
+	# --- BL-47: the four new boxes, and the style LEVELS they author ----------
+	# `resolve()` turning an unknown id into classic wax is the safety net that makes
+	# an authored typo paint plain wax instead of nothing -- which also means a .tres
+	# naming a finish this build has never heard of would sail past every check above
+	# looking like the default box. So each new id is asserted KNOWN, not merely
+	# resolvable, and asserted animated, or the box would ship as silent wax.
+	var new_boxes_known := true
+	var new_boxes_animated := true
+	var levels_authored := true
+	var levels_decode := true
+	for id in NEW_FINISHES:
+		var field_level := float(NEW_FINISHES[id][0])
+		var speck_level := float(NEW_FINISHES[id][1])
+		new_boxes_known = new_boxes_known and BrushFinish.is_known(id) and BrushFinish.resolve(id) == id
+		new_boxes_animated = new_boxes_animated and BrushFinish.is_animated(id)
+		var payload := BrushFinish.mask_payload(id)
+		levels_authored = (
+			levels_authored
+			and is_equal_approx(payload.r, field_level)
+			and is_equal_approx(payload.g, speck_level)
+		)
+		# The level tables ARE the contract with the display shader. A payload that is
+		# not a member of one of them decodes to a neighbouring style, and the box
+		# would silently animate as some other box.
+		if field_level > 0.0:
+			levels_authored = levels_authored and BrushFinish.MASK_FIELD_LEVELS.has(field_level)
+		if speck_level > 0.0:
+			levels_authored = levels_authored and BrushFinish.MASK_SPECK_LEVELS.has(speck_level)
+		# ...and the decode round-trips the payload at full coverage. The empirical
+		# half of this -- the same round trip through a real stamped, blended mask --
+		# is the paint smoke's job, where there are pixels to read back.
+		var decoded := BrushFinish.decode_mask_payload(
+			Color(payload.r, payload.g, payload.b, 1.0)
+		)
+		levels_decode = (
+			levels_decode
+			and is_equal_approx(float(decoded["field"]), field_level)
+			and is_equal_approx(float(decoded["speck"]), speck_level)
+		)
+	_expect(new_boxes_known,
+		"every BL-47 box names a finish this build KNOWS -- not one resolve() quietly"
+		+ " turned back into classic wax")
+	_expect(new_boxes_animated, "...and every one of them reports itself ANIMATED")
+	_expect(levels_authored,
+		"...each authoring a mask style LEVEL out of the shared tables, never a raw amount")
+	_expect(levels_decode,
+		"...which the decode recovers exactly -- the level in is the level out")
+	# The two levels BL-38 shipped are load-bearing history: every page_NN_fx.png a
+	# player already has decodes through this table, so moving either number would
+	# silently repaint saved pages.
+	_expect(BrushFinish.MASK_FIELD_LEVELS.has(1.0) and BrushFinish.MASK_FIELD_LEVELS.has(0.35)
+			and BrushFinish.MASK_SPECK_LEVELS.has(1.0),
+		"...and BL-38's payloads are still levels of their own, so saved masks decode"
+		+ " to the look they were saved with")
 
 	# --- set_palette primes the finish, like the size and the colour ----------
 	_expect(_effects.size() == 1 and _effects[0] == BrushFinish.CLASSIC,
