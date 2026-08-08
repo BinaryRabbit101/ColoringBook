@@ -186,6 +186,11 @@ const STRIP_MARGIN := Vector2(14.0, 12.0)
 ## because [method _crayon_room] budgets against it and a drift between the two
 ## numbers would be a silently mis-sized strip.
 const BODY_SEPARATION := 10.0
+## Gap between the two controls INSIDE the leading tool band -- the cycle bar and
+## the intensity tile. Wider than [constant BODY_SEPARATION] on purpose: these two
+## are the pair a playtester read as ONE stacked widget, so the air between them is
+## what says "two buttons, two jobs".
+const TOOL_SEPARATION := 14.0
 ## Separation between crayons, and between ranks of them.
 const CRAYON_SEPARATION := 6.0
 ## Most ranks the crayons may wrap onto before the strip gives up and scrolls
@@ -268,8 +273,10 @@ func _resolve_nodes() -> void:
 		_row = get_node("Margin/Body/Scroll/CrayonRow") as BoxContainer
 	if _prev == null:
 		# The leading cycle bar shares the tool band with the intensity tile rather
-		# than taking a band of its own: the band costs the strip its LENGTH, and
-		# length is exactly what BL-33's ten visible crayons are short of.
+		# than taking a band of its own: a band costs the strip its LENGTH, and
+		# length is exactly what BL-33's ten visible crayons are short of. Sharing a
+		# band is not the same as sharing a COLUMN, though -- see [method _apply_layout]
+		# for why the band is horizontal in both docks.
 		_prev = CrayonCycleButton.new()
 		_prev.name = "CyclePrev"
 		_prev.direction = CrayonCycleButton.DIR_PREV
@@ -291,6 +298,7 @@ func _resolve_nodes() -> void:
 		_next.pressed.connect(next_crayon_set)
 		_body.add_child(_next)
 	_body.add_theme_constant_override("separation", int(BODY_SEPARATION))
+	_controls.add_theme_constant_override("separation", int(TOOL_SEPARATION))
 	_row.add_theme_constant_override("separation", int(CRAYON_SEPARATION))
 	if _flash == null:
 		# Parented to the palette ROOT for the same reason as the bubble: it floats
@@ -376,10 +384,24 @@ func _apply_layout() -> void:
 	_row.vertical = not column
 	for rank in _ranks:
 		rank.vertical = column
-	# The tool band runs ACROSS the strip, perpendicular to the crayons, and fills
-	# it, so the leading cycle bar can stretch into whatever the intensity tile
-	# leaves.
-	_controls.vertical = not column
+	# [b]The tool band is ALWAYS a horizontal box[/b], in both docks -- which is not
+	# the same direction relative to the strip in each, and that is the point:
+	#
+	#   docked COLUMN: horizontal is ACROSS the strip. The cycle bar and the
+	#       intensity tile sit side by side over the column's 260 px of width, and
+	#       the band costs the crayons 88 px of the column's LENGTH -- which is the
+	#       axis BL-33's no-scroll fit has none of to spare (ten crayons in two ranks
+	#       clear the 64 px floor by under two pixels there).
+	#   bottom ROW: horizontal is ALONG the strip. They sit side by side again, in
+	#       line with the crayons, each running the strip's full height.
+	#
+	# The row used to lay this band out VERTICALLY, which stood the cycle bar on top
+	# of the intensity tile: two stunted tiles in a pile at the left end, reading as
+	# one stacked widget, while the far cycle bar was a full-height slab. The row has
+	# 1152 px of length and gives up ~80 of them for the change without dropping a
+	# crayon under the touch floor; the column, which cannot, keeps the geometry it
+	# already had. So one line serves both, and neither dock stacks a tool on a tool.
+	_controls.vertical = false
 	_controls.size_flags_horizontal = Control.SIZE_FILL if column else Control.SIZE_SHRINK_CENTER
 	_controls.size_flags_vertical = Control.SIZE_SHRINK_CENTER if column else Control.SIZE_FILL
 
