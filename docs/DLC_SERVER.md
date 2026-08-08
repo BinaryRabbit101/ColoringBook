@@ -200,7 +200,7 @@ sticker_sets          id, ulid, pack_id →packs, set_uid (unique, stable foreve
 stickers              id, sticker_set_id →sticker_sets, sticker_index,
                       sticker_id, title, image_asset_id →assets,
                       image_w, image_h,
-                      anim json (nullable — sprite sheet, BL-38), timestamps
+                      anim json (nullable — sprite sheet, BL-41), timestamps
                       UNIQUE(sticker_set_id, sticker_index)
                       UNIQUE(sticker_set_id, sticker_id)
 assets                id, ulid, kind ('display'|'mask'|'idmap'|'regions'|'cover'|'sticker'),
@@ -498,7 +498,7 @@ pack.zip                                   manifest kind: "sticker_set"
 - **Delta updates (§7.4, BL-26) are untouched.** They diff the manifest's per-file sha256
   map and have never cared what the files are; a sticker pack updates through the same
   code path, verbatim.
-- **A sticker may be animated** (BL-38, 2026-08-08). Its image is then a sprite-sheet PNG
+- **A sticker may be animated** (BL-41, 2026-08-08). Its image is then a sprite-sheet PNG
   and its entry carries one extra object:
 
   ```json
@@ -510,15 +510,15 @@ pack.zip                                   manifest kind: "sticker_set"
   actually drawn, read **row-major from the top left**, and may be fewer than
   `hframes × vframes` so a 7-frame animation need not be padded to a rectangle nobody
   drew; `fps` is 1–30. A **still sticker has no `anim` key at all** — not `null`, not an
-  empty object — which is what every sticker published before BL-38 looks like and the
+  empty object — which is what every sticker published before BL-41 looks like and the
   whole of the back-compatibility story. The server validates the sheet against the grid
   (it must divide evenly, and `sticker_min_px`/`sticker_max_px` are measured on **one
   frame**, with the sheet itself bounded by `sticker_sheet_max_px`).
 
-**A book's cover may be authored** (BL-38, 2026-08-08). `books[].cover` and the pack-level
+**A book's cover may be authored** (BL-40, 2026-08-08). `books[].cover` and the pack-level
 `cover` are one path, and it is either `books/<book_uid>/cover.png` — art the artist drew to
 be a cover, shipped in the pack like any other file — or, when there is none,
-`books/<book_uid>/page_01.png`, which is exactly what every book published before BL-38
+`books/<book_uid>/page_01.png`, which is exactly what every book published before BL-40
 shipped. The game uses the cover for the bookshelf grid and the book open/close animation
 and falls back to the first page's detail image when a pack has no cover at all, so the
 field stays optional at every layer.
@@ -832,11 +832,11 @@ hand-tuned pages), but a book can now be built end-to-end in the browser.
   publish path. The result is an immutable new `pack_versions` row (§7.3); the game
   sees the version bump through the existing entitlement/update check and downloads
   the delta. Edits after publishing accumulate as draft state until the next press.
-- **Cover** (BL-38, 2026-08-08). A book may carry an artist-supplied cover image,
+- **Cover** (BL-40, 2026-08-08). A book may carry an artist-supplied cover image,
   uploaded and replaced on the book screen beside its pages. It is **optional**: with one,
   the publisher ships `books/<book_uid>/cover.png` and names it as both the pack cover and
   the book cover; without one, both stay page one's display art, which is what every book
-  published before BL-38 shipped. The game uses it for the bookshelf grid and the book
+  published before BL-40 shipped. The game uses it for the bookshelf grid and the book
   open/close animation and falls back to the first page when a pack has none, so the
   optionality holds at every layer and no existing pack changed.
 
@@ -868,7 +868,7 @@ whole point of the entry:
   `PublishPackVersion`. There is still **no second publisher**.
 - `sticker_id` stops being editable the moment a version exists, for the same reason
   `book_uid` never was.
-- **A sticker may be animated** (BL-38, 2026-08-08): its image is a sprite-sheet PNG and
+- **A sticker may be animated** (BL-41, 2026-08-08): its image is a sprite-sheet PNG and
   the row carries `anim {hframes, vframes, frames, fps}`, which the publisher writes onto
   the manifest entry verbatim (§7.2). A still sticker has **no `anim` key** and that
   absence is the back-compatibility story. Two consequences worth stating: the size bounds
@@ -969,12 +969,12 @@ Web authoring (§10.3, BL-24) adds book/page CRUD alongside the pack routes:
 |---|---|---|
 | `GET`/`POST` | `/admin/books` | list / create a book `{book_uid, title, is_free}` — creates its one-book draft pack |
 | `PATCH`/`DELETE` | `/admin/books/{book_uid}` | retitle, upload/replace/clear the cover / delete (retires the pack once published) |
-| `GET` | `/admin/books/{book_uid}/cover` | the authored cover PNG, 404 when the book has none (BL-38) |
+| `GET` | `/admin/books/{book_uid}/cover` | the authored cover PNG, 404 when the book has none (BL-40) |
 | `GET`/`POST` | `/admin/books/{book_uid}/pages` | list / add a page (multipart detail + optional mask, or asset ulids) |
 | `PATCH`/`DELETE` | `/admin/books/{book_uid}/pages/{index}` | title, reorder, replace detail/mask / remove |
 | `GET` | `/admin/books/{book_uid}/pages/{index}/status` | mapping-job state, validation verdict, preview URL |
-| `GET` | `/admin/books/{book_uid}/pages/{index}/display` | the page's own detail image (BL-38 — the book screen's thumbnail) |
-| `GET` | `/admin/books/{book_uid}/pages/{index}/mask` | the page's masking image, 404 when it has none (BL-38) |
+| `GET` | `/admin/books/{book_uid}/pages/{index}/display` | the page's own detail image (BL-39 — the book screen's thumbnail) |
+| `GET` | `/admin/books/{book_uid}/pages/{index}/mask` | the page's masking image, 404 when it has none (BL-39) |
 | `POST` | `/admin/books/{book_uid}/publish` | build + validate + publish a new pack version (§10.3) |
 
 `PATCH /admin/books/{book_uid}` takes the cover the way a page takes its art: multipart
@@ -999,7 +999,7 @@ nothing to poll. Codes this adds: `STICKER_SET_NOT_PUBLISHABLE` (422, `details.e
 carrying every reason), `STICKER_ID_FROZEN` (422, renaming a sticker in a published set),
 `STICKER_IMAGE_NOT_FOUND` (404).
 
-`anim` (BL-38) is submitted as `anim[hframes]`, `anim[vframes]`, `anim[frames]`,
+`anim` (BL-41) is submitted as `anim[hframes]`, `anim[vframes]`, `anim[frames]`,
 `anim[fps]` — the manifest's own names, so there is one vocabulary from the form to the
 pack. All four or none: a half-filled block is a validation error, an entirely blank one is
 a still sticker, and an **absent** `anim` key leaves an existing animation alone (which is

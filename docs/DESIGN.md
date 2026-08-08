@@ -101,6 +101,17 @@ The crayon row grows three features (designed 2026-08-07):
     takes back the last *thing*, whichever kind it was), and the per-page placement list
     is an **additive key in the save** beside `status`/`locked` — a few numbers per
     sticker, so it round-trips exactly at any page resolution.
+  - **Peeling one off is two taps, never one (BL-42).** Tapping a placed sticker
+    (still through `paint_blocked` — no second input path, no mode) makes it
+    wiggle and grow a corner peel badge; tapping the badge takes it off. The peel
+    is its own history *kind* on BL-17's one timeline (undo re-sticks it beneath
+    whatever was placed after it), and the save's placement list is rewritten the
+    instant it changes — placements are never on the sync wire, so no merge can
+    resurrect a peeled sticker.
+  - **A sticker may be animated (BL-41).** Its image is then a sprite-sheet PNG
+    and its manifest entry carries `anim {hframes, vframes, frames, fps}` —
+    played by `Sprite2D` frame-stepping on the page and `draw_texture_rect_region`
+    on the picker card; a sticker with no `anim` key behaves exactly as before.
   - Sticker sets are **catalog content, not palette data** (BL-37): discovered from
     installed packs under `user://dlc`, with the repo's "Starter Stickers" fixture set
     excluded from every release export exactly like `resources/books/*` (BL-25).
@@ -116,6 +127,14 @@ TitleScreen ──► BookSelect (grid of book covers)
                     ▼
               BookSelect
 ```
+
+The shelf grid hangs from the **top-left** and grows right/down (BL-43), and a
+cell wears the pack's **artist cover** when it ships one (BL-40 — manifest
+`cover`; fallback is page 1's detail art, which is also what every pre-cover
+pack names there). The same cover rides the book-open/close animation's flying
+front (BL-30/BL-40). The pack shop separates **coloring books and sticker sets
+into two tabs** on `manifest.kind` (BL-44); both tabs' rows always exist, so a
+download in the hidden tab keeps its progress and its BL-31 wax stroke.
 
 There is **no separate completion screen** — neither for a page nor for the
 book (BL-11). Completion is celebrated on the coloring page itself (§2.2).

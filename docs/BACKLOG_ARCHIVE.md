@@ -1599,7 +1599,8 @@ verbs (save, start over, undo/redo) gave no ceremony.
   **Save flourish**: button pops, sparks fly (`SparkleBurst`, new), the
   "Saved!" toast bounces in with stars — flourish is opt-in per call site, so
   "Page locked"/"Saving…" and the silent interval autosave stay plain.
-  **Start over**: `FreshSheetWipe` (new) — clean paper slides in from the
+  **Start over**: `FreshSheetWipe` (new; deleted by BL-46, whose `PageWash`
+  soap-wash shader replaced it) — clean paper slides in from the
   left with a shadow band and bright rim, blooms as it lands, fades to reveal
   the blank page; plays from `restart_current_page()` after the clear, so any
   path that clears a page gets the fresh sheet and the confirm overlay logic
@@ -2328,3 +2329,187 @@ build hung identically, page-level `fetch()` in the same tab was fine).
   browser; treat any extension-driven "the shop hangs" as this caveat until a
   human reproduces it.
 - Affected: nothing shipped — evidence and the tooling caveat only.
+
+### BL-39: Admin authoring screens restructured — `done` (2026-08-08)
+Playtest feedback 2026-08-08: the artist disliked the authoring page structure.
+Rebuilt as four pages, two shapes, and the shapes match — a **list**
+(`admin/Books.vue`, `admin/StickerSets.vue`: name, page/sticker count,
+modified-since-publish, last published; create is a top-right button opening a
+dialog; the whole row is the link) and an **editor** (`admin/Book.vue`,
+`admin/StickerSet.vue`: picture rows — a page shows its detail image AND its
+mask with an empty slot when there is none, each replaceable in place;
+add/delete page or sticker; page-level Delete and Publish). Every delete goes
+through the new reusable `ConfirmDialog.vue`; the form lives inside the dialog
+so `processing` belongs to the button that was pressed.
+- `modified_since_publish` compares the newest `updated_at` **anywhere in the
+  book/set** (children never write the parent row) against the newest published
+  version's `published_at`; never-published reads as modified.
+- New image routes (both the session and token doors):
+  `GET .../books/{book}/cover`, `.../pages/{index}/display`,
+  `.../pages/{index}/mask` — new error codes `COVER_NOT_FOUND`,
+  `PAGE_ART_NOT_FOUND` (404s).
+- Gotcha: `AuthoredPage.vue` (the mapping/tuning screen) is deliberately
+  untouched — the restructure is BL-24's surface rearranged, not its pipeline.
+- **Dusk was not executed** (no chromedriver on the dev box): the moved
+  interactions are covered (`[data-test="create-book"]`, delete-confirm test
+  added) but worth one `composer test:dusk` on a box with Chrome.
+- Tests 573 → 603 (602 pass + 1 pre-existing opt-in skip); pint/phpstan/eslint/
+  prettier/vue-tsc all clean.
+- Affected: `server/resources/js/pages/admin/*`, `ConfirmDialog.vue` (new),
+  `SpriteSheetPreview.vue` (new), `lib/datetime.ts` (new), book/set/page
+  resources + models, `ServesAuthoringImages.php` (new), routes, server/CLAUDE.md,
+  DLC_SERVER.md §10/§11.
+
+### BL-40: Artist book covers — `done` (2026-08-08)
+An artist-supplied cover image per book, used by the shelf grid and the
+open/close animation instead of page 1's art.
+- **Server half:** `authored_books.cover_asset_id` (nullable); upload rides
+  `PATCH /admin/books/{book}` as `cover`/`cover_asset_ulid`, cleared by
+  `remove_cover`. `PublishAuthoredBook` ships `books/<uid>/cover.png` and names
+  it as both the pack-level and the book-level manifest `cover`; with no cover
+  both keep naming page 1's display art, **byte-identical to every pre-BL-40
+  manifest**. A missing cover blob at publish is a refusal, not a fallback.
+- **Game half:** `has_artist_cover()` is `cover != page 1's display image`, NOT
+  "field is set" — the server has always filled the field with page 1, so an
+  occupied field proves nothing. A real cover fills the whole book front
+  (centre-cropped, no plate), and BL-30's overlay prints it on the flying cover
+  in both phases, riding the doodle's box so the phase hand-off stays
+  pixel-exact; the doodle stands down when a cover exists.
+- `BookDef` reading `manifest.json` for the pack-level `cover` is the first and
+  only exception to "the game never reads the manifest" — the one field
+  `book.json` does not repeat.
+- No shipped book has a cover yet; the path is exercised by a dlc-smoke
+  fixture that writes a `cover.png` into the seeded pack.
+- Affected: server publish/requests/model + migration, `admin/Book.vue`;
+  game `book_def.gd`, `book_cell.gd`, `main.gd` (open/close overlay), dlc smoke.
+
+### BL-41: Animated stickers — `done` (2026-08-08)
+A sticker may be a sprite-sheet PNG animated by manifest metadata:
+`anim { hframes, vframes, frames, fps }` — grid columns×rows, `frames` read
+row-major from the top-left and allowed to be fewer than the grid (a 7-frame
+animation needs no padded cell), `fps` 1–30.
+- **The contract is the absence:** a still sticker has NO `anim` key — not
+  `null`, not `{}` — which is what every pre-BL-41 sticker looks like and the
+  whole back-compat story. Asserted by test.
+- **Server half:** `anim` json on `authored_stickers` and `stickers`;
+  `App\Services\StickerAnim` is the single normaliser (form body, manifest,
+  validator). Size bounds moved **onto the frame** (`sticker_min_px`/`max_px`
+  per cell; the sheet bounded by `admin.sticker_sheet_max_px` = 4096, grid must
+  divide it exactly). An anim-only PATCH re-validates the same bytes — changing
+  the grid changes what they mean. Admin preview counts frames in a JS timer:
+  two-axis CSS `steps()` always walks the whole grid and would show blank cells.
+- **Game half:** `Sprite2D.hframes/vframes` on the page (texture uploaded once,
+  the shadow steps with the art for free) and `draw_texture_rect_region` on the
+  picker card. A frame scales to the same drawn size a still sticker gets, so
+  republishing a set as animated moves nothing already stuck down. A 1×1 grid,
+  a missing block, or an impossible sheet all mean "still".
+- Gotcha: Godot re-enables `_process` for any script that defines it when the
+  node enters the tree — `_init` is not the last word; both the layer and the
+  card settle it in `_ready`.
+- No animated sticker ships in the repo fixtures; the flow smoke fabricates a
+  2×2 sheet from the star. `tools/build_pack.gd` does not emit `anim` — the
+  server owns authoring it.
+- Affected: server sticker requests/actions/validation + migration,
+  `StickerAnim.php` (new), `SpriteSheetPreview.vue` (new); game
+  `sticker_def.gd`, `sticker_set_def.gd`, `sticker_layer.gd`,
+  `sticker_button.gd`, `palette_child.gd`; flow/palette/dlc smokes;
+  DLC_SERVER.md §7.2/§10.4/§11.
+
+### BL-42: Stickers peel off the canvas — `done` (2026-08-08)
+Playtest feedback 2026-08-08: placed stickers could not be removed. Tap a
+placed sticker → it wiggles and grows a red **peel badge** at its corner
+(0.48 of a sticker, ~55 screen px at page-open zoom — measured, not guessed);
+tap the badge → it comes off. Two taps, never one — destructive is never one
+tap away. Both taps arrive through BL-36's existing `paint_blocked` hook: still
+no second input path, still no mode. Tapping the already-chosen sticker places
+a new one on top, so no spot is unreachable by the primary action.
+- **A peel is a first-class entry on BL-17's one timeline** (`sticker_peeled`,
+  carrying the index it came off) — not a negative placement. That keeps
+  BL-36's "undoing a placement pops the last one" untouched while letting undo
+  put a peeled sticker back *underneath* ones stuck down after it.
+- **Sync cannot resurrect a peel:** placements have never been on the wire —
+  §6.3 merges statuses/cursors/paint layers only, and no merge path rewrites
+  the save's `stickers` key. `_persist_stickers()` rewrites the page's whole
+  list the instant it changes; a peel correctly does not dirty the book for a
+  push. BL-18's two erase paths already take stickers with them — the one
+  direction a merge moves them, and it is more deletion, never less.
+- Harness gotcha: placement tilt is random and `sticker_at()` is a tilted-box
+  test — a "clear spot" chosen by hit-test missed by a pixel 1 run in 3. Any
+  future check tapping near a sticker must use a whole-sticker margin.
+- Deliberately out: no drag-to-bin, no long-press, no multi-select.
+- Affected: `sticker_layer.gd`, `coloring_page.gd`, flow/shell/palette smokes,
+  DESIGN.md §1.
+
+### BL-43: Bookshelf grid fills from the top-left — `done` (2026-08-08)
+Playtest feedback 2026-08-08. Four size flags in `book_select.tscn`; the
+bookcase hangs from the top-left and grows right/down. Planks, contact shadows
+and column maths all read the grid back, so the furniture followed with no code
+change. Verified portrait (screenshot) and landscape (mobile smoke).
+- Worth knowing: the shelf now reads as a wall-mounted unit with the floor
+  still drawn at the bottom; if that ever looks wrong, `size_flags_vertical =
+  EXPAND_FILL` on `Bookcase` puts the carcass back on the floor while leaving
+  the grid at the top.
+- Affected: `book_select.tscn`, `book_select.gd`.
+
+### BL-44: Shop tabs — books | stickers — `done` (2026-08-08)
+Playtest feedback 2026-08-08: one mixed list. The pack shop now splits on
+`manifest.kind` (absent = book) into two tabs. **Both tabs' rows are always
+built** — the tab only toggles visibility — so a download in the hidden tab
+still finds its row, still gets bytes, and still runs BL-31's wax stroke and
+confetti; `get_rows()` deliberately still returns both tabs' rows, which is
+what kept backend/sync smokes' surface intact. Offline rows read the kind off
+the installed manifest. A catalogue with nothing on the default tab opens on
+one that has something; an unknown kind lands on neither tab (BL-37's
+"installs cleanly and is simply not offered").
+- Affected: `pack_shop.tscn`, `pack_shop.gd`, shell/dlc smokes.
+
+### BL-45: The cycle bar no longer stacks on the intensity tile — `done` (2026-08-08)
+Playtest feedback 2026-08-08. Root cause: not an overlap — a stack, and only in
+the bottom row. `_apply_layout()` set the tool band's direction to `not column`,
+i.e. *across* the strip: horizontal in the docked column (fine), **vertical in
+the bottom row**, so CyclePrev sat directly on top of IntensityButton as two
+stunted tiles while CycleNext (in `_body`, `SIZE_EXPAND_FILL`) was a full-height
+slab — the two ends of one carousel looking like different controls.
+- Fix: the band is a horizontal box in **both** docks — along the strip in the
+  row, across it in the column, and that asymmetry is the point: the column has
+  no along-axis room to give (2 ranks clear the 64 px floor by 1.6 px at the
+  smallest landscape canvas), the row has 1152 px. Both bars now run the full
+  cross axis, the intensity tile fills it too (88×188 ladder in the row,
+  88×88 in the column — `SIZE_FILL` does it, no code), band gap 6 → 14 px.
+- BL-33's no-scroll guarantee, BL-34's `[prev][intensity][crayons…][next]`
+  ordering and the column's measured fit are all unchanged.
+- Affected: `palette_child.gd`, `palette_child.tscn`.
+
+### BL-46: Start over is a soap wash, not a flash — `done` (2026-08-08)
+Playtest feedback 2026-08-08: BL-29's `FreshSheetWipe` was "basic and a bit of
+a flash blind". Deleted, replaced by `PageWash` + `page_wash.gdshader` — one
+quad over the page rect, one `progress` uniform, three acts: a foam front
+sweeps across leaning down the page (2-octave value noise wobble, suds thrown
+ahead of the front), full cover of paper-coloured suds with two bubble layers
+drifting and catching an iridescent cosine-palette rim, then the film tears —
+a rising rotated-fbm field crosses a narrow threshold with the bubbles' body
+subtracted so the holes come out round, and the popping bubbles light up.
+Max brightness is the paper colour — **no flash uniform exists**.
+- **Data flow untouched (BL-18):** `restart_current_page()` still bumps the
+  generation, clears, rebuilds coverage and pushes the recorded erase;
+  `_play_page_wash()` is the last line and nothing awaits it.
+- Gotcha with teeth: the old sheet covered `_page_view.get_global_rect()` — the
+  whole canvas slab. Opaque that looked fine; broken into holes it becomes a
+  page of black polka dots. `_washable_rect()` maps the page's own corners
+  through `to_viewport_position()` intersected with the view, so every hole
+  shows paper and pan/zoom is handled for free.
+- Shader rules learned: axis-aligned value noise tears into rectangles — the
+  break-up octaves must be rotated and the bubble body must bias the threshold
+  or the holes are square; `TAU` is a Godot shader built-in (redeclaring is a
+  compile error); `progress`-guarded branches on a uniform are coherent and
+  genuinely skip the unused noise fields.
+- Reduced motion / low-end rides BL-38's existing `effect_animation_enabled`
+  lever: 0.34 s of one paper film easing away, sparkle burst skipped — worst
+  case is a quick fade, never a flash.
+- The paint does not visibly dissolve under the suds (a paint-layer snapshot
+  costs a ~530 ms blocking readback or an unordered second SubViewport); the
+  picture vanishes on frame 0 and the sweep covers it, exactly as BL-29 did.
+- No smoke covers the effects layer (BL-29 never had one either) — worth adding.
+- Affected: `page_wash.gdshader` (new), `page_wash.gd` (new),
+  `fresh_sheet_wipe.gd` (deleted), `coloring_page.gd`, DESIGN.md, the BL-29
+  archive note above.

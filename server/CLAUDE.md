@@ -1208,7 +1208,7 @@ of them at once, which is how a sticker sheet is actually reviewed. The grid put
 checkerboard behind each image so a sticker with no transparency reads as the
 mistake it is.
 
-## BL-38 — the authoring screens restructured, plus covers and animated stickers
+## BL-39/BL-40/BL-41 — the authoring screens restructured, plus covers and animated stickers
 
 Design §7.2 (the two manifest additions), §10.3/§10.4 (authoring), §11's route
 tables. No new work package: this is BL-24 and BL-37's surface rearranged around
@@ -1249,7 +1249,7 @@ modified, because everything in the workspace is unpublished.
 `authored_books.cover_asset_id`, nullable. `PublishAuthoredBook` ships it as
 `books/<book_uid>/cover.png` and names it as **both** the pack `cover` and the
 book `cover`; with no cover both stay page one's display art, byte for byte the
-pre-BL-38 manifest. The upload rides `PATCH /admin/books/{book}` as multipart
+pre-BL-40 manifest. The upload rides `PATCH /admin/books/{book}` as multipart
 `cover` / `cover_asset_ulid`, cleared by `remove_cover` — the `remove_mask` rule,
 one level up, and for the same reason.
 
@@ -1267,7 +1267,7 @@ nothing saying why.
 validator, all through it. Three things that are easy to get wrong:
 
 - **A still sticker has no `anim` key.** Not `null`, not `{}`. Every sticker
-  published before BL-38 looks like that and so does every client reading them.
+  published before BL-41 looks like that and so does every client reading them.
   `PublishAuthoredStickerSet` only adds the key when the row has one.
 - **`frames` may be fewer than `hframes * vframes`.** Seven frames on a 4×2 sheet
   is normal. The admin preview therefore counts frames in a timer rather than
@@ -1403,7 +1403,7 @@ through the real `PublishPackDirectory` as an unpublished draft.
 | `AccountDeletionTest` | Wrong password deletes nothing; the right one hard-deletes the household, its paint blobs included, and nobody else's. |
 | `PicturesTest` | A contested page is listed under the right shelf; restore swaps the two versions on disk and in the database; twice puts it back. |
 | `AdminTest` | Non-admin: no sidebar entry and a 404. Admin: pack list, create a draft, publish a version, grant a promo entitlement, unknown email is a field error. |
-| `AuthoringTest` | WP14: non-admin sees no Books entry and gets a 404; the book list, creating a book (one-book draft pack, slug = uid), the page editor rendering the region overlay, a giant region saying "a line has a gap", one-button publish, and the button disabled on a book that cannot publish. BL-38 moved creation into a dialog behind `[data-test="create-book"]` and added the delete-confirm modal, cancel included. |
+| `AuthoringTest` | WP14: non-admin sees no Books entry and gets a 404; the book list, creating a book (one-book draft pack, slug = uid), the page editor rendering the region overlay, a giant region saying "a line has a gap", one-button publish, and the button disabled on a book that cannot publish. BL-39 moved creation into a dialog behind `[data-test="create-book"]` and added the delete-confirm modal, cancel included. |
 
 `AuthoringTest` seeds pages **already mapped** (`SeedsBrowserFixtures::seedAuthoredBook()`).
 The mapping job shells out inside the `php artisan serve` process, which has no

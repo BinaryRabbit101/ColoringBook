@@ -72,3 +72,16 @@ Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md
 - **BL-32** — Web HTTPRequest "hang on Edge 151" — resolved as environmental:
   real browsers are fine; the hang only exists under the claude-in-chrome
   automation extension
+- **BL-39** — Admin authoring screens restructured (list + editor pages, confirm
+  modals, modified/last-published columns)
+- **BL-40** — Artist book covers (manifest `cover`; shelf grid + open/close
+  animation wear it, page 1 stays the fallback)
+- **BL-41** — Animated stickers (sprite-sheet PNG + manifest
+  `anim {hframes, vframes, frames, fps}`; absence = still)
+- **BL-42** — Stickers peel off the canvas (tap → badge → peel; first-class
+  history entry, sync-safe)
+- **BL-43** — Bookshelf grid fills from the top-left
+- **BL-44** — Shop tabs: coloring books | sticker sets
+- **BL-45** — Palette: cycle bar un-stacked from the intensity tile (bottom-row
+  tool band was vertical)
+- **BL-46** — Start over is a soap-wash shader (`PageWash`), not a flash
