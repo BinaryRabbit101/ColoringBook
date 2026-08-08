@@ -228,6 +228,45 @@ func _check_boot_and_navigation() -> void:
 	_expect(cell != null, "one of them is the test book")
 	if cell == null:
 		return
+
+	# BL-40: the grid fills from the TOP LEFT. Measured against the shelf's own rect
+	# rather than a constant, and against the SECOND cell rather than a column count,
+	# so the check says "the first book is in the corner and the next one is to its
+	# right" without caring how many columns the window happened to fit.
+	await _settle_layout()
+	var first_cell: BookCell = cells[0]
+	var shelf_left := shelf.global_position.x
+	_expect(first_cell.global_position.x - shelf_left < shelf.size.x * 0.5,
+		"the first book sits in the shelf's LEFT half, not centred (%.0f px in of %.0f)"
+		% [first_cell.global_position.x - shelf_left, shelf.size.x])
+	if cells.size() > 1:
+		_expect(cells[1].global_position.x > first_cell.global_position.x
+				and is_equal_approx(cells[1].global_position.y, first_cell.global_position.y),
+			"...and the next one fills to its RIGHT, on the same row")
+
+	# BL-42: an artist's cover fills the front of the book; page 1 standing in for
+	# one keeps its framed plate. Driven off a book built here, because no res://
+	# book authors a cover -- the shipped ones all fall back.
+	_expect(not cell.has_artist_cover() and cell.has_cover(),
+		"a book with no cover of its own shows page 1 on a framed plate")
+	var covered := BookDef.new()
+	covered.book_uid = "shell-cover-2026"
+	covered.display_name = "Covered"
+	covered.pages = _book.pages
+	covered.cover_image_path = load(
+		"res://resources/books/coyote/book.tres").get_page(0).display_image_path
+	_expect(covered.has_artist_cover(),
+		"a book whose cover is NOT page 1 has an artist cover")
+	var probe := BookCell.new()
+	probe.set_book(covered)
+	_expect(probe.has_artist_cover() and probe.has_cover(),
+		"...and the cell draws it as the book's front")
+	probe.set_book(_book)
+	_expect(not probe.has_artist_cover(),
+		"...and swaps back to the plate for a book without one")
+	probe.free()
+	_expect(not _main.get_book_transition().has_cover_art(),
+		"the book-open animation carries no cover art until a covered book is opened")
 	cell.pressed.emit()
 	var reached_page := await _wait_for_screen(Main.SCREEN_COLORING)
 	_expect(reached_page, "picking the book opens the coloring page (%s)" % _main.get_current_screen_id())

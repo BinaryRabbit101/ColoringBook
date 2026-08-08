@@ -30,6 +30,11 @@ const DLC_ROOT := "user://dlc"
 ## manifest's [code]books[][/code] array (DLC_SERVER.md 7.2), so an installed tree
 ## is self-describing and can be hand-seeded for development.
 const BOOK_JSON_NAME := "book.json"
+## The installed pack's manifest. The GAME does not read this file -- that is the
+## installer's job and [BookDef] reads [code]book.json[/code] -- with exactly one
+## exception since BL-42: the pack-level [code]cover[/code], which is the only
+## thing a manifest says that no book.json repeats.
+const PACK_MANIFEST_NAME := "manifest.json"
 ## Accepted book file names inside a book directory, in probe order. The second
 ## entry covers exported builds, where "Convert text resources to binary" can
 ## rewrite an authored .tres as a .res next to it.
@@ -54,10 +59,16 @@ const IGNORED_PACK_SUFFIXES: PackedStringArray = [".incoming", ".tmp", ".partial
 ## Book title as the player sees it.
 @export var display_name: String = ""
 
-## Cover art. Leave empty to use page 1's display image, which is what every book
-## does so far -- a page's own visible art is a perfectly good cover and avoids
-## shipping a second copy of the same drawing. (Page 1's DISPLAY image: a page's
-## optional masking image is never shown, cover included.)
+## Cover art. Leave empty to use page 1's display image, which is what a book with
+## no artist-drawn cover does -- a page's own visible art is a perfectly good cover
+## and avoids shipping a second copy of the same drawing. (Page 1's DISPLAY image:
+## a page's optional masking image is never shown, cover included.)
+##
+## [b]An ARTIST-SUPPLIED cover is a different thing[/b] (BL-42) and
+## [method has_artist_cover] is how the shelf and the book-open animation tell them
+## apart: a real cover is painted to BE a cover, so it fills the front of the book
+## and is what swings open, while the page-1 fallback stays a framed plate on a
+## coloured cover because line art on white does not read as one.
 @export_file("*.png") var cover_image_path: String = ""
 
 ## The pages, in the order they are coloured. Index 0 is page 1.
@@ -121,6 +132,33 @@ func get_cover_path() -> String:
 
 func get_cover_texture() -> Texture2D:
 	return PageDef.load_texture(get_cover_path(), is_runtime)
+
+
+## True when this book has a cover an ARTIST drew, rather than page 1 standing in
+## for one (BL-42).
+##
+## [b]The test is "it is not page 1", not "the field is set"[/b], and that is
+## deliberate. A pack manifest has always been allowed to name a cover, and the
+## server has always filled that field in with the first page's display image --
+## so an occupied [member cover_image_path] proves nothing on its own. Comparing it
+## with page 1 answers the question that actually matters ("is there a second,
+## different picture to show?") and it answers it the same way for an authored
+## [code].tres[/code] book, for a pack written before covers existed, and for one
+## written after.
+func has_artist_cover() -> bool:
+	var cover := cover_image_path.strip_edges()
+	if cover == "":
+		return false
+	var first := get_page(0)
+	if first != null and first.display_image_path == cover:
+		return false
+	return PageDef.file_exists(cover, is_runtime)
+
+
+## The artist's cover, or null when page 1 is standing in for one. Callers that
+## want a picture whatever happens use [method get_cover_texture].
+func get_artist_cover_texture() -> Texture2D:
+	return PageDef.load_texture(cover_image_path, is_runtime) if has_artist_cover() else null
 
 
 # ================================================================== discovery ==
@@ -231,6 +269,7 @@ static func discover_runtime(dlc_root: String = DLC_ROOT) -> Array[BookDef]:
 		var books_dir := pack_root.path_join("books")
 		if not DirAccess.dir_exists_absolute(books_dir):
 			continue
+		var pack_cover := _pack_cover(pack_root)
 		var book_names := Array(DirAccess.get_directories_at(books_dir))
 		book_names.sort()
 		for book_name: String in book_names:
@@ -242,8 +281,36 @@ static func discover_runtime(dlc_root: String = DLC_ROOT) -> Array[BookDef]:
 			if book == null:
 				continue
 			book.pack_slug = pack_name
+			# BL-42: a pack may carry its cover at the MANIFEST level rather than per
+			# book (7.2 has had a pack-level `cover` since the first manifest). A book
+			# that named its own real cover keeps it; one that fell back to page 1
+			# takes the pack's, which is how a single-book pack's artwork reaches the
+			# shelf whichever of the two places the publisher put it.
+			if pack_cover != "" and not book.has_artist_cover():
+				book.cover_image_path = pack_cover
 			books.append(book)
 	return books
+
+
+## The pack-level [code]cover[/code] of the manifest in [param pack_root], resolved
+## to an absolute path -- or "" when there is none, the manifest is unreadable, or
+## the file it names is not there.
+##
+## Read once per pack rather than once per book, and never fatal: a pack with no
+## manifest still installs its books, exactly as it did before covers existed.
+static func _pack_cover(pack_root: String) -> String:
+	var manifest_path := pack_root.path_join(PACK_MANIFEST_NAME)
+	if not FileAccess.file_exists(manifest_path):
+		return ""
+	var json := JSON.new()
+	if json.parse(FileAccess.get_file_as_string(manifest_path)) != OK \
+			or typeof(json.data) != TYPE_DICTIONARY:
+		return ""
+	var named := String((json.data as Dictionary).get("cover", "")).strip_edges()
+	if named == "":
+		return ""
+	var resolved := PageDef.resolve_pack_path(named, pack_root, pack_root)
+	return resolved if PageDef.file_exists(resolved, true) else ""
 
 
 ## True for a directory a download is still writing into, or a hidden one.

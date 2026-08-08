@@ -1130,7 +1130,9 @@ func _check_stickers(screen: ColoringPage) -> void:
 	var depth_after_stroke := screen.undo_depth()
 	palette.set_sticker_set(0)
 	await _settle_layout()
-	page_view.begin_stroke(Vector2(300.5, 300.5))
+	# Well clear of the first sticker: since BL-39 a tap ON one CHOOSES it rather
+	# than placing a second one over it, and this check is about the timeline.
+	page_view.begin_stroke(_clear_of(layer, Vector2(300.5, 300.5)))
 	await _settle_layout()
 	_expect(layer.count() == 2
 			and screen.undo_depth() == mini(depth_after_stroke + 1, ColoringPage.UNDO_DEPTH),
@@ -1154,17 +1156,125 @@ func _check_stickers(screen: ColoringPage) -> void:
 	screen.set_page_locked(true)
 	_expect(not screen.can_place_sticker(),
 		"a locked page will not take a sticker")
-	page_view.begin_stroke(Vector2(420.5, 420.5))
+	_expect(not screen.can_peel_sticker(),
+		"...and will not let one be peeled off either (BL-39)")
+	var locked_spot := _clear_of(layer, Vector2(420.5, 420.5))
+	page_view.begin_stroke(locked_spot)
 	await _settle_layout()
 	_expect(layer.count() == 1, "...and a tap on it places nothing (%d)" % layer.count())
 	screen.set_page_locked(false)
-	page_view.begin_stroke(Vector2(420.5, 420.5))
+	page_view.begin_stroke(locked_spot)
 	await _settle_layout()
 	_expect(layer.count() == 2, "unlocking gives sticker placement back (%d)" % layer.count())
 	# ...and a tap in the MARGIN, off the page image, is not a placement either.
 	page_view.begin_stroke(Vector2(-40.0, -40.0))
 	await _settle_layout()
 	_expect(layer.count() == 2, "a tap off the page edge places nothing (%d)" % layer.count())
+
+	# --- BL-39: a sticker can be taken back off ------------------------------
+	# Two taps, both through the same paint_blocked path a placement uses: one on
+	# the sticker (which chooses it) and one on the badge that appears (which peels
+	# it). Nothing here is a second input path and nothing here is a mode.
+	var peeled: Array[Dictionary] = []
+	screen.sticker_peeled.connect(func(p: Dictionary) -> void: peeled.append(p))
+	var before_peel: Array[Dictionary] = layer.get_placements()
+	_expect(screen.get_selected_page_sticker() == -1,
+		"nothing on the page is chosen to start with")
+	_expect(not layer.peel_badge_hit(StickerLayer.placement_position(before_peel[0])),
+		"...so there is no peel badge to hit: one tap can never delete a sticker")
+
+	page_view.begin_stroke(StickerLayer.placement_position(before_peel[0]))
+	await _settle_layout()
+	_expect(screen.get_selected_page_sticker() == 0 and layer.count() == 2,
+		"a tap ON a sticker CHOOSES it rather than placing another (%d chosen, %d on the page)"
+		% [screen.get_selected_page_sticker(), layer.count()])
+	await _screenshot("sticker_peel_badge.png")
+	var badge := layer.peel_badge_position(before_peel[0])
+	_expect(layer.peel_badge_hit(badge)
+			and layer.peel_badge_radius(float(before_peel[0][StickerLayer.KEY_SIZE])) >= 36.0,
+		"...and grows a peel badge big enough to aim at (%.0f px across)"
+		% (layer.peel_badge_radius(float(before_peel[0][StickerLayer.KEY_SIZE])) * 2.0))
+
+	page_view.begin_stroke(badge)
+	await _settle_layout()
+	_expect(layer.count() == 1 and peeled.size() == 1,
+		"a tap on the badge peels that sticker off (%d left)" % layer.count())
+	_expect(layer.get_placements()[0] == before_peel[1],
+		"...the one it was pointing at, leaving the other exactly where it was")
+	_expect(screen.get_selected_page_sticker() == -1,
+		"...and nothing is chosen afterwards, so the badge cannot be hit twice")
+	_expect(GameState.get_page_stickers(book_key, page_index).size() == 1,
+		"...written straight to the save, like a placement (%d)"
+		% GameState.get_page_stickers(book_key, page_index).size())
+
+	_expect(await screen.undo(), "a peel is an undoable entry on the SAME timeline")
+	await _settle_layout()
+	_expect(layer.get_placements() == before_peel,
+		"...and undo puts it back where it was, under the sticker stuck down after it")
+	_expect(GameState.get_page_stickers(book_key, page_index).size() == 2,
+		"...in the save as well")
+	_expect(await screen.redo(), "redo accepted")
+	await _settle_layout()
+	_expect(layer.count() == 1 and layer.get_placements()[0] == before_peel[1],
+		"...and redo takes it off again, byte for byte the same page")
+
+	# A second tap on the sticker the player has already chosen means "no, put one
+	# HERE" -- so no spot on the page is unreachable by the primary action.
+	var survivor: Dictionary = layer.get_placements()[0]
+	page_view.begin_stroke(StickerLayer.placement_position(survivor))
+	await _settle_layout()
+	_expect(screen.get_selected_page_sticker() == 0 and layer.count() == 1,
+		"tapping the last sticker chooses it")
+	page_view.begin_stroke(StickerLayer.placement_position(survivor))
+	await _settle_layout()
+	_expect(layer.count() == 2 and screen.get_selected_page_sticker() == -1,
+		"...and tapping it AGAIN sticks a new one down on top of it (%d)" % layer.count())
+	_expect(await screen.undo(), "undoing that placement")
+	await _settle_layout()
+
+	# --- BL-43: an animated sticker is a sprite sheet ------------------------
+	# Driven straight at the layer with a fabricated sheet, because the shipped
+	# fixture set is all still art: what is under test is the RENDER path, which has
+	# to work for a texture loaded at runtime out of a downloaded pack.
+	_expect(StickerLayer.sheet_spec(1, 1, 0, 12.0).is_empty(),
+		"a 1x1 grid is not an animation: every sticker authored before BL-43 stays still")
+	var spec := StickerLayer.sheet_spec(2, 2, 4, 10.0)
+	_expect(int(spec.get(StickerLayer.SHEET_FRAMES, 0)) == 4
+			and is_equal_approx(float(spec.get(StickerLayer.SHEET_FPS, 0.0)), 10.0),
+		"...and a 2x2 one is: %d frames at %.0f fps" % [
+			spec.get(StickerLayer.SHEET_FRAMES, 0), spec.get(StickerLayer.SHEET_FPS, 0.0)])
+	var sheet_sticker: StickerDef = palette.get_sticker_set().get_sticker(0)
+	var sheet_texture := sheet_sticker.load_texture()
+	var still_art: Sprite2D = layer.get_sprite(0).get_node("Art")
+	var still_size: Vector2 = still_art.get_rect().size
+	layer.push(
+		StickerLayer.make_placement("anim-set", "anim", Vector2(512.0, 512.0), 0.0),
+		sheet_texture, false, spec
+	)
+	await _settle_layout()
+	var anim_art: Sprite2D = layer.get_sprite(layer.count() - 1).get_node("Art")
+	var anim_shadow: Sprite2D = layer.get_sprite(layer.count() - 1).get_node("Shadow")
+	_expect(anim_art.hframes == 2 and anim_art.vframes == 2,
+		"an animated sticker is drawn through Sprite2D's own frames (%dx%d)"
+		% [anim_art.hframes, anim_art.vframes])
+	_expect(anim_art.get_rect().size == still_size * 0.5,
+		"...one FRAME of the sheet, at half the still sticker's source size (%s)"
+		% [anim_art.get_rect().size])
+	var anim_drawn := anim_art.get_rect().size.x * layer.get_sprite(layer.count() - 1).scale.x
+	_expect(is_equal_approx(anim_drawn, layer.sticker_pixels(StickerLayer.DEFAULT_SIZE_RATIO)),
+		"...scaled to the SAME drawn size a still sticker gets (%.0f px), so publishing a set"
+		% anim_drawn + " as animated moves nothing a child already stuck down")
+	var first_frame := anim_art.frame
+	await get_tree().create_timer(0.25).timeout
+	_expect(anim_art.frame != first_frame and anim_art.frame == anim_shadow.frame,
+		"...and it steps its frames, shadow and art together (%d -> %d)"
+		% [first_frame, anim_art.frame])
+	var anim_placement: Dictionary = layer.get_placements()[layer.count() - 1]
+	_expect(anim_placement.size() == before_peel[0].size(),
+		"...recorded as the same five numbers and two ids a still sticker is (%d keys)"
+		% anim_placement.size())
+	layer.remove_at(layer.count() - 1)
+	await _settle_layout()
 
 	# --- the save round-trips -------------------------------------------------
 	var on_page: Array[Dictionary] = layer.get_placements()
@@ -1200,6 +1310,40 @@ func _check_stickers(screen: ColoringPage) -> void:
 		"...and clears them from the save too")
 	_expect(not screen.is_sticker_mode() and page_view.painting_enabled,
 		"...leaving the page painting again")
+
+
+## A page position near [param preferred] that no sticker is sitting on.
+##
+## Since BL-39 a tap that lands on a sticker CHOOSES it instead of placing another,
+## so every check that is about placement has to aim at clear paper. Searched
+## rather than hardcoded: the sticker size is a fraction of the page, so a constant
+## that is clear today stops being clear the moment a page is re-authored bigger.
+##
+## [b]Clear by a MARGIN, not merely by [method StickerLayer.sticker_at].[/b] A
+## placement's tilt is random, and a point that misses a sticker's tilted box by a
+## pixel this run is inside it the next -- which made this harness flake before the
+## margin went in. A whole sticker's width of clearance is deterministic whatever
+## the tilt rolls.
+static func _clear_of(layer: StickerLayer, preferred: Vector2) -> Vector2:
+	var margin := layer.sticker_pixels(StickerLayer.DEFAULT_SIZE_RATIO)
+	if _is_clear(layer, preferred, margin):
+		return preferred
+	var page := Vector2(layer.get_page_size())
+	for step in 64:
+		var candidate := Vector2(
+			page.x * (0.08 + fmod(float(step) * 0.17, 0.84)),
+			page.y * (0.08 + fmod(float(step) * 0.29, 0.84))
+		)
+		if _is_clear(layer, candidate, margin):
+			return candidate
+	return preferred
+
+
+static func _is_clear(layer: StickerLayer, point: Vector2, margin: float) -> bool:
+	for placement in layer.get_placements():
+		if point.distance_to(StickerLayer.placement_position(placement)) < margin:
+			return false
+	return true
 
 
 ## One pixel of the paint layer. The blocking readback is deliberate here -- this is

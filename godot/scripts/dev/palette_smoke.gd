@@ -933,6 +933,28 @@ func _check_sticker_ring() -> void:
 	_expect(not _palette.get_intensity_button().visible,
 		"the intensity swap is not offered -- a sticker has no light-to-dark ladder")
 
+	# --- BL-43: an animated card plays, a still one costs nothing -------------
+	var animated := 0
+	var processing_still := 0
+	for card in cards:
+		if card.is_animated():
+			animated += 1
+		elif card.is_processing():
+			processing_still += 1
+	_expect(animated == 0 and processing_still == 0,
+		"the starter set is all still art, and not one card is processing for it")
+	var sheeted: StickerButton = cards[0]
+	sheeted.sheet = StickerLayer.sheet_spec(2, 2, 4, 8.0)
+	_expect(sheeted.is_animated() and sheeted.is_processing()
+			and sheeted.current_frame() == 0,
+		"handing a card a sprite sheet starts it playing, from frame 0")
+	await get_tree().create_timer(0.3).timeout
+	_expect(sheeted.current_frame() != 0,
+		"...and it steps (frame %d of 4, at 8 fps)" % sheeted.current_frame())
+	sheeted.sheet = {}
+	_expect(not sheeted.is_animated() and not sheeted.is_processing(),
+		"...and taking the sheet away stops it dead")
+
 	# --- picking one ----------------------------------------------------------
 	cards[2].pressed.emit()
 	_expect(picks.size() == 2 and picks[-1] != null and picks[-1].sticker_id == ids[2],

@@ -203,6 +203,13 @@ signal page_restarted(page_index: int)
 ## [StickerLayer] dictionary that went into the history and the save. Tests wait on
 ## this; the game ignores it.
 signal sticker_placed(placement: Dictionary)
+## A sticker was peeled off the page by the player (BL-39) -- never by an undo,
+## which reports through [signal history_applied] like every other undo does.
+## Tests wait on this; the game ignores it.
+signal sticker_peeled(placement: Dictionary)
+## The player chose a sticker already on the page, or let go of one (BL-39).
+## [param index] is its position in the layer's list, or -1 for "nothing chosen".
+signal sticker_selection_changed(index: int)
 ## The palette turned the strip into stickers, or back into crayons (BL-36).
 signal sticker_mode_changed(active: bool)
 
@@ -253,8 +260,15 @@ const MAX_REPLAY_WAIT_FRAMES := 240
 const HISTORY_KIND := "kind"
 const HISTORY_STROKE := "stroke"
 const HISTORY_STICKER := "sticker"
+## BL-39: a sticker the player PEELED OFF. Its own kind, not a negative placement,
+## because undoing it has to put the sticker back WHERE IT WAS -- so the entry
+## carries an index as well as the placement, and [constant HISTORY_STICKER]'s
+## "the last one on the layer is always the right one" rule is left exactly as it
+## was rather than being weakened to cover two opposite operations.
+const HISTORY_STICKER_PEELED := "sticker_peeled"
 const HISTORY_RECIPE := "recipe"
 const HISTORY_PLACEMENT := "placement"
+const HISTORY_INDEX := "index"
 
 # --- BL-29 feedback ---------------------------------------------------------
 # Referenced through preloads rather than by global class name: a new class_name
@@ -1113,10 +1127,43 @@ func _on_paint_blocked(page_position: Vector2) -> void:
 			_lock_button.wiggle()
 		return
 	if _sticker_mode:
-		place_sticker_at(page_position)
+		_sticker_tap(page_position)
 		return
 	if is_instance_valid(_lock_button):
 		_lock_button.wiggle()
+
+
+## What ONE tap in sticker mode means (BL-36's placement, widened by BL-39's peel).
+##
+## [b]Three answers, in this order, and the order is the design:[/b]
+## [codeblock]
+## on the chosen sticker's badge   -> peel it off
+## on a sticker not yet chosen     -> choose it: it wiggles and grows the badge
+## anywhere else                   -> let go, and stick a new sticker down
+## [/codeblock]
+## Nothing here is a mode, a long press or a drag: the youngest player has one
+## gesture, and every one of these is that gesture. The badge is what makes peeling
+## take TWO taps -- the same "never one tap away" rule the pack shop's download
+## confirm and the settings panel's erase confirm are built on.
+##
+## [b]"Anywhere else" deliberately includes the sticker that IS chosen.[/b] The
+## first tap on a sticker is a question ("this one?"); tapping it again answers
+## "no, I meant to put one here", so a sticker can still be stuck down on top of
+## another one -- which children do constantly -- and no place on the page is ever
+## unreachable by the primary action.
+func _sticker_tap(page_position: Vector2) -> void:
+	var layer := get_sticker_layer()
+	if layer == null:
+		return
+	if layer.peel_badge_hit(page_position):
+		peel_sticker_at(layer.get_selected_index())
+		return
+	var hit := layer.sticker_at(page_position)
+	if hit >= 0 and hit != layer.get_selected_index():
+		_select_sticker_on_page(hit)
+		return
+	_select_sticker_on_page(-1)
+	place_sticker_at(page_position)
 
 
 ## True while the open page carries the coloring lock.
@@ -1161,6 +1208,9 @@ func _on_sticker_mode_changed(active: bool) -> void:
 	_sticker_mode = active
 	if not active:
 		_selected_sticker = null
+		# BL-39: the peel badge is a sticker-mode affordance. Cycling back to the
+		# crayons puts it away, or a tap meant for paint would land on it.
+		_select_sticker_on_page(-1)
 	_apply_painting_gate()
 	sticker_mode_changed.emit(active)
 
@@ -1225,7 +1275,9 @@ func place_sticker_at(page_position: Vector2) -> bool:
 		page_position,
 		StickerLayer.random_tilt()
 	)
-	get_sticker_layer().push(placement, _selected_sticker.load_texture(), true)
+	get_sticker_layer().push(
+		placement, _selected_sticker.load_texture(), true, _selected_sticker.sheet()
+	)
 	_push_history({HISTORY_KIND: HISTORY_STICKER, HISTORY_PLACEMENT: placement})
 	_persist_stickers()
 	_refresh_nav()
@@ -1233,30 +1285,117 @@ func place_sticker_at(page_position: Vector2) -> bool:
 	return true
 
 
-## Undo/redo of a sticker entry. No rebuild, no readback, no coverage: peeling a
-## sticker off changes no paint pixel, so the expensive half of
-## [method _apply_history] is not just skipped, it would be wrong to run.
+# ------------------------------------------------------------- peeling (BL-39) --
+# A sticker a child stuck down in the wrong place has to come off, and undo is not
+# the answer on its own: undo takes back the LAST thing, and the sticker they are
+# unhappy with is often three stickers and a stroke ago.
+#
+# [b]It is a recorded change, not a rollback.[/b] A peel is its own entry on the
+# same BL-17 timeline as a stroke and a placement, and it writes the page's sticker
+# list the instant it happens -- exactly like a placement, through the same one
+# method. Nothing anywhere holds a "stickers this page used to have": the list in
+# the save IS the page's stickers, so a sticker removed is a sticker gone from the
+# next read, the next session, and the next device. (The sync protocol never
+# carried sticker placements at all -- §6.3 merges statuses, cursors and paint --
+# so there is no merge that could put one back; what a merge CAN do is erase, and
+# BL-18's two erase paths already take the stickers with them.)
+
+
+## Which sticker on the page the player has chosen, or -1. Chosen is not removed:
+## it wiggles and wears a peel badge, and the badge is what removes it.
+func get_selected_page_sticker() -> int:
+	var layer := get_sticker_layer()
+	return layer.get_selected_index() if layer != null else -1
+
+
+## Chooses (or lets go of) the sticker at [param index] on the page.
+func _select_sticker_on_page(index: int) -> void:
+	var layer := get_sticker_layer()
+	if layer == null or layer.get_selected_index() == index:
+		return
+	layer.select(index)
+	sticker_selection_changed.emit(layer.get_selected_index())
+
+
+## Whether a sticker could be peeled off right now. The same interlocks as a
+## placement, minus "there is a sticker in hand" -- taking one off needs nothing in
+## the other hand.
+func can_peel_sticker() -> bool:
+	return _sticker_mode and _can_edit_history() and get_sticker_layer() != null
+
+
+## Peels the sticker at [param index] off the page. Returns false when it was
+## refused (the page locked, a stroke or a transition in flight, no such sticker).
+func peel_sticker_at(index: int) -> bool:
+	if not can_peel_sticker():
+		return false
+	var layer := get_sticker_layer()
+	var placement := layer.get_placement(index)
+	if placement.is_empty():
+		return false
+	layer.remove_at(index)
+	_push_history({
+		HISTORY_KIND: HISTORY_STICKER_PEELED,
+		HISTORY_PLACEMENT: placement,
+		HISTORY_INDEX: index,
+	})
+	_persist_stickers()
+	_refresh_nav()
+	sticker_selection_changed.emit(layer.get_selected_index())
+	sticker_peeled.emit(placement)
+	return true
+
+
+## Undo/redo of a sticker entry, of either kind. No rebuild, no readback, no
+## coverage: putting a sticker down or taking one off changes no paint pixel, so
+## the expensive half of [method _apply_history] is not just skipped, it would be
+## wrong to run.
+##
+## [b]The two kinds are exact mirrors, which is what keeps the timeline sound.[/b]
+## Undoing a PLACEMENT pops the last sticker, and the last one is always the right
+## one: every entry after it has already been undone, so the layer is in exactly
+## the state it was in the instant that placement landed -- when the sticker was on
+## top. Undoing a PEEL puts its sticker back at the index it came off, which
+## restores that same "as it was" state for the entry below it. Redo replays
+## forward from there, so undo -> redo round-trips the drawing exactly.
 func _apply_sticker_history(undone: bool, entry: Dictionary) -> bool:
 	var layer := get_sticker_layer()
 	if layer == null:
 		return false
 	var placement: Dictionary = entry.get(HISTORY_PLACEMENT, {})
-	if undone:
-		# Always the LAST one on the layer: only a placement grows that list, so the
-		# newest sticker entry in the timeline is by construction the newest sticker
-		# on the page (see [method StickerLayer.pop]).
-		layer.pop()
-	else:
-		var sticker := _resolve_sticker(
-			String(placement.get(StickerLayer.KEY_SET, "")),
-			String(placement.get(StickerLayer.KEY_STICKER, ""))
-		)
-		if sticker == null:
+	var peeled := String(entry.get(HISTORY_KIND, "")) == HISTORY_STICKER_PEELED
+	# Taking back a peel PUTS ONE BACK, and taking back a placement takes one off.
+	if undone == peeled:
+		if not _restore_placement(layer, placement, int(entry.get(HISTORY_INDEX, -1))):
 			return false
-		layer.push(placement, sticker.load_texture(), true)
+	elif peeled:
+		layer.remove_at(int(entry.get(HISTORY_INDEX, -1)))
+	else:
+		layer.pop()
 	_persist_stickers()
 	_refresh_nav()
+	sticker_selection_changed.emit(layer.get_selected_index())
 	history_applied.emit(undone)
+	return true
+
+
+## Puts [param placement] back on [param layer] at [param index] (-1 appends).
+## False when the set it names is not installed any more, which is the one way a
+## history entry can become unplayable between two taps.
+func _restore_placement(layer: StickerLayer, placement: Dictionary, index: int) -> bool:
+	var sticker := _resolve_sticker(
+		String(placement.get(StickerLayer.KEY_SET, "")),
+		String(placement.get(StickerLayer.KEY_STICKER, ""))
+	)
+	if sticker == null:
+		return false
+	layer.insert(
+		layer.count() if index < 0 else index,
+		placement,
+		sticker.load_texture(),
+		true,
+		sticker.sheet()
+	)
 	return true
 
 
@@ -1291,7 +1430,7 @@ func _restore_stickers(page_index: int) -> void:
 			# One sticker goes missing; the page, the save and every other sticker on
 			# it are untouched.
 			continue
-		layer.push(placement, sticker.load_texture(), false)
+		layer.push(placement, sticker.load_texture(), false, sticker.sheet())
 
 
 ## "Set X, sticker Y" -> the [StickerDef], through the palette's discovered sets.
@@ -1425,7 +1564,7 @@ func _on_redo_pressed() -> void:
 ## away means the page has to be drawn again from the baseline, while putting one
 ## back is just that one stroke, stamped on top of what is already there.
 func _apply_history(undone: bool, entry: Dictionary) -> bool:
-	if String(entry.get(HISTORY_KIND, "")) == HISTORY_STICKER:
+	if String(entry.get(HISTORY_KIND, "")) in [HISTORY_STICKER, HISTORY_STICKER_PEELED]:
 		return _apply_sticker_history(undone, entry)
 	_replaying = true
 	# The BL-7 guard: a coverage readback already in flight was taken from paint we

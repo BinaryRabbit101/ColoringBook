@@ -224,6 +224,10 @@ class BookOpenTransition extends Control:
 	var _cover_style := StyleBoxFlat.new()
 	var _page_style := StyleBoxFlat.new()
 	var _doodle_colors := PackedColorArray()
+	## The artist's cover of the book being opened, or null (BL-42). When there is
+	## one it is PRINTED ON the cover -- both phases -- and the crayon doodle stands
+	## down, because a doodle over somebody's artwork is vandalism.
+	var _cover_art: Texture2D = null
 
 	func _init() -> void:
 		visible = false
@@ -241,6 +245,16 @@ class BookOpenTransition extends Control:
 	func set_doodle_colors(colors: PackedColorArray) -> void:
 		_doodle_colors = colors
 		queue_redraw()
+
+	## The cover art of the book about to open (BL-42), or null for the generic
+	## crayon-doodle cover. Injected per transition -- this class is still handed a
+	## picture rather than a shelf cell, so it stays coupled to nothing.
+	func set_cover_art(texture: Texture2D) -> void:
+		_cover_art = texture
+		queue_redraw()
+
+	func has_cover_art() -> bool:
+		return _cover_art != null
 
 	func begin(closed: float, opened: float) -> void:
 		closed_amount = closed
@@ -294,6 +308,7 @@ class BookOpenTransition extends Control:
 		_cover_style.set_corner_radius_all(int(CORNER_RADIUS * object_ness))
 		_cover_style.shadow_size = int(SHADOW_SIZE * object_ness)
 		_cover_style.draw(get_canvas_item(), rect)
+		_draw_cover_art(rect, 1.0)
 		_draw_spine(rect.position.x, rect.size.y * 0.5 + rect.position.y, rect.size,
 			CORNER_RADIUS * object_ness, SPINE)
 		_draw_doodle(rect.position, rect.size.x, 0.0, rect.size.y, 1.0)
@@ -338,6 +353,13 @@ class BookOpenTransition extends Control:
 			]),
 			PackedColorArray([hinge_side, free_side, free_side, hinge_side])
 		)
+		# The artwork rides the same box the doodle does -- inside the pinch, so it
+		# cannot poke out of the turning cover's silhouette, and squashed with it, so
+		# it bends as the cover bends. At o == 0 the pinch is zero and the box is the
+		# whole screen, which is what keeps the hand-off from phase 1 pixel-exact.
+		_draw_cover_art(
+			Rect2(0.0, pinch, edge_x, size.y - pinch * 2.0), 1.0 - 0.35 * o
+		)
 		draw_line(
 			Vector2(edge_x, pinch), Vector2(edge_x, size.y - pinch), COVER_EDGE, 4.0, true
 		)
@@ -355,12 +377,39 @@ class BookOpenTransition extends Control:
 			return
 		draw_rect(Rect2(Vector2(left, middle_y - height * 0.5), Vector2(width, height)), tint)
 
+	## The book's own cover art across [param box] (BL-42), centre-cropped to fill it
+	## the way the shelf cell fills a book's front. [param shade] darkens it as the
+	## cover turns away from the light, which is the same job the vertex tints do for
+	## the plain cover.
+	func _draw_cover_art(box: Rect2, shade: float) -> void:
+		if _cover_art == null or box.size.x <= 2.0 or box.size.y <= 2.0:
+			return
+		var source := Vector2(_cover_art.get_size())
+		if source.x <= 0.0 or source.y <= 0.0:
+			return
+		# Centre crop: the cover of a book is a shape the artwork has to fill, and
+		# letterboxing it would show the flat cover colour in two bands.
+		var scale_factor := maxf(box.size.x / source.x, box.size.y / source.y)
+		var used := Vector2(box.size.x / scale_factor, box.size.y / scale_factor)
+		draw_texture_rect_region(
+			_cover_art,
+			box,
+			Rect2((source - used) * 0.5, used),
+			Color(shade, shade, shade, 1.0)
+		)
+
 	## Three wax strokes across the cover, in palette colours -- the same crayon
 	## language as the title screen's underline, so the book looks like one of ours.
 	## Mapped through the caller's box, which is how it swings with the cover.
+	##
+	## [b]A book with its own cover gets no doodle[/b] (BL-42): the scribble exists
+	## to stop a generic cover being a blank slab, and drawing it over an artist's
+	## painting would be vandalism.
 	func _draw_doodle(
 		origin: Vector2, span_x: float, top: float, bottom: float, alpha: float
 	) -> void:
+		if _cover_art != null:
+			return
 		if _doodle_colors.is_empty() or alpha <= 0.01 or span_x <= 8.0 or bottom - top <= 8.0:
 			return
 		var thickness := maxf((bottom - top) * 0.014, 2.0)
@@ -489,6 +538,14 @@ func show_title() -> Control:
 ## [constant Transition.BOOK_CLOSE] so the shelf is reached the same way it was
 ## left (BL-30).
 func show_book_select(transition: Transition = Transition.FADE) -> Control:
+	# BL-42: the cover that shuts is the one that opened, so it is read BEFORE the
+	# book cursor is cleared. A fade needs none, and clearing it is what stops a
+	# stale cover riding the next generic transition.
+	_book_transition.set_cover_art(
+		GameState.current_book.get_artist_cover_texture()
+		if transition == Transition.BOOK_CLOSE and GameState.current_book != null
+		else null
+	)
 	GameState.clear_book()
 	return await _show_screen(BOOK_SELECT_SCENE, SCREEN_BOOK_SELECT, transition,
 		func(screen: Control) -> void:
@@ -515,6 +572,10 @@ func open_book(book: BookDef) -> Control:
 	if book == null:
 		return null
 	var start_index := GameState.get_resume_index(book)
+	# BL-42: the book that flies at the screen wears this book's own cover when the
+	# pack shipped one. Still a picture handed over, never a shelf cell -- the
+	# transition stays coupled to nothing.
+	_book_transition.set_cover_art(book.get_artist_cover_texture())
 	# BL-30: tapping a book on the shelf now OPENS it rather than cutting to it.
 	return await _show_screen(COLORING_PAGE_SCENE, SCREEN_COLORING, Transition.BOOK_OPEN,
 		func(screen: Control) -> void:

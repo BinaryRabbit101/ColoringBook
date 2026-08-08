@@ -31,7 +31,40 @@ extends Resource
 
 ## The sticker's PNG. Transparent outside the shape: a sticker is a cut-out laid
 ## over a drawing, not a tile.
+##
+## [b]Since BL-43 it may be a SPRITE SHEET[/b] -- see the animation block below.
 @export_file("*.png") var image_path: String = ""
+
+# ---------------------------------------------------------- animation (BL-43) --
+# A sticker may wave, blink or sparkle. When it does, [member image_path] is a grid
+# of equally sized frames and these four numbers say how to read it -- the same
+# `anim: {hframes, vframes, frames, fps}` block a pack's `sticker_set.json` carries.
+#
+# [b]Absent means still[/b], which is what every sticker authored before BL-43 is,
+# and a still sticker's render path is byte-for-byte the one it always had. The
+# animation is a property of the STICKER and never of a placement: a set
+# re-published as animated must not move a sticker a child already stuck down, so
+# nothing about the save shape changed.
+
+## Columns and rows of the sheet. 1x1 (the default) means "not a sheet".
+@export_range(1, 64) var anim_hframes: int = 1
+@export_range(1, 64) var anim_vframes: int = 1
+## Frames actually used, for a sheet whose last row is short. 0 means all of them.
+@export_range(0, 4096) var anim_frames: int = 0
+## Playback speed. 0 takes [constant StickerLayer.DEFAULT_SHEET_FPS].
+@export_range(0.0, 60.0) var anim_fps: float = 0.0
+
+
+## This sticker's sprite-sheet spec, or {} when it is a still one. Resolved through
+## [method StickerLayer.sheet_spec] -- the ONE place the clamping and the "a 1x1
+## grid is not a sheet" rule live, so the picker card and the page agree by
+## construction rather than by two copies of the same maths.
+func sheet() -> Dictionary:
+	return StickerLayer.sheet_spec(anim_hframes, anim_vframes, anim_frames, anim_fps)
+
+
+func is_animated() -> bool:
+	return not sheet().is_empty()
 
 # --------------------------------------------------------------- pack stickers --
 # Deliberately NOT exported, for the reason [PageDef] gives: an authored .tres must

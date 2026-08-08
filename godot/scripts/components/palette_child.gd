@@ -1090,6 +1090,9 @@ func _rebuild_sticker_strip() -> void:
 		card.sticker_index = i
 		card.sticker_id = sticker.sticker_id
 		card.texture = sticker.load_texture()
+		# BL-43: an animated sticker plays on its card too, so the strip advertises
+		# what the page will actually do.
+		card.sheet = sticker.sheet()
 		card.tooltip_text = sticker.display_name
 		card.orientation = (
 			StickerButton.ORIENT_LEFT if is_column() else StickerButton.ORIENT_UP

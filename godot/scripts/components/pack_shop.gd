@@ -28,6 +28,15 @@ extends Control
 ##    answer patches it when it lands. If it never lands, the overlay says so and
 ##    the shelf behind it is completely unaffected.
 ##
+## [b]Two tabs, one list[/b] (BL-41). Coloring books and sticker sets are different
+## products delivered by identical machinery, and a single list of both made a child
+## tap the wrong one -- so the catalogue is split by [code]manifest.kind[/code]
+## (BL-37) into a Books tab and a Stickers tab. Every row of BOTH is still built,
+## and the tab only chooses which are visible: a download in the tab nobody is
+## looking at still finds its row, still gets its bytes, and still draws its BL-31
+## wax stroke, so switching tabs mid-download shows a strip that is where it should
+## be rather than one starting again from zero.
+##
 ## [b]The client never decides what it owns[/b] (DLC_SERVER.md 9). Every flag on a
 ## row -- [code]owned[/code], [code]is_free[/code], [code]latest_version[/code] --
 ## is the server's word, rendered verbatim. This file computes exactly one thing
@@ -62,6 +71,17 @@ const KEY_STICKER_COUNT := "sticker_count"
 const KIND_BOOK := "book"
 const KIND_STICKER_SET := "sticker_set"
 
+## The two tabs (BL-41), in the order they are shown. A tab IS a kind: there is no
+## "all" tab, because the whole complaint was that one list of two different
+## products makes a child tap the wrong one.
+const TABS: PackedStringArray = [KIND_BOOK, KIND_STICKER_SET]
+## What each tab is called, and what an empty one says. Indexed by kind.
+const TAB_LABELS := {KIND_BOOK: "Books", KIND_STICKER_SET: "Stickers"}
+const TAB_EMPTY := {
+	KIND_BOOK: "No extra books yet. Check back soon!",
+	KIND_STICKER_SET: "No sticker sets yet. Check back soon!",
+}
+
 ## Shown when the catalogue lists but nobody is signed in, and again if a Get is
 ## pressed in that state (BL-25). One string, so the shop says the same thing twice
 ## rather than two things once.
@@ -73,6 +93,7 @@ const SIGNED_OUT_HINT := "A grown-up needs to sign in to add a book."
 const WaxProgress := preload("res://scripts/components/wax_progress.gd")
 
 @onready var _scrim: Button = $Scrim
+@onready var _tabs: HBoxContainer = $Center/Panel/Margin/Column/Tabs
 @onready var _list: VBoxContainer = $Center/Panel/Margin/Column/Scroll/List
 @onready var _status: Label = $Center/Panel/Margin/Column/Status
 @onready var _close_button: Button = $Center/Panel/Margin/Column/CloseButton
@@ -80,12 +101,17 @@ const WaxProgress := preload("res://scripts/components/wax_progress.gd")
 var _rows: Array[PackRow] = []
 ## Slug currently downloading, or "".
 var _installing := ""
+## Which of [constant TABS] is showing.
+var _tab := KIND_BOOK
+## The tab buttons, in [constant TABS] order.
+var _tab_buttons: Array[Button] = []
 
 
 func _ready() -> void:
 	_scrim.pressed.connect(_on_close_pressed)
 	_close_button.pressed.connect(_on_close_pressed)
 	Backend.pack_install_progress.connect(_on_progress)
+	_build_tabs()
 	# Render what we already know before anything is asked of the network.
 	_show_installed_only()
 	refresh()
@@ -126,14 +152,117 @@ func set_packs(packs: Array) -> void:
 		row.download_requested.connect(_on_download_requested.bind(row))
 		_list.add_child(row)
 		_rows.append(row)
-	if _rows.is_empty():
-		_set_status("No extra books yet. Check back soon!")
-	else:
+	_open_a_tab_with_something_on_it()
+	_apply_tab()
+
+
+## Lands the player on a tab that has packs on it, when the one they would have
+## got is bare. A shop that opens on an empty shelf of books while ten sticker sets
+## sit one tap away is a shop that looks broken.
+func _open_a_tab_with_something_on_it() -> void:
+	if not get_visible_rows().is_empty():
+		return
+	for kind in TABS:
+		for row in _rows:
+			if row.get_kind() == kind:
+				_tab = kind
+				return
+
+
+## Every row the shop is holding, both tabs. [method get_visible_rows] is the one
+## the player can see.
+func get_rows() -> Array[PackRow]:
+	return _rows.duplicate()
+
+
+# ======================================================================= tabs ==
+# BL-41: coloring books and sticker sets are different products, and one list of
+# both made a child tap the wrong thing. They get a tab each.
+#
+# [b]Both tabs' rows are always BUILT[/b] and the tab only decides which are
+# visible. That is what keeps everything else in this file exactly as it was: a
+# download in the tab you are not looking at still finds its row through
+# [method get_row], still gets its bytes, and still runs its BL-31 wax stroke and
+# its confetti -- and switching tabs mid-download shows a strip that is already
+# where it should be rather than one starting from zero.
+
+## Which tab is showing: one of [constant TABS].
+func get_tab() -> String:
+	return _tab
+
+
+## Shows [param kind]'s tab. Unknown kinds are ignored rather than emptying the
+## shop -- a future pack kind this build has never heard of must not be able to
+## leave the player looking at nothing.
+func set_tab(kind: String) -> void:
+	if _tab == kind or not TABS.has(kind):
+		return
+	_tab = kind
+	_apply_tab()
+
+
+## The tab buttons, in [constant TABS] order. A harness presses these; the game
+## does not read them.
+func get_tab_buttons() -> Array[Button]:
+	return _tab_buttons.duplicate()
+
+
+## The rows on the tab that is showing.
+func get_visible_rows() -> Array[PackRow]:
+	var out: Array[PackRow] = []
+	for row in _rows:
+		if row.get_kind() == _tab:
+			out.append(row)
+	return out
+
+
+func _build_tabs() -> void:
+	for i in TABS.size():
+		var kind := TABS[i]
+		var button := PackRow._make_button(String(TAB_LABELS[kind]), Vector2(0, 52))
+		button.name = "Tab_%s" % kind
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		button.pressed.connect(set_tab.bind(kind))
+		_tabs.add_child(button)
+		_tab_buttons.append(button)
+	_paint_tabs()
+
+
+## Hides the rows of the other tab and says something useful when this one is bare.
+##
+## The status line is shared with the network and the signed-out hint, so an EMPTY
+## tab only claims it when there is nothing more important to say -- otherwise
+## switching tabs would silently wipe "A grown-up needs to sign in".
+func _apply_tab() -> void:
+	var shown := 0
+	for row in _rows:
+		row.visible = row.get_kind() == _tab
+		if row.visible:
+			shown += 1
+	_paint_tabs()
+	if shown == 0:
+		_set_status(String(TAB_EMPTY[_tab]))
+	elif _status.text in TAB_EMPTY.values():
 		_set_status("")
 
 
-func get_rows() -> Array[PackRow]:
-	return _rows.duplicate()
+## The showing tab is lit; the others are not. Drawn with the row buttons' own
+## styleboxes so the shop stays one visual family.
+func _paint_tabs() -> void:
+	for i in _tab_buttons.size():
+		var lit := TABS[i] == _tab
+		var style := StyleBoxFlat.new()
+		style.bg_color = (
+			Color(0.494118, 0.427451, 0.372549) if lit else Color(0.278431, 0.254902, 0.235294)
+		)
+		style.set_corner_radius_all(12)
+		if lit:
+			# A lip along the bottom, the way the toolbar's slabs are lipped: the tab
+			# that is out reads as a tab rather than as a brighter button.
+			style.border_width_bottom = 4
+			style.border_color = Color(0.972549, 0.803922, 0.478431)
+		for state in ["normal", "hover", "pressed"]:
+			_tab_buttons[i].add_theme_stylebox_override(state, style)
 
 
 func get_row(slug: String) -> PackRow:
@@ -166,6 +295,10 @@ func _show_installed_only() -> void:
 			KEY_OWNED: true,
 			KEY_LATEST_VERSION: int(manifest.get("pack_version", 0)),
 			KEY_MIN_CLIENT_VERSION: String(manifest.get("min_client_version", "")),
+			# BL-41: which tab it belongs on. The installed manifest says so (BL-37),
+			# and an absent key means books -- so a pack installed before either entry
+			# lands on the books tab, which is what it is.
+			KEY_KIND: String(manifest.get("kind", KIND_BOOK)),
 		})
 	set_packs(packs)
 

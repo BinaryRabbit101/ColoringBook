@@ -45,12 +45,19 @@ extends Control
 ##   e  save schema v2: keyed by book_uid, and a v1 file migrates -- keys rekeyed,
 ##      paint directories renamed, nothing lost, unknown keys passed through,
 ##      re-runnable, and the v1 file left where it was
+##   h  the pack shop splits its catalogue into a Books tab and a Stickers tab
+##      (BL-41), keeps every row built so a download in the tab nobody is looking
+##      at carries on, and opens on a tab that has something on it
 ##   f  a DLC book and the built-in book that share a uid share one save entry --
 ##      migrated progress AND progress recorded live against the built-in book --
 ##      and the BL-25 release shape: with no built-in books at all the shelf is
 ##      exactly the installed packs, still carrying that progress
 ##
 ## Exit code is 0 only if every check passes.
+
+## The DLC catalogue overlay, for check (h)'s tab split (BL-41). Driven through
+## [method PackShop.set_packs], so this harness needs no server.
+const SHOP_SCENE: PackedScene = preload("res://scenes/components/pack_shop.tscn")
 
 const TEST_BOOK_PATH := "res://resources/books/test_book/book.tres"
 const COYOTE_BOOK_PATH := "res://resources/books/coyote/book.tres"
@@ -159,6 +166,7 @@ func _run() -> void:
 	_check_save_migration()
 	_check_shared_uid()
 	_check_sticker_packs()
+	await _check_shop_tabs()
 
 	print("\n   worker decode covered %d main-thread frames; take() cost %.1f ms prefetched"
 		% [_worker_frames, _prefetched_take_ms]
@@ -212,8 +220,12 @@ func _seed_packs() -> void:
 		_pack_page(coyote_page, 2, 1, "Coyote (from a pack)"),
 		_pack_page(test_page, 1, 0, "Shape Sampler (from a pack)"),
 	]
+	# BL-42: this one carries an ARTIST-DRAWN cover, named at the manifest level while
+	# its book.json still falls back to page 1 -- which is exactly the shape a pack
+	# published before covers existed has, plus the one field that is new. The dupe
+	# pack below deliberately has none, so both halves are covered by real packs.
 	_write_pack(TEST_DLC_ROOT, PACK_SLUG, PACK_BOOK_UID, "DLC Smoke Book", pages,
-		[test_page, coyote_page], [1, 2])
+		[test_page, coyote_page], [1, 2], true)
 
 	# A pack claiming the built-in coyote book's uid. Its FILES are the test book's
 	# -- what matters is the uid it claims, and using the small page keeps the run
@@ -315,7 +327,8 @@ func _write_pack(
 	title: String,
 	pages: Array,
 	_sources: Array,
-	_numbers: Array
+	_numbers: Array,
+	artist_cover: bool = false
 ) -> void:
 	var pack_root := dlc_root.path_join(pack_slug)
 	var book_dir := pack_root.path_join("books").path_join(book_uid)
@@ -353,14 +366,24 @@ func _write_pack(
 		"pages": json_pages,
 	}
 	_write_text(book_dir.path_join(BookDef.BOOK_JSON_NAME), JSON.stringify(book_json, "\t"))
-	# Written for fidelity only: the client never opens it (see the class doc).
-	_write_text(pack_root.path_join("manifest.json"), JSON.stringify({
+	var manifest := {
 		"manifest_version": 1,
 		"pack_slug": pack_slug,
 		"pack_version": 1,
 		"title": title,
 		"books": [book_json],
-	}, "\t"))
+	}
+	if artist_cover:
+		# BL-42: a pack whose ARTIST drew a cover, at the manifest level, which is
+		# where §7.2 has always allowed one. The book.json still names page 1, exactly
+		# as every pack published before covers existed does -- so this pack is the
+		# case the client has to see through.
+		var art := Image.create(200, 260, false, Image.FORMAT_RGBA8)
+		art.fill(Color(0.180392, 0.482353, 0.729412))
+		art.save_png(pack_root.path_join("cover.png"))
+		manifest["cover"] = "cover.png"
+	# Written for fidelity only, EXCEPT for its cover (see BookDef.PACK_MANIFEST_NAME).
+	_write_text(pack_root.path_join("manifest.json"), JSON.stringify(manifest, "\t"))
 
 
 # =========================================================== a: discovery ==
@@ -474,10 +497,26 @@ func _check_runtime_definitions() -> void:
 	_expect(second.get_mapping_source_path() == second.mask_image_path,
 		"...which is still the page's mapping source, exactly as for a built-in page")
 
-	_expect(_pack_book.get_cover_path() == first.display_image_path,
-		"the authored cover resolves to page 1's art (%s)" % _pack_book.get_cover_path())
+	# BL-42: this pack's ARTIST drew a cover and named it in the manifest, while its
+	# book.json still names page 1 -- so the manifest is where the cover has to come
+	# from, and the client has to see through the book.json's fallback to find it.
+	_expect(_pack_book.get_cover_path() == TEST_DLC_ROOT.path_join(PACK_SLUG).path_join("cover.png"),
+		"a pack cover named in the MANIFEST reaches the book (%s)" % _pack_book.get_cover_path())
+	_expect(_pack_book.has_artist_cover() and _pack_book.get_artist_cover_texture() != null,
+		"...and reads as an ARTIST's cover, not as page 1 standing in for one")
 	_expect(_pack_book.get_cover_texture() != null,
 		"...and the cover texture loads from user:// for the shelf")
+	_expect(_pack_book.validate().is_empty(),
+		"...and the book still validates with it (%s)" % [_pack_book.validate()])
+	# A pack with no cover anywhere falls back to page 1 and says so -- the whole
+	# point of the distinction, and what every pack published so far looks like.
+	var uncovered := _book_with_uid(BookDef.discover_runtime(TEST_DLC_ROOT), COYOTE_UID)
+	_expect(uncovered != null and not uncovered.has_artist_cover()
+			and uncovered.get_artist_cover_texture() == null,
+		"a pack with no cover of its own has NO artist cover...")
+	_expect(uncovered != null
+			and uncovered.get_cover_path() == uncovered.get_page(0).display_image_path,
+		"...and falls back to page 1's display image, exactly as it always did")
 	# ...and a pack that authors no cover falls back to page 1's display image,
 	# exactly as an authored book does.
 	var coverless := BookDef.from_json(
@@ -894,6 +933,77 @@ func _check_sticker_packs() -> void:
 	for i in range(1, visible.size()):
 		ordered = ordered and visible[i - 1].sort_order <= visible[i].sort_order
 	_expect(ordered, "...in authored sort_order, so the ring is stable between runs")
+
+
+func _check_shop_tabs() -> void:
+	print("\n-- check h: the shop's two tabs (BL-41) --")
+
+	# Injected rows, not a server: set_packs() is the shop's dependency-injection
+	# seam and is the SAME path the network answer takes.
+	var shop := SHOP_SCENE.instantiate() as PackShop
+	add_child(shop)
+	await get_tree().process_frame
+	shop.set_packs([
+		{PackShop.KEY_SLUG: "forest", PackShop.KEY_TITLE: "Forest", PackShop.KEY_BYTES: 4096},
+		{
+			PackShop.KEY_SLUG: "shiny",
+			PackShop.KEY_TITLE: "Shiny Stickers",
+			PackShop.KEY_KIND: PackShop.KIND_STICKER_SET,
+			PackShop.KEY_BYTES: 2048,
+		},
+		{PackShop.KEY_SLUG: "meadow", PackShop.KEY_TITLE: "Meadow", PackShop.KEY_BYTES: 8192},
+	])
+	await get_tree().process_frame
+
+	_expect(shop.get_rows().size() == 3,
+		"both kinds are LISTED as one set of rows (%d)" % shop.get_rows().size())
+	_expect(shop.get_tab() == PackShop.KIND_BOOK,
+		"...and the shop opens on the books tab ('%s')" % shop.get_tab())
+	_expect(shop.get_visible_rows().size() == 2,
+		"...showing only the book packs (%d of 3)" % shop.get_visible_rows().size())
+	_expect(not shop.get_row("shiny").visible,
+		"...with the sticker pack hidden rather than absent")
+
+	shop.set_tab(PackShop.KIND_STICKER_SET)
+	await get_tree().process_frame
+	_expect(shop.get_visible_rows().size() == 1
+			and shop.get_visible_rows()[0].get_slug() == "shiny",
+		"the stickers tab shows the sticker pack, and only it")
+	_expect(not shop.get_row("forest").visible and shop.get_row("forest").get_state()
+			== PackShop.PackRow.STATE_AVAILABLE,
+		"...and the book rows keep their state while they are put away")
+
+	# BL-31's wax stroke has to survive a tab switch: the row is still there, still
+	# fed, and still holding the ratio it was given.
+	shop.get_row("forest").set_downloading(2048, 4096)
+	_expect(is_equal_approx(shop.get_row("forest").get_progress_ratio(), 0.5)
+			and shop.get_row("forest").get_state() == PackShop.PackRow.STATE_DOWNLOADING,
+		"a download in the tab nobody is looking at still runs (%.2f)"
+		% shop.get_row("forest").get_progress_ratio())
+	shop.set_tab(PackShop.KIND_BOOK)
+	await get_tree().process_frame
+	_expect(shop.get_row("forest").visible
+			and is_equal_approx(shop.get_row("forest").get_progress_ratio(), 0.5),
+		"...and coming back to it finds the stroke where it should be, not at zero")
+
+	# An empty tab says so in its own words rather than showing nothing at all.
+	shop.set_packs([{
+		PackShop.KEY_SLUG: "shiny",
+		PackShop.KEY_TITLE: "Shiny Stickers",
+		PackShop.KEY_KIND: PackShop.KIND_STICKER_SET,
+	}])
+	await get_tree().process_frame
+	_expect(shop.get_tab() == PackShop.KIND_STICKER_SET,
+		"a catalogue with no books at all opens on the tab that HAS something")
+	_expect(shop.get_tab_buttons().size() == PackShop.TABS.size(),
+		"...and there is one button per tab (%d)" % shop.get_tab_buttons().size())
+	shop.set_tab(PackShop.KIND_BOOK)
+	await get_tree().process_frame
+	_expect(shop.get_visible_rows().is_empty()
+			and shop.get_status_text() == String(PackShop.TAB_EMPTY[PackShop.KIND_BOOK]),
+		"...and the empty books tab explains itself ('%s')" % shop.get_status_text())
+
+	shop.queue_free()
 
 
 # =================================================================== helpers ==

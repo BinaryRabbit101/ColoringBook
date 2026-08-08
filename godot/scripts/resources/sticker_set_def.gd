@@ -249,7 +249,12 @@ static func from_json_file(json_path: String, pack_root: String = "") -> Sticker
 ## [b]Required[/b]: [code]set_uid[/code], and a non-empty [code]stickers[/code]
 ## array whose entries each carry [code]sticker_id[/code] and [code]image[/code].
 ## [b]Optional[/b]: [code]title[/code] (falls back to the uid),
-## [code]sort_order[/code], and per sticker [code]title[/code].
+## [code]sort_order[/code], and per sticker [code]title[/code] and [code]anim[/code].
+##
+## [code]anim[/code] (BL-43) is [code]{hframes, vframes, frames, fps}[/code] and
+## makes the sticker's image a SPRITE SHEET. Absent means a still sticker, which is
+## every sticker published before BL-43, so a pack written against the older
+## contract installs and draws exactly as it did.
 ##
 ## An individual sticker whose image is missing is DROPPED, and the set survives --
 ## unlike a book, which is dropped whole when a page is unusable. A book with a
@@ -289,6 +294,7 @@ static func from_json(data: Dictionary, pack_root: String, set_dir: String) -> S
 		sticker.image_path = PageDef.resolve_pack_path(
 			String(sticker_data.get("image", "")), pack_root, set_dir
 		)
+		_apply_anim(sticker, sticker_data.get("anim", null))
 		if not sticker.exists():
 			push_warning("StickerSetDef: set '%s' sticker '%s' has no image at '%s'; dropping it."
 				% [uid, sticker_id, sticker.image_path])
@@ -301,6 +307,22 @@ static func from_json(data: Dictionary, pack_root: String, set_dir: String) -> S
 			% [uid, set_dir])
 		return null
 	return set_def
+
+
+## Copies a pack entry's [code]anim[/code] block onto [param sticker] (BL-43).
+##
+## [b]Anything unusable is simply not an animation.[/b] A missing block, a block
+## that is not an object, or numbers that do not describe a grid all leave the
+## sticker still -- which is the behaviour of every client built before BL-43 and
+## therefore the only safe reading of a field this build does not understand.
+static func _apply_anim(sticker: StickerDef, raw: Variant) -> void:
+	if typeof(raw) != TYPE_DICTIONARY:
+		return
+	var anim: Dictionary = raw
+	sticker.anim_hframes = maxi(int(anim.get("hframes", 1)), 1)
+	sticker.anim_vframes = maxi(int(anim.get("vframes", 1)), 1)
+	sticker.anim_frames = maxi(int(anim.get("frames", 0)), 0)
+	sticker.anim_fps = maxf(float(anim.get("fps", 0.0)), 0.0)
 
 
 ## True for a directory a download is still writing into, or a hidden one. Reads
