@@ -238,12 +238,16 @@ entitlements          id, user_id →users, pack_id →packs,
 book_progress         id, user_id →users, child_profile_id →child_profiles nullable,
                       book_uid, revision (int), current_page_index,
                       page_statuses json  ["complete","in_progress",...],
+                      page_erased_at json nullable  [null,"2026-…",…]  (BL-18)
                       furthest_page_index, client_updated_at, timestamps
                       UNIQUE(user_id, child_profile_id, book_uid)
 paint_layers          id, book_progress_id →book_progress, page_index,
                       sha256, bytes, storage_path, revision,
                       client_painted_at, timestamps
                       UNIQUE(book_progress_id, page_index)
+shelf_erasures        id, user_id →users, child_profile_id →child_profiles nullable,
+                      erased_at, timestamps                            (BL-18)
+                      UNIQUE(user_id, child_profile_id)
 ```
 
 One row **per book**, not one blob per account. That single choice removes most conflicts:
@@ -256,6 +260,14 @@ key is `UNIQUE(user_id, profile_key, book_uid)` over a stored generated column
 `profile_key = coalesce(child_profile_id, 0)`. Losing paint versions live in a sidecar
 `retained_paint_layers` table rather than extra `paint_layers` rows, keeping
 `UNIQUE(book_progress_id, page_index)` meaning "the current picture".
+
+*As built (2026-08-07, BL-18):* `shelf_erasures` postdates this section. It is a table
+rather than a column on `users`/`child_profiles` for one concrete reason — the erase censor
+is a `<=` against `client_updated_at`, so the clock must keep its microseconds, and
+microsecond storage on an Eloquent model is a `$dateFormat` on the *whole* model; a column
+on `users` would silently restamp every other timestamp on the account. It carries the same
+`profile_key` generated column, for the same NULL reason. A missing row means "never
+erased", which is deliberately not the epoch.
 
 ### Storage layout on disk
 
@@ -354,6 +366,46 @@ cannot be merged (compositing two paint layers produces something neither child 
 
 **Never resolve a conflict with a dialog.** A five year old cannot answer "keep local or
 keep remote". Merge silently; surface anything questionable in the parent dashboard.
+
+**Erasure: a state that wins, not an absence that loses** (2026-08-07, BL-18). Everything
+above only ever *climbs*, and paint keeps the newest picture. That is right for a save and
+wrong for a deletion: "Erase all progress" and the page's "Start over" were local absences,
+and an absence always loses — the next pull put it all back and the buttons looked broken.
+So an erasure is an **instant**, stored, and every state is measured against it:
+
+```
+shelf:  a state whose client_updated_at <= erased_at IS the empty book
+page:   page_erased_at[i] = max(a[i], b[i]); a side whose client_updated_at is
+        <= that reads `untouched` for page i
+paint:  an upload whose client_painted_at is <= either clock is refused
+```
+
+- **Ties go to the erase** (`<=`, not `<`). A wipe is the newest thing anybody said about
+  the shelf, and a save from the same microsecond surviving it is the failure the button is
+  pressed to avoid.
+- Both censors apply to **each side independently**, so the merge stays commutative and
+  idempotent with a clock in play. That matters more here than anywhere: an erase that were
+  order-dependent would resurrect on one device and not another, which *is* the bug.
+- Clocks are **monotonic** — `max`, never assignment — so replaying an erase is free, and a
+  device delivering a week-old erase cannot undo yesterday's wipe.
+- The shelf clock lives in `shelf_erasures`, keyed `(user, child_profile|null)` like
+  `book_progress`. The page clocks live in `book_progress.page_erased_at`, a nullable JSON
+  list index-parallel to `page_statuses`, trailing nulls trimmed.
+- The **rows are really deleted** by a wipe — progress, paint layers, retained versions and
+  the blobs. The clock is the only thing left behind, and it is enough: a device that slept
+  through the wipe finds no row to conflict with, and the create path censors its push
+  rather than "recreating progress beats losing it".
+- **A page reset retains nothing.** The 30-day net above catches a *lost race*; a reset is a
+  deliberate act that already deletes the local file with no undo, and offering to restore a
+  picture onto a page a child asked to start over would be the surprising answer.
+- Stickers (BL-36) are local-only state, so there is nothing on the server to erase; both
+  convergence paths go through `GameState.erase_all_progress()` /
+  `erase_page_progress()`, which clear them, so they ride along.
+
+The client mirrors the rule exactly (`SyncQueue.merge_states`), pushes erasures **ahead of
+the pull** in a drain — until the server has been told, a pull hands back the very shelf
+that was erased — and resets its own base revisions and fingerprints when it erases, so the
+next drain cannot re-upload the erased state at a revision the server still agrees with.
 
 ---
 
@@ -819,11 +871,32 @@ old game builds live on players' devices forever.
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/sync/progress?profile=&since=` | `{books:[{book_uid, revision, current_page_index, page_statuses[], client_updated_at}], server_time}` |
-| `PUT` | `/sync/progress` | `{profile, books:[{book_uid, base_revision, ...}]}` → `200 {results:[{book_uid, revision}]}` or per-book `409` with server state. Batched: one call for the whole shelf. |
+| `GET` | `/sync/progress?profile=&since=` | `{books:[{book_uid, revision, current_page_index, page_statuses[], page_erased_at[], client_updated_at}], erased_at, server_time}` |
+| `PUT` | `/sync/progress` | `{profile, books:[{book_uid, base_revision, …, page_erased_at?[]}]}` → `200 {results:[{book_uid, revision}], erased_at}` or per-book `409` with server state. Batched: one call for the whole shelf. |
+| `DELETE` | `/sync/progress` | `{profile?, erased_at?}` → `200 {erased_at, books_erased, pictures_erased}`. "Erase all progress" (BL-18) |
 | `POST` | `/sync/paint/{book_uid}/{page}` | `{sha256, bytes, client_painted_at}` → `204` (already have it) / `202` + upload URL |
 | `PUT` | `/sync/paint/{book_uid}/{page}` | raw PNG body, `Content-Digest` checked → `201 {revision}` |
+| `DELETE` | `/sync/paint/{book_uid}/{page}` | `{profile?, client_erased_at?}` → `200 {erased_at, revision, picture_erased}`. The page's "Start over" (BL-18) |
 | `GET` | `/sync/paint/{book_uid}/{page}` | `302` to signed URL, or `404` |
+
+Erasure (BL-18, §6.3) adds three fields and two verbs, and nothing else moved. `erased_at`
+is top-level on both progress calls — the shelf's erase clock, `null` for a shelf nobody
+has wiped, and **never filtered by `since`**, because a wipe leaves no rows behind and a
+cursored pull has nothing else to learn it from. `page_erased_at` is index-parallel to
+`page_statuses` with `null` where a page has never been reset, trailing nulls trimmed. Both
+`DELETE`s take the **device's** clock, not the server's, so an erase made on a plane still
+beats everything painted before it; both are idempotent, because the clocks only climb.
+
+Codes this adds: `PAINT_ERASED` (409, `details.erased_at`) — that *page* was started over
+more recently than the picture being uploaded, so the device should delete its copy;
+`PROGRESS_ERASED` (409, `details.erased_at`) — the whole *shelf* was, so the device should
+pull progress and converge on empty. Two codes because the remedies are different sizes,
+and because without the second a stale upload would recreate the `book_progress` row it
+hangs off and put a book back on a shelf the parent just cleared.
+
+The parent dashboard's half is `settings/progress`: one row per shelf (the account's own
+plus one per child), what is on each, and a two-step "Erase everything". Session auth,
+never a token — the same rule the pictures page follows.
 
 ### Catalog & DLC
 

@@ -23,32 +23,6 @@ deploy to the mini-pc.
 - Affected: `server/` (Laravel app in this repo), `docs/DLC_SERVER.md`,
   `docs/SERVER_BUILD_PLAN.md`
 
-### BL-18: "Erase all progress" must survive cloud sync — `open`
-Surfaced by the WP11 sync client (2026-08-06). "Erase all progress" (and the
-per-page "Start over", BL-7) is local-only, but against a synced account the
-§6.3 merge rule only ever climbs: the next pull quietly restores everything
-from the server, so the erase appears not to work. That is the merge doing its
-job — a save must never lose to a network race — but a grown-up pressing the
-button expects it to stick. Options, not mutually exclusive:
-1. **Server-side wipe from the parent dashboard** (the clean answer): delete
-   the account's/profile's `book_progress` + paint rows there, where the adult
-   already is; the device's next pull then has nothing to restore. Needs a
-   deliberate "device pushes right back" answer — the client should reset its
-   sync-queue fingerprints/revisions when it erases locally, or its next drain
-   re-uploads the erased state.
-2. **Client "erase and stop syncing"**: local erase also signs the device out
-   (or pauses sync) so the restore never fires — cheap but surprising in the
-   other direction.
-Per-page "Start over" has the same shape in miniature: the erased page's paint
-is deleted locally, but the server's copy wins the next LWW comparison unless
-the deletion is pushed as a state (tombstone or explicit delete endpoint —
-DLC_SERVER.md §11 currently has none).
-- Affected: server (dashboard wipe UI + a paint/progress delete or tombstone
-  path), `scripts/backend/sync_queue.gd` (fingerprint/revision reset on local
-  erase), docs/DLC_SERVER.md §6.3/§11
-- Decision needed before paint/progress sync ships to a real household.
-
-
 ### BL-32: Web build — HTTPRequest hangs on Chromium/Edge 151 — `open`
 Found 2026-08-07 during the BL-25/BL-26 live verification. On Edge 151
 (Chromium), **every** Godot `HTTPRequest` in the web build hangs after the
@@ -127,6 +101,8 @@ Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md
 - **BL-15** — Pick preview bubble + always-visible selection states
 - **BL-16** — Pick feedback round 2 (chip removed, bigger bubble, louder states)
 - **BL-17** — Undo / redo (stroke-recipe replay)
+- **BL-18** — Erasure survives cloud sync: a wipe is a stamped instant that wins
+  the merge (shelf + per-page clocks, two DELETE routes, dashboard wipe)
 - **BL-19** — Web DLC download stall fixed (browser fetch hides 302s; web follows, native reads)
 - **BL-20** — Child/Adult split removed — one crayon palette
 - **BL-21** — Landscape: crayons dock beside the canvas

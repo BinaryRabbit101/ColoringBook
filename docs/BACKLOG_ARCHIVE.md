@@ -743,6 +743,122 @@ page** (the coloring toolbar), undoing one stroke at a time.
   state needs the Callable-into-cells launch (see the flow smoke and the
   coloring-mechanics skill).
 
+### BL-18: "Erase all progress" must survive cloud sync — `done`
+Surfaced by the WP11 sync client (2026-08-06). "Erase all progress" (and the
+per-page "Start over", BL-7) was local-only, but against a synced account the
+§6.3 merge rule only ever climbs: the next pull quietly restored everything
+from the server, so the erase appeared not to work. Fixed 2026-08-07 by taking
+the backlog entry's **option 1** (the server-side wipe) plus both halves it
+called out — the client's fingerprint/revision reset, and a real deletion path
+for the per-page reset.
+
+**The one idea.** *An erasure is a **state that wins**, not an absence that
+loses.* It is an **instant**, stored, and every state is measured against it.
+Three scopes, one rule, all `max` and all `<=`:
+
+```
+shelf:  a state whose client_updated_at <= erased_at IS the empty book
+page:   page_erased_at[i] = max(a[i], b[i]); a side whose client_updated_at is
+        <= that reads `untouched` for page i
+paint:  an upload whose client_painted_at is <= either clock is refused
+```
+
+- **Ties go to the erase** (`<=`, not `<`), deliberately. A wipe is the newest
+  thing anybody said about the shelf, and a save from the same microsecond
+  surviving it is exactly the failure the button is pressed to avoid.
+- Both censors apply to **each side independently**, so the merge stays
+  commutative and idempotent with a clock in play. That matters more here than
+  anywhere else in the protocol: an erase that were order-dependent would
+  resurrect on one device and not another, which *is* the bug.
+- The clocks are **monotonic**, so replaying an erase is free and a device
+  finally delivering a week-old erase cannot undo yesterday's wipe. That is
+  also what lets the client simply keep re-sending until a drain succeeds.
+
+**Chosen deletion semantics.**
+- **Shelf** (`DELETE /sync/progress`, and the dashboard button): the rows are
+  *really deleted* — progress, paint layers, retained versions, blobs — and a
+  row in the new `shelf_erasures` table is the only thing left behind. No
+  tombstoned progress rows: the clock alone is enough, and it means a wiped
+  shelf really is empty.
+- **Page** (`DELETE /sync/paint/{book}/{page}`): one instant does both halves.
+  The picture loses last-write-wins to it exactly as another upload would
+  (newer or an exact tie wins; older is `409 PAINT_STALE`, because a picture
+  painted on another device *after* the reset is the newer statement), and the
+  same instant lands in `book_progress.page_erased_at[i]`, which is what stops
+  a device still holding `complete` putting the badge back on a blank page.
+  The progress row's `revision` **and** `updated_at` both move — unlike a paint
+  upload, which deliberately leaves them alone.
+- **Nothing is retained on a reset.** §6.3's 30-day net catches a *lost race*;
+  a reset is deliberate, already deletes the local file with no undo, and
+  offering to restore a picture onto a page a child asked to start over would
+  be the surprising answer, not the safe one. So the retained rows and blobs go
+  with it.
+- **A whole-book erase across devices was deliberately NOT added.**
+  `GameState.erase_book_progress()` ("Color again") is unreachable from the
+  shipped UI — only the smokes call it — so it stayed local. The shape is
+  there if it ever surfaces: it would be a third clock on `book_progress`.
+
+**Convergence cases, each with a smoke check behind it.**
+1. *Erase all, then drain + pull.* The client stamps a shelf clock, clears
+   every base revision / fingerprint / known digest, pushes the wipe, and finds
+   nothing to restore afterwards. Stickers (BL-36) go too — the erase paths
+   already clear them and both convergence paths go through those same two
+   `GameState` methods.
+2. *Start over on a synced page.* The reset is pushed, the server's picture is
+   gone, the page's status goes back to `untouched`, and neither comes back on
+   the next pull. A second device pushing the `complete,complete` it still
+   holds loses to the page clock.
+3. *A device offline through a dashboard wipe.* It wakes with a full shelf, a
+   full queue and stale base revisions; the pull publishes the clock, it runs
+   `erase_all_progress()` under a guard and pushes nothing back. The create
+   path on the server censors too — without that, "recreating progress beats
+   losing it" would have resurrected the whole shelf from a push with no row to
+   conflict against.
+
+**Gotchas worth the comments they got.**
+- **`shelf_erasures` is a table, not a column on `users`.** The censor is a
+  `<=` against `client_updated_at`, so the clock must keep its microseconds,
+  and microsecond storage on an Eloquent model is a `$dateFormat` on the
+  *whole* model — a column on `users` would silently restamp every other
+  timestamp on the account.
+- **`erased_at` is never filtered by `since`.** A wipe leaves no rows behind,
+  so a cursored pull — which is the shape every device that has synced before
+  uses — has nothing else to learn it from.
+- **The client compares clocks as INSTANTS, never as strings.** This device
+  writes `…T00:14:53.995Z`; the server answers `…T00:14:53.995000Z`. The same
+  moment, spelled differently. A string comparison read that as "still owed"
+  and the next drain re-sent the wipe — *after* the colouring done since,
+  deleting it. Cost two smoke failures to find, and the second one looked like
+  an unrelated precondition failure a check later.
+- **Erasures are pushed FIRST in a drain, ahead of the pull.** Until the server
+  has been told, a pull hands back the very shelf that was erased.
+- **An erase is only recorded once the device has had an account.** Otherwise
+  the first sign-in on a tablet that once pressed "Erase all progress" locally
+  would wipe that household's shelf. Signing out keeps the account name, so an
+  erase made offline or between sessions still lands.
+- **Two refusal codes, not one.** `PAINT_ERASED` means "that page was reset —
+  delete your copy"; `PROGRESS_ERASED` means "the shelf was — pull progress and
+  converge on empty". Without the second, a stale upload would recreate the
+  `book_progress` row it hangs off and put a book back on a shelf the parent
+  had just cleared.
+- **Queue schema v2.** The bump matters *downgrading*: a v1 build would copy
+  the keys it knows, drop the erase clocks and push back what a grown-up had
+  just erased. v2 makes it ignore the file and re-sync instead, which is free.
+- The sync smoke's page-reset check had to move to **page 2**: check h
+  deliberately leaves page 1's server picture stamped half an hour in the
+  future, and a reset stamped *now* rightly loses LWW to it.
+
+- Affected: `server/` (`shelf_erasures` + `book_progress.page_erased_at`
+  migrations, `ShelfClock`, `EraseShelf`, `ErasePageProgress`, `ProgressMerge`
+  / `ProgressState`, both sync controllers, `Settings\ProgressController` +
+  `settings/Progress.vue`, `routes/api/sync.php`, `routes/settings.php`),
+  `godot/scripts/backend/sync_queue.gd`, `godot/scripts/dev/sync_smoke.gd`,
+  `docs/DLC_SERVER.md` §5/§6.3/§11, `server/CLAUDE.md`
+- Counts: server `php artisan test` **573 pass / 1 skipped** (was 517), pint +
+  phpstan clean. Smokes: sync **131** (was 87 — checks m/n/o plus the erasure
+  half of the merge mirror), backend 184, flow 206, shell 151, paint 67,
+  palette 234, dlc 116, mobile 141.
+
 ### BL-19: DLC pack download stalls on the web build — `done`
 Found 2026-08-06 during the live end-to-end on http://192.168.0.164:91/ (the
 first run with the API reachable from a browser). Tapping Get → "Yes,
