@@ -99,6 +99,11 @@ const STALL_MAX_FRAMES := 240
 ## project targets.
 const PORTRAIT_WINDOW := Vector2i(720, 1280)
 const LANDSCAPE_WINDOW := Vector2i(1280, 820)
+## A phone turned on its side (BL-49) -- 812x375 is an iPhone in landscape, in
+## points. Not the same thing as [constant LANDSCAPE_WINDOW], which is a DESKTOP
+## landscape: this one is SMALLER than the 1152 px base in both directions, so it
+## squeezes like a phone AND leaves the shelf's rail the least height it ever gets.
+const PHONE_LANDSCAPE_WINDOW := Vector2i(812, 375)
 
 const NAV_TIMEOUT := 8.0
 const PAINT_TIMEOUT := 60.0
@@ -803,6 +808,54 @@ func _check_portrait() -> void:
 	main.close_settings()
 	await get_tree().process_frame
 
+	# --- BL-49: the rail, and the buttons that used to be laid on top of it -------
+	# This IS the playtest complaint, asserted: "the buttons on mobile on the book
+	# selection page are covering up some of the coloring book selections". The books
+	# are measured through the rail because the whole rail carries a scale -- a book's
+	# Control.size is still the 224x300 it was authored at.
+	var rail := shelf.get_carousel()
+	_expect(rail != null, "the portrait shelf carries the book rail")
+	if rail != null:
+		var chrome: Array[Rect2] = [main.get_gear_button().get_global_rect()]
+		if main.get_more_books_button().visible:
+			chrome.append(main.get_more_books_button().get_global_rect())
+		var covered := 0
+		for cell in shelf.get_cells():
+			for button_rect in chrome:
+				if rail.get_cell_rect(cell).intersects(button_rect):
+					covered += 1
+		_expect(covered == 0,
+			"no book on the portrait shelf is under a shell button (%d covered)" % covered)
+		_expect(rail.get_book_scale() > 1.0,
+			"a portrait phone gets BIGGER books, not the same card in a third of the glass (%.2fx)"
+			% rail.get_book_scale())
+		var first := rail.get_cell_rect(shelf.get_cells()[0])
+		_expect(first.size.x > viewport_size.x * 0.3,
+			"...wide enough to read across the phone (%.0f of %.0f canvas px)"
+			% [first.size.x, viewport_size.x])
+		# The rail's whole point: a phone shows a HANDFUL of big books and swipes for
+		# the rest. Measured as a pitch rather than as slack, because slack depends on
+		# how many books this harness happens to have installed (two) -- the pitch does
+		# not, and it is what decides whether the shelf reads as a carousel or as the
+		# wall of tiny cards BL-49 replaced. flow_smoke asserts the scrolling itself,
+		# on a band narrow enough to guarantee it.
+		var pitch := first.size.x + float(BookSelect.CELL_SEPARATION) * rail.get_book_scale()
+		var across := floorf(viewport_size.x / pitch)
+		_expect(across <= 3.0,
+			"...so at most %d books are on the phone at once, and the rest are a swipe away"
+			% int(across))
+		var unreachable := 0
+		for i in shelf.get_cells().size():
+			rail.snap_to_index(i, false)
+			await _settle_layout()
+			if not rail.is_cell_fully_visible(shelf.get_cells()[i]):
+				unreachable += 1
+		_expect(unreachable == 0,
+			"...and every book can be swiped fully into view (%d could not)" % unreachable)
+		rail.snap_to_index(0, false)
+		await _settle_layout()
+		await _screenshot("book_select_portrait.png")
+
 	var coyote_cell: BookCell = null
 	for cell in shelf.get_cells():
 		if cell.get_book() == _coyote_book:
@@ -965,6 +1018,47 @@ func _check_portrait() -> void:
 		"...and the account row is a row again")
 	main.close_settings()
 	await get_tree().process_frame
+
+	# --- BL-49: the shelf in a phone's LANDSCAPE, which is the SHORT canvas ------
+	# window/handheld/orientation is 6 (sensor), so both ways up ship. Portrait gives
+	# the rail more height than it can use; landscape gives it barely enough, and the
+	# book scale is height-bound there rather than squeeze-bound -- the case where a
+	# book could be drawn taller than the band it is clipped to.
+	get_window().size = PHONE_LANDSCAPE_WINDOW
+	await _settle_layout()
+	coloring.get_back_button().pressed.emit()
+	_expect(await _wait_for_screen(main, Main.SCREEN_BOOK_SELECT),
+		"back to the shelf in a phone's landscape (%s)" % main.get_current_screen_id())
+	await _settle_layout()
+	var wide := main.get_current_screen() as BookSelect
+	if wide != null:
+		var wide_rail := wide.get_carousel()
+		var band := wide_rail.get_global_rect()
+		_expect(band.size.y > 0.0 and get_viewport_rect().size.x > get_viewport_rect().size.y,
+			"a %s window really produces a LANDSCAPE canvas (%s)"
+			% [PHONE_LANDSCAPE_WINDOW, get_viewport_rect().size])
+		var clipped := 0
+		var covered_wide := 0
+		var chrome_wide: Array[Rect2] = [main.get_gear_button().get_global_rect()]
+		if main.get_more_books_button().visible:
+			chrome_wide.append(main.get_more_books_button().get_global_rect())
+		for cell in wide.get_cells():
+			var rect := wide_rail.get_cell_rect(cell)
+			if rect.position.y < band.position.y - 0.5 or rect.end.y > band.end.y + 0.5:
+				clipped += 1
+			for button_rect in chrome_wide:
+				if rect.intersects(button_rect):
+					covered_wide += 1
+		_expect(clipped == 0,
+			"every book fits the short landscape band top to bottom, un-clipped (%d did not)"
+			% clipped)
+		_expect(covered_wide == 0,
+			"...and none of them is under a shell button there either (%d covered)"
+			% covered_wide)
+		_expect(wide_rail.get_book_scale() < OverlayMetrics.content_scale(get_viewport()) + 0.001,
+			"...because the HEIGHT of the band, not the squeeze, is what sized them (%.2fx)"
+			% wide_rail.get_book_scale())
+		await _screenshot("book_select_phone_landscape.png")
 
 	main.queue_free()
 	await get_tree().process_frame

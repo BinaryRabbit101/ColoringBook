@@ -464,11 +464,24 @@ func _check_book_select() -> void:
 		"the touch target is >= %.0f px (%.0f x %.0f)"
 		% [BookCell.MIN_TOUCH_TARGET, cell.size.x, cell.size.y]
 	)
-	_expect(
-		cell.global_position.x >= 0.0 and cell.get_global_rect().end.x <= shelf.size.x + 1.0,
-		"the book lays out inside the shelf (x %.0f..%.0f of %.0f)"
-		% [cell.global_position.x, cell.get_global_rect().end.x, shelf.size.x]
-	)
+	var rail := shelf.get_carousel()
+	_expect(rail != null and rail.get_cells().size() == EXPECTED_BOOK_COUNT,
+		"the books are on the rail, in shelf order (%d)"
+		% (rail.get_cells().size() if rail != null else -1))
+	if rail == null:
+		shelf.queue_free()
+		return
+	# BL-49: one row. The grid is still the layout -- it just has a column per book
+	# now, which is what lets ShelfBoards go on drawing one plank per row unchanged.
+	var rows := {}
+	for other in cells:
+		rows[roundi(other.global_position.y)] = true
+	_expect(rows.size() == 1, "every book stands on ONE shelf (%d row(s))" % rows.size())
+	_expect(is_equal_approx(rail.get_book_scale(), 1.0),
+		"a desktop-sized band draws the books at their authored scale (%.2f)"
+		% rail.get_book_scale())
+	_expect(rail.is_cell_fully_visible(cells[0]) and is_equal_approx(rail.scroll_offset, 0.0),
+		"a fresh shelf rests at its left end, first book in full view")
 
 	var chosen: Array[BookDef] = []
 	shelf.book_chosen.connect(func(book: BookDef) -> void: chosen.append(book))
@@ -483,18 +496,76 @@ func _check_book_select() -> void:
 	shelf.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
 	shelf.size = Vector2(420.0, 820.0)
 	await _settle_layout()
-	var overflowing := 0
-	for other in shelf.get_cells():
-		if other.global_position.x < 0.0 or other.get_global_rect().end.x > shelf.size.x + 1.0:
-			overflowing += 1
-	_expect(overflowing == 0,
-		"a 420 px-wide shelf still fits every book (%d cell(s) overflowing)" % overflowing)
+	_expect(rail.get_max_offset() > 0.0,
+		"a 420 px-wide shelf is wider than its band, so it scrolls (%.0f px of slack)"
+		% rail.get_max_offset())
+	# BL-49's contract is REACHABILITY, not fitting: a book that does not fit is
+	# swiped to, and every one of them has to come fully into view when it is.
+	var unreachable := 0
+	for i in cells.size():
+		rail.snap_to_index(i, false)
+		await _settle_layout()
+		if not rail.is_cell_fully_visible(cells[i]):
+			unreachable += 1
+	_expect(unreachable == 0,
+		"every book on a 420 px shelf can be swiped fully into view (%d could not)"
+		% unreachable)
+	rail.snap_to_index(0, false)
+	await _settle_layout()
+
+	# --- a swipe is not a tap -------------------------------------------------
+	# Pushed straight into the viewport rather than through the OS, so the check is
+	# deterministic and needs no window focus: the rail reads ScreenTouch/ScreenDrag
+	# in _input, which is exactly what push_input delivers (DESIGN.md 3.3).
+	var before := chosen.size()
+	var start := cells[0].get_global_rect().get_center()
+	_push_touch(start, true)
+	for step in 6:
+		start.x -= 20.0
+		_push_drag(start, Vector2(-20.0, 0.0))
+	_expect(rail.consumed_gesture(),
+		"dragging across a book turns the press into a swipe")
+	_expect(rail.scroll_offset > 0.0,
+		"...and the rail really moved with the finger (%.0f px)" % rail.scroll_offset)
+	# The press the Button would still deliver on release. It must be swallowed.
+	cells[0].pressed.emit()
+	_expect(chosen.size() == before,
+		"...and the book under the finger does NOT open (%d event(s))" % (chosen.size() - before))
+	_push_touch(start, false)
+	await _settle_layout()
+	_expect(not cells[0].disabled,
+		"the swiped-over book is tappable again once the finger lifts")
+	rail.snap_to_index(0, false)
+	# A tap after a swipe still opens: the guard clears on the next press.
+	_push_touch(cells[0].get_global_rect().get_center(), true)
+	_expect(not rail.consumed_gesture(), "a fresh press starts as a tap again")
+	_push_touch(cells[0].get_global_rect().get_center(), false)
+	cells[0].pressed.emit()
+	_expect(chosen.size() == before + 1,
+		"...and a tap still opens the book (%d event(s))" % (chosen.size() - before))
+
 	shelf.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	await _settle_layout()
 
 	await _screenshot("book_select.png")
 	shelf.queue_free()
 	await get_tree().process_frame
+
+
+func _push_touch(position: Vector2, pressed: bool) -> void:
+	var event := InputEventScreenTouch.new()
+	event.index = 0
+	event.position = position
+	event.pressed = pressed
+	get_viewport().push_input(event, true)
+
+
+func _push_drag(position: Vector2, relative: Vector2) -> void:
+	var event := InputEventScreenDrag.new()
+	event.index = 0
+	event.position = position
+	event.relative = relative
+	get_viewport().push_input(event, true)
 
 
 # ========================================================= 4/5: colouring ==

@@ -1,8 +1,9 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/screens/book_select.gd" id="1_book_select"]
 [ext_resource type="Script" path="res://scripts/components/shelf_backdrop.gd" id="2_room"]
 [ext_resource type="Script" path="res://scripts/components/shelf_boards.gd" id="3_boards"]
+[ext_resource type="Script" path="res://scripts/components/book_carousel.gd" id="4_carousel"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_sign"]
 content_margin_left = 30.0
@@ -70,13 +71,18 @@ layout_mode = 2
 mouse_filter = 2
 theme_override_constants/separation = 18
 
-[node name="Header" type="PanelContainer" parent="Margin/Body"]
+[node name="HeaderRow" type="MarginContainer" parent="Margin/Body"]
+layout_mode = 2
+mouse_filter = 2
+
+[node name="Header" type="PanelContainer" parent="Margin/Body/HeaderRow"]
 layout_mode = 2
 size_flags_horizontal = 4
+size_flags_vertical = 0
 mouse_filter = 2
 theme_override_styles/panel = SubResource("StyleBoxFlat_sign")
 
-[node name="Title" type="Label" parent="Margin/Body/Header"]
+[node name="Title" type="Label" parent="Margin/Body/HeaderRow/Header"]
 layout_mode = 2
 mouse_filter = 2
 theme_override_colors/font_color = Color(0.32549, 0.207843, 0.121569, 1)
@@ -86,36 +92,37 @@ theme_override_font_sizes/font_size = 44
 text = "Pick a book"
 horizontal_alignment = 1
 
-[node name="Scroll" type="ScrollContainer" parent="Margin/Body"]
-layout_mode = 2
-size_flags_vertical = 3
-horizontal_scroll_mode = 0
-
-[node name="Row" type="HBoxContainer" parent="Margin/Body/Scroll"]
+[node name="Carousel" type="Control" parent="Margin/Body"]
+clip_contents = true
 layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3
+mouse_filter = 1
+script = ExtResource("4_carousel")
+
+[node name="Track" type="Control" parent="Margin/Body/Carousel"]
+layout_mode = 0
+offset_right = 40.0
+offset_bottom = 40.0
 mouse_filter = 2
 
-[node name="Bookcase" type="MarginContainer" parent="Margin/Body/Scroll/Row"]
-layout_mode = 2
-size_flags_horizontal = 0
-size_flags_vertical = 0
+[node name="Bookcase" type="MarginContainer" parent="Margin/Body/Carousel/Track"]
+layout_mode = 0
+offset_right = 40.0
+offset_bottom = 40.0
 mouse_filter = 2
 theme_override_constants/margin_left = 24
 theme_override_constants/margin_top = 18
 theme_override_constants/margin_right = 24
 theme_override_constants/margin_bottom = 30
 
-[node name="Boards" type="Control" parent="Margin/Body/Scroll/Row/Bookcase"]
+[node name="Boards" type="Control" parent="Margin/Body/Carousel/Track/Bookcase"]
 layout_mode = 2
 mouse_filter = 2
 script = ExtResource("3_boards")
 
-[node name="Shelf" type="GridContainer" parent="Margin/Body/Scroll/Row/Bookcase"]
+[node name="Shelf" type="GridContainer" parent="Margin/Body/Carousel/Track/Bookcase"]
 layout_mode = 2
-size_flags_horizontal = 0
-size_flags_vertical = 0
 theme_override_constants/h_separation = 24
 theme_override_constants/v_separation = 48
 columns = 1

@@ -85,6 +85,12 @@ extends Control
 ## a ~390 pt phone is a third of their authored size. Every overlay now takes one
 ## shared scale from [OverlayMetrics] -- including the two buttons built HERE, which
 ## are the first thing a grown-up has to hit (see [method _apply_overlay_scale]).
+##
+## [b]BL-49: the two shell buttons announce themselves to the shelf.[/b] Growing them
+## for a phone put them on top of the books underneath, so [method _apply_shelf_chrome]
+## hands [BookSelect] the strip they occupy and the shelf lays its sign and its rail
+## of books out below it. The buttons are still overlays and the shelf still has no
+## idea what they ARE -- it is told two numbers, the way it is told its books.
 
 ## The visible screen changed. Payload is one of the SCREEN_* ids.
 signal screen_changed(screen_id: String)
@@ -661,6 +667,9 @@ func _connect_screen(screen: Control, id: String) -> void:
 			(screen as TitleScreen).start_requested.connect(_on_title_start)
 		SCREEN_BOOK_SELECT:
 			(screen as BookSelect).book_chosen.connect(_on_book_chosen)
+			# BL-49: told before it is uncovered, so the rail is already clear of the
+			# corner buttons on the first frame the player sees.
+			_apply_shelf_chrome()
 		SCREEN_COLORING:
 			(screen as ColoringPage).back_requested.connect(_on_coloring_back)
 
@@ -824,6 +833,43 @@ func _apply_overlay_scale() -> void:
 	_more_books.offset_top = pad
 	_more_books.offset_right = pad + width
 	_more_books.offset_bottom = pad + height
+	_apply_shelf_chrome()
+
+
+## BL-49. The shelf lays its books out below whatever the two corner buttons are
+## using, and only this node knows what that is -- so it measures the strip and tells
+## the shelf. Two numbers, both in canvas pixels:
+##
+## [codeblock]
+## bottom      how far down the buttons reach, plus one inset of clearance
+## free_width  how wide a CENTRED sign can be before it runs into one of them
+## [/codeblock]
+##
+## [param free_width] is twice the SMALLER of the two gaps because the sign is
+## centred on the canvas and the two buttons are nowhere near the same width -- the
+## 190 px pill decides it, every time.
+##
+## The buttons are measured from their OFFSETS rather than from their live rects, and
+## "More books" is counted whenever this build has a server rather than when the
+## button happens to be visible: both are false for the length of a screen swap, and
+## a shelf that laid itself out twice per swap would be a visible reflow.
+func _apply_shelf_chrome() -> void:
+	if not (_current_screen is BookSelect) or not is_instance_valid(_gear):
+		return
+	var canvas := _overlays.size
+	if canvas.x < 1.0:
+		return
+	var scale := OverlayMetrics.content_scale(get_viewport())
+	var pad := MORE_BOOKS_INSET * scale
+	var bottom: float = _gear.offset_bottom
+	var right_edge: float = canvas.x + _gear.offset_left
+	var left_edge := 0.0
+	if is_instance_valid(_more_books) and Backend.is_enabled():
+		bottom = maxf(bottom, _more_books.offset_bottom)
+		left_edge = _more_books.offset_right
+	var centre := canvas.x * 0.5
+	var free := 2.0 * maxf(minf(centre - left_edge, right_edge - centre) - pad, 0.0)
+	(_current_screen as BookSelect).set_chrome_band(bottom + pad, free)
 
 
 ## Shows the settings overlay over whatever screen is up.
@@ -969,6 +1015,7 @@ func _refresh_more_books() -> void:
 		return
 	_more_books.visible = _current_id == SCREEN_BOOK_SELECT \
 		and not _transitioning and Backend.is_enabled()
+	_apply_shelf_chrome()
 
 
 func open_pack_shop() -> PackShop:

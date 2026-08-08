@@ -454,6 +454,24 @@ func _apply_cover_color(color: Color) -> void:
 
 # ================================================================== response ==
 
+## Drops a press that is in progress WITHOUT firing [signal BaseButton.pressed]
+## (BL-49). [BookCarousel] calls this the moment a press on a book turns out to be a
+## swipe along the rail: the finger went down on this book, so [Button] is holding a
+## press that would open it on release, and a swipe must never open anything.
+##
+## Toggling [member BaseButton.disabled] is what actually drops it -- [BaseButton]
+## clears its pending press when it is disabled, and re-enabling immediately leaves
+## the book tappable again for the next real tap. The settle afterwards is because
+## the sink animation played on [signal BaseButton.button_down] and there will be no
+## [signal BaseButton.button_up] to undo it.
+func cancel_press() -> void:
+	if disabled:
+		return
+	disabled = true
+	disabled = false
+	_settle(is_hovered())
+
+
 func _on_hover_changed(inside: bool) -> void:
 	_art.warm = inside
 	_art.queue_redraw()

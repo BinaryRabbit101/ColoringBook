@@ -1006,6 +1006,36 @@ func _check_overlay_scaling() -> void:
 		"...and so does 'More books' (%.0f of %.0f)"
 		% [minf(more.size.x, more.size.y), floor_px])
 	_main.close_settings()
+	await _settle_layout()
+
+	# --- BL-49: ...and neither of them is standing on a book ------------------
+	# The two buttons above are the ones the playtest complained about. At the cap
+	# they are ~460 x 173 canvas px each, which is exactly why the shelf below them
+	# is a rail that starts under the band rather than a grid that fills into it.
+	var shelf := _main.get_current_screen() as BookSelect
+	_expect(shelf != null, "the shelf is the screen under the shell buttons")
+	if shelf != null:
+		var rail := shelf.get_carousel()
+		var chrome: Array[Rect2] = [gear.get_global_rect(), more.get_global_rect()]
+		var covered := 0
+		for cell in shelf.get_cells():
+			for button_rect in chrome:
+				if rail.get_cell_rect(cell).intersects(button_rect):
+					covered += 1
+		_expect(covered == 0,
+			"no book is under the gear or 'More books' at a %.2fx squeeze (%d covered)"
+			% [PHONE_SQUEEZE, covered])
+		var sign_rect := shelf.get_sign().get_global_rect()
+		_expect(not sign_rect.intersects(chrome[0]) and not sign_rect.intersects(chrome[1]),
+			"...and neither is the 'Pick a book' sign, which drops BELOW them when the pill "
+			+ "is too wide to sit beside (sign at y %.0f, buttons end at y %.0f)"
+			% [sign_rect.position.y, maxf(chrome[0].end.y, chrome[1].end.y)])
+		_expect(is_equal_approx(rail.get_book_scale(), OverlayMetrics.MAX_CONTENT_SCALE),
+			"a phone's squeeze draws the books at the content cap, %.1fx (%.2f)"
+			% [OverlayMetrics.MAX_CONTENT_SCALE, rail.get_book_scale()])
+		_expect(rail.is_cell_fully_visible(shelf.get_cells()[0]),
+			"...with the first book whole and against the left end of the rail")
+		await _screenshot("book_select_phone.png")
 
 	# --- the other three overlays, on the same one mechanism ------------------
 	var gate := _main.open_adult_gate(Callable())

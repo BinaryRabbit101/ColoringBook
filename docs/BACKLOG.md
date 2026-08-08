@@ -268,6 +268,88 @@ at 52 % of the width with 22 px type, and the account email clipped to
   `coloring_page.{tscn,gd}` (Start-over confirm only), `main.gd` (gear + More
   books), `shell_smoke.gd`, `mobile_smoke.gd`, DESIGN.md §3.5.
 
+### BL-49: The shelf is a rail you swipe, not a grid — `done` (2026-08-08)
+Playtest, straight after BL-48: "the buttons on mobile on the book selection page
+are covering up some of the coloring book selections. We believe it'll look nicer
+to have books be laid out in a horizontal carousel instead." Both halves are the
+same fact — BL-48 grew the two shell buttons to ~460 × 173 canvas px on a phone,
+and the shelf's grid filled from the top left (BL-43) into exactly that corner.
+A grid cannot dodge them; its job is to use the whole width. A rail can.
+- **One row, and the grid stayed.** `Shelf` is still a `GridContainer` — it just
+  gets a column per book now (`columns = cells.size()`), so **`ShelfBoards` and
+  `ShelfBackdrop` are untouched**: the boards still group cells by y and draw one
+  plank per row, and there is one row, so they draw one long shelf. Not one line
+  of the BL-28 furniture changed for this.
+- **The rail is one SCALED Control** (`BookCarousel`, `scripts/components/`,
+  attached to a node in `book_select.tscn` — the same shape `ShelfBoards` has, no
+  new scene file). `Track` carries a uniform `scale` and everything comes along:
+  books, planks, contact shadows, lettering. Scaling the node rather than
+  re-authoring sizes is why the spine, the page lip and the title stay in
+  proportion — `BookCell` goes on drawing in the space its constants were written
+  for. The scale is
+  `clamp(min(OverlayMetrics.content_scale, (band height − headroom) / bookcase
+  height), 0.55, 2.4)`: **1.0 on a desktop by construction** (BL-48's squeeze
+  clamps there), 2.4× on a real phone — where a book is 538 canvas px, ~47 % of
+  the glass, and about two are on screen with the next one peeking. The second
+  half of the `min` is what stops a phone's LANDSCAPE canvas, which is SHORT,
+  asking for a book taller than the band it is clipped to.
+- **The shelf still knows nothing about the buttons.** `Main` measures its own two
+  overlays and calls `BookSelect.set_chrome_band(bottom, free_width)` — told, never
+  discovered, the way the shelf is told its books. `free_width` is **twice the
+  smaller of the two gaps**, because the sign is centred on the canvas and the two
+  buttons are nowhere near the same width: the 190 px pill decides it every time.
+  With nobody telling it (every harness that drives `book_select.tscn` alone) the
+  band is zero and the layout is the desktop one.
+- **The sign gets out of the way in the one direction that has room.** "Pick a
+  book" grows with the squeeze but only as far as it still fits BETWEEN the two
+  buttons; when even its authored width will not (a portrait phone, where "More
+  books" alone is 40 % of the canvas) it drops BELOW the band and takes the full
+  squeeze instead. Measured at 2.95×: sign at y 268, buttons ending at y 221.
+- **A swipe must never open a book, and that is defended twice.** The rail reads
+  `ScreenTouch`/`ScreenDrag` in `_input` (which runs BEFORE the GUI phase, so it can
+  watch a press a `BookCell` is also watching) and only claims the gesture past
+  `DRAG_SLOP` = 14 px. On claiming it, (1) every cell is told to `cancel_press()` —
+  toggling `disabled` is what actually drops `BaseButton`'s pending press — and
+  (2) `consumed_gesture()` stays true until the NEXT press, so `BookSelect` ignores
+  a `pressed` that arrives anyway. Two guards because the order in which a real
+  mouse release and the touch event emulated from it arrive is the engine's
+  business, not ours. A tap under the slop is untouched: the book owns it, exactly
+  as before.
+- **Momentum and snapping are the same gesture**: on release the flick is coasted
+  forward on paper (`velocity × 0.20 s`), and the rail tweens to whichever book is
+  nearest where it WOULD have stopped. A hard flick therefore skips books and a
+  gentle one moves by one, with no separate "fling" mode. Books snap to the LEFT of
+  the band, not to its centre — that is BL-43's rule surviving the rewrite, and it
+  is also why the rail is **never centred when the shelf fits**: a two-book shelf
+  and a twenty-book shelf must put the first book in the same place.
+- **Gotcha: the mouse wheel cannot be read in `_gui_input` here.** A `BookCell` is
+  `MOUSE_FILTER_STOP`, and Godot ENDS the GUI walk at a STOP control whether or not
+  it accepted the event — so a wheel notch over a book never reaches the rail's
+  `_gui_input` at all. It is read in `_input` with a rect test instead, which is one
+  code path for finger, mouse-drag and wheel.
+- **Gotcha: a book's `size` is no longer where it is drawn.** The rail is scaled, so
+  `Control.get_global_rect()` under-reports a book by up to 2.4×. Anything comparing
+  a book to something outside the rail (the harnesses' "is this book under a
+  button") must ask `BookCarousel.get_cell_rect()`.
+- **Desktop moved a little, and deliberately.** Books are one row instead of a wrapped
+  grid, and they sit ~90 px lower (the band is centred vertically under a header row
+  that now reserves the shell's 112 px strip). Every authored SIZE is unchanged —
+  `flow_smoke` pins the desktop book scale at exactly 1.00.
+- Smokes: **flow 258 → 268**, **shell 199 → 204**, **mobile 156 → 167**; paint 123,
+  palette 247, dlc 131 unchanged and green. flow gained the one-row assertion, the
+  desktop scale, and — pushed straight into the viewport with `push_input`, so it
+  needs no window focus and cannot flake — a real drag across a book that scrolls
+  the rail, is refused as an open, leaves the book tappable, and is followed by a
+  tap that DOES open it. shell gained the phone-squeeze half (no book and no sign
+  under either button at 2.95×, books at the 2.4 cap). mobile gained both
+  orientations at the squeeze a real window produces, including a **new 812 × 375
+  phone-landscape window** — the short canvas, where the book scale is height-bound
+  rather than squeeze-bound and a book could be clipped by the band.
+- Affected: `scripts/components/book_carousel.gd` (new),
+  `scenes/screens/book_select.tscn`, `scripts/screens/book_select.gd`,
+  `scripts/components/book_cell.gd` (`cancel_press`), `scripts/main.gd`
+  (`_apply_shelf_chrome`), flow + shell + mobile smokes, DESIGN.md §2.
+
 ## Completed — archived
 
 Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md):

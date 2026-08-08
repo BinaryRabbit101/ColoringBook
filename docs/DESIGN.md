@@ -119,7 +119,7 @@ The crayon row grows three features (designed 2026-08-07):
 ## 2. Player flow
 
 ```
-TitleScreen ──► BookSelect (grid of book covers)
+TitleScreen ──► BookSelect (one shelf of book covers, swiped along)
                     │
                     ▼
               ColoringPage ◄──► free page navigation (any page, any order, any time)
@@ -128,8 +128,15 @@ TitleScreen ──► BookSelect (grid of book covers)
               BookSelect
 ```
 
-The shelf grid hangs from the **top-left** and grows right/down (BL-43), and a
-cell wears the pack's **artist cover** when it ships one (BL-40 — manifest
+The shelf is **one horizontal rail** you swipe along (BL-49): it hangs from the
+**left** (BL-43's rule — the first book is in the same place whatever the count),
+runs off the right-hand edge for as many books as there are, and starts below
+whatever strip the shell's corner buttons are using, so a phone-sized "More
+books" can never be laid on top of a book. Books are drawn at
+`min(OverlayMetrics.content_scale, the height the band can give)` — 1.0 on a
+desktop, up to 2.4× on a phone, where roughly two books are on screen at a time.
+A drag past 14 px becomes a swipe and cancels the press under it; a flick coasts
+and snaps. A cell wears the pack's **artist cover** when it ships one (BL-40 — manifest
 `cover`; fallback is page 1's detail art, which is also what every pre-cover
 pack names there). The same cover rides the book-open/close animation's flying
 front (BL-30/BL-40). The pack shop separates **coloring books and sticker sets
