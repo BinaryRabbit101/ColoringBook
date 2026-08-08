@@ -64,6 +64,17 @@ var texture: Texture2D = null:
 		texture = value
 		queue_redraw()
 
+## The sprite-sheet spec for an ANIMATED sticker (BL-43), or {} for a still one.
+## Same dictionary [StickerLayer] is handed, from the same [StickerDef], so the card
+## and the page play the same animation at the same speed -- and a card advertises
+## what the child will actually get.
+var sheet: Dictionary = {}:
+	set(value):
+		sheet = value
+		_clock = 0.0
+		set_process(not sheet.is_empty())
+		queue_redraw()
+
 ## Index of this sticker in the [StickerSetDef]'s list.
 var sticker_index: int = 0
 
@@ -109,12 +120,35 @@ var canonical_size: Vector2 = DEFAULT_SIZE:
 
 var _lift_scale := 1.0
 var _bounce_tween: Tween
+## Playback clock for an animated card. Only ever ticking when [member sheet] is
+## non-empty -- a strip of still stickers costs no `_process` at all.
+var _clock := 0.0
 
 
 func _init() -> void:
 	custom_minimum_size = box_for(orientation, canonical_size)
 	focus_mode = Control.FOCUS_NONE
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	set_process(false)
+
+
+func _process(delta: float) -> void:
+	var before := current_frame()
+	_clock += delta
+	if current_frame() != before:
+		queue_redraw()
+
+
+## Which frame of [member sheet] this card is showing. 0 for a still sticker.
+func current_frame() -> int:
+	if sheet.is_empty():
+		return 0
+	var count := int(sheet[StickerLayer.SHEET_FRAMES])
+	return int(_clock * float(sheet[StickerLayer.SHEET_FPS])) % count
+
+
+func is_animated() -> bool:
+	return not sheet.is_empty()
 
 
 func _ready() -> void:
@@ -194,18 +228,33 @@ func _draw() -> void:
 	if texture != null:
 		var inset := minf(card.size.x, card.size.y) * ART_INSET_RATIO
 		var box := card.grow(-inset)
-		var art_size := Vector2(texture.get_size())
+		# One FRAME of the sheet for an animated sticker; the whole image for a still
+		# one, which is the same rect this drew before BL-43.
+		var art_size := StickerLayer.frame_size(texture, sheet)
 		if art_size.x > 0.0 and art_size.y > 0.0:
 			var factor := minf(box.size.x / art_size.x, box.size.y / art_size.y)
 			var drawn := art_size * factor
-			draw_texture_rect(
-				texture, Rect2(box.get_center() - drawn * 0.5, drawn), false
-			)
+			var target := Rect2(box.get_center() - drawn * 0.5, drawn)
+			if sheet.is_empty():
+				draw_texture_rect(texture, target, false)
+			else:
+				draw_texture_rect_region(texture, target, _frame_region(art_size))
 
 	if selected:
 		_round_rect_outline(card, SELECTION_RIM, SELECTION_RIM_WIDTH, CARD_RADIUS)
 	_round_rect_outline(
 		card, CARD_EDGE, 3.0 if is_hovered() or selected else 2.0, CARD_RADIUS
+	)
+
+
+## The source rect of the current frame, in the sheet's own pixels. Row-major from
+## the top left, which is how [Sprite2D] numbers its frames -- the page draws the
+## same sheet through that node, and the two must not disagree about frame 3.
+func _frame_region(cell: Vector2) -> Rect2:
+	var columns := int(sheet[StickerLayer.SHEET_HFRAMES])
+	var index := current_frame()
+	return Rect2(
+		Vector2(float(index % columns) * cell.x, float(index / columns) * cell.y), cell
 	)
 
 
