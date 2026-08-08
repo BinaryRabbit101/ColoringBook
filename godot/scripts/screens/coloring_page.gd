@@ -466,6 +466,10 @@ func _ready() -> void:
 	# BL-6: the interval autosave announces the moment; this screen is what can
 	# actually reach the pixels.
 	GameState.autosave_due.connect(_on_autosave_due)
+	# BL-50: a picture that arrived from the account rather than from this canvas.
+	# The screen is the only thing that can put it on screen, and the only thing
+	# that knows whether the child is in the middle of drawing over it.
+	GameState.page_paint_installed.connect(_on_page_paint_installed)
 	# M6: portrait windows get a leaner toolbar. BL-21: and landscape ones dock the
 	# crayons beside the canvas instead of under it.
 	resized.connect(_apply_toolbar_layout)
@@ -876,6 +880,75 @@ func has_pending_restore() -> bool:
 	return _restoring
 
 
+# ======================================== a picture from the account (BL-50) ==
+# The reported bug: a grown-up saves a page on one tablet, signs in on a second
+# tablet whose app has been running the whole time, and the drawing is not there.
+# The FILE was: [SyncQueue] pulls it on book open (and, since BL-50, on sign-in)
+# and [method GameState.install_page_paint] writes it. What was missing is this --
+# the screen was built from the local save some milliseconds EARLIER and had no
+# reason to look again, so the child saw blank paper over a picture that was
+# already on disk. Worse, the next save point read that blank canvas back and
+# uploaded it, so the drawing the grown-up was looking for was then destroyed on
+# the server as well.
+#
+# So the pull ends here, at the one object that can both show the picture and say
+# whether showing it would be rude.
+
+## A paint layer for some page arrived from the account. Adopt it only if it is
+## THIS page and this visit has nothing of its own to lose.
+##
+## [b]The refusals are the design rule, not caution[/b] (DLC_SERVER.md 8.2: no
+## response ever yanks a screen). A child colouring right now keeps their canvas
+## and wins the next last-write-wins round with it; the file on disk is the one
+## that loses, exactly as it would have if the download had landed a second later.
+func _on_page_paint_installed(book: BookDef, page_index: int, _path: String) -> void:
+	if _book == null or book == null or not is_inside_tree():
+		return
+	if book.get_uid() != _book.get_uid() or page_index != GameState.current_page_index:
+		return
+	if not _page_view.is_page_loaded():
+		return
+	if _paint_dirty or _save_deferred or _replaying or _restoring or _saving:
+		return
+	if _page_view.is_stroke_active() or is_transitioning():
+		return
+	await reload_saved_paint(page_index)
+
+
+## Throws the canvas away and rebuilds it from the paint layer on disk. Public
+## because the pulled-picture path above is not the only imaginable caller (a
+## "restore from the cloud" button would be the next), and because the smokes
+## assert it directly.
+##
+## [b]Cleared first, never composited over.[/b] The layer on screen and the file
+## are two different pictures of the same page -- one is not an update of the
+## other -- so drawing the new one on top would leave whatever the old one had
+## where the new one is transparent. This is [method restart_current_page]'s wipe
+## followed by [method _restore_saved_paint]'s restore, which is precisely "this
+## page, as the file has it".
+func reload_saved_paint(page_index: int) -> void:
+	if _book == null or not _page_view.is_page_loaded():
+		return
+	# Bump FIRST: a coverage readback in flight was taken off the layer about to be
+	# wiped and must not be folded into the fresh tracker (restart_current_page's
+	# reasoning, and the same hazard).
+	_page_generation += 1
+	_pending_regions.clear()
+	_paint_dirty = false
+	_save_deferred = false
+	_pre_completed = false
+	_completed_this_visit = false
+	_completing = false
+	_hide_celebration()
+	_page_view.clear_paint()
+	# BL-17: the undo stack describes strokes over a picture that is no longer the
+	# page. Nothing on it can be replayed onto what is arriving.
+	_clear_history()
+	_build_coverage()
+	_refresh_nav()
+	await _restore_saved_paint(page_index)
+
+
 ## True when the restored paint alone already completed this page, so the
 ## completion cascade was suppressed (see [member _pre_completed]).
 func is_page_pre_completed() -> bool:
@@ -924,6 +997,13 @@ func _persist_page(page_index: int) -> bool:
 	# file already on disk -- which the replay was reconstructing from anyway.
 	if _replaying:
 		return false
+	# BL-50, and the same argument one door along: a restore in flight means the
+	# canvas is not the page yet. The file it is being rebuilt FROM is the better
+	# copy, and on a page whose picture has just been pulled off the account it is
+	# the only copy -- writing a half-composited canvas over it would destroy the
+	# drawing this device came here to show.
+	if _restoring:
+		return false
 	if _has_nothing_to_persist(page_index):
 		return false
 	var image := _page_view.get_paint_image()
@@ -939,9 +1019,13 @@ func _persist_page_async(page_index: int) -> bool:
 	if _has_nothing_to_persist(page_index):
 		return false
 	# BL-6's "never read the paint layer mid-stroke" extends to "never mid-replay"
-	# (BL-17): between the clear and the last re-stamp the layer is a page nobody
-	# has ever seen. Every caller here has frames left, so it simply waits.
+	# (BL-17), and to "never mid-restore" (BL-50): between the clear and the
+	# composite the layer is a page nobody has ever seen, and on a page whose
+	# picture has just arrived from the account it is blank paper over the very
+	# drawing this save would then upload. Every caller here has frames left, so it
+	# simply waits.
 	await _await_replay()
+	await _await_restore()
 	if not is_inside_tree():
 		return false
 	var generation := _page_generation
@@ -1644,6 +1728,17 @@ func _clear_history() -> void:
 func _await_replay() -> void:
 	var frames := 0
 	while _replaying and is_inside_tree() and frames < MAX_REPLAY_WAIT_FRAMES:
+		frames += 1
+		await get_tree().process_frame
+
+
+## Waits out a paint restore in flight (BL-50), for the same reason and with the
+## same bound. A restore is a handful of frames -- a wait, a composite and a
+## coverage pass -- so a save point that arrives on top of one is a race, never a
+## stall the player can feel.
+func _await_restore() -> void:
+	var frames := 0
+	while _restoring and is_inside_tree() and frames < MAX_REPLAY_WAIT_FRAMES:
 		frames += 1
 		await get_tree().process_frame
 

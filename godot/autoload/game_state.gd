@@ -80,6 +80,19 @@ signal page_progress_erased(book: BookDef, page_index: int)
 ## file it names without racing the save it is reacting to -- and so the local save
 ## is never delayed by anything a listener does.
 signal page_paint_written(book: BookDef, page_index: int, path: String)
+## ONE page's paint layer arrived from somewhere that is NOT this device's canvas
+## -- in practice the copy [SyncQueue] pulled off the account's server (BL-50).
+## Emitted by [method install_page_paint] only, in ADDITION to
+## [signal page_paint_written].
+##
+## [b]Why it is a second signal rather than a flag on the first.[/b] Every
+## listener of [signal page_paint_written] is reacting to a file it (or the player)
+## just caused; this one says "a picture you did not draw is now on disk", which is
+## the only case where a screen already showing that page has something to do --
+## adopt it, so a grown-up who signs in mid-session sees the drawing another device
+## saved without closing the book (BL-50). Sync ignores it: it is the one that
+## wrote the file.
+signal page_paint_installed(book: BookDef, page_index: int, path: String)
 ## Emitted after [method set_page_locked] actually changed a page's coloring lock
 ## (BL-10). Nothing in the game listens today -- the screen that flipped the lock
 ## already knows -- but the shelf will want it the day a locked page is badged.
@@ -855,6 +868,11 @@ func install_page_paint(book: BookDef, page_index: int, png: PackedByteArray) ->
 	file.store_buffer(png)
 	file.close()
 	page_paint_written.emit(book, page_index, path)
+	# BL-50: and the half that is NOT true of a save -- somebody else drew this. A
+	# [ColoringPage] already open on this page restores it in response; without
+	# that the picture sits on disk under a blank canvas until the book is closed
+	# and reopened, and the blank canvas overwrites it at the next save point.
+	page_paint_installed.emit(book, page_index, path)
 	return true
 
 

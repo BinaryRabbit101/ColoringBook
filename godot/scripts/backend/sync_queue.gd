@@ -269,6 +269,13 @@ func on_launch() -> void:
 ## A grown-up just signed in. Everything on this device is potentially unsynced --
 ## including paint painted while signed out -- so the local state is rescanned from
 ## scratch before the first drain.
+##
+## [b]BL-50: a sign-in is a book open too, when a book is open.[/b] The app on this
+## device has been running the whole time -- signing in is the only thing that
+## changed -- so the "pulled on book open" rule (6.2) has already fired for the book
+## the player is in, before there was an account to pull for. Running the paint half
+## again here is what makes "log in on the other tablet and the drawing is there"
+## true without closing the book, and it costs one metadata request for one book.
 func on_signed_in() -> void:
 	_ensure_loaded()
 	_adopt_account(_auth.get_email() if _auth != null else "")
@@ -276,6 +283,10 @@ func on_signed_in() -> void:
 		return
 	_reconcile(true)
 	await drain(REASON_SIGN_IN, true)
+	if not is_active() or GameState.current_book == null:
+		return
+	await _pull_book_paint(GameState.current_book.get_uid())
+	_save()
 
 
 ## Signing out. The bookkeeping is KEPT: the same grown-up signing back in on this
@@ -1355,12 +1366,24 @@ func _wants_server_paint(uid: String, page_index: int, server: Dictionary) -> bo
 	if parse_iso8601(String(server.get("client_painted_at", ""))) \
 			<= parse_iso8601(String(page[KEY_PAINTED_AT])):
 		return false
-	# Never replace the pixels under the page that is open right now: the screen
-	# holds its own layer and would overwrite this at the next save point anyway,
-	# and swapping the file mid-visit is exactly the "a response yanks a screen"
+	# Never replace pixels the player has not sent yet, and never under the page
+	# that is open right now: that screen holds a layer this device drew and has
+	# not managed to upload, it would overwrite the download at the next save point
+	# anyway, and swapping the file mid-visit is the "a response yanks a screen"
 	# failure 8.2 forbids.
+	#
+	# [b]BL-50 narrowed this from "the open page, always".[/b] The resume page IS
+	# the open page by construction -- [method GameState.start_book] sets the cursor
+	# before it emits [signal GameState.book_started], which is what runs this pull
+	# -- so a blanket refusal meant the one page a child looks at first could never
+	# be refreshed from the account, on any device, ever. It is only unsent work
+	# that must not be overwritten, and unsent work is exactly what the two digests
+	# disagreeing means; a copy the server has acknowledged is safe to replace, and
+	# the screen adopts the newer picture off
+	# [signal GameState.page_paint_installed].
 	if GameState.current_book != null and GameState.current_book.get_uid() == uid \
-			and GameState.current_page_index == page_index:
+			and GameState.current_page_index == page_index \
+			and String(page[KEY_SHA256]) != String(page[KEY_SYNCED_SHA256]):
 		return false
 	return true
 
