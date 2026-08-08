@@ -72,18 +72,24 @@ const MIN_COLOR_DISTANCE := 0.25
 ## Neon, Earth, Candy, Spooky -- "more colour options, not more fun") with three
 ## boxes of the SAME crayons in escalating finishes, BL-38 added the two ANIMATED
 ## boxes on top of them (Shimmer, Twinkle), and BL-47 added four more animated ones
-## slotted through that tail by loudness (Embers, Ocean Glass, Aurora, Firefly Dust).
+## (Embers, Ocean Glass, Aurora, Firefly Dust) -- which BL-51 re-sorted to the TOP of
+## the ladder after a playtest found them stranded in the subtle band.
 const EXPECTED_EXTRA_SETS := 9
 ## The finish ladder the shipped boxes walk, dullest first: box 0 is the default
 ## crayon box in plain wax, then one box per authored set.
+##
+## THREE TIERS, in three contiguous runs (BL-51): plain wax, then the four BAKEABLE
+## boxes, then the SUBTLE animated pair, then the SPECTACLE four. The order of this
+## array is the order the cycle bars walk, and it is the product claim -- every box
+## is louder than the one before it.
 const FINISH_LADDER: Array[StringName] = [
 	BrushFinish.CLASSIC, BrushFinish.GLOW, BrushFinish.GRAIN, BrushFinish.GLITTER,
-	BrushFinish.EMBERS, BrushFinish.OCEAN, BrushFinish.AURORA, BrushFinish.SHIMMER,
-	BrushFinish.FIREFLY, BrushFinish.TWINKLE
+	BrushFinish.SHIMMER, BrushFinish.TWINKLE,
+	BrushFinish.EMBERS, BrushFinish.OCEAN, BrushFinish.AURORA, BrushFinish.FIREFLY
 ]
 const SET_NAMES: PackedStringArray = [
 	"Neon Glow", "Textured Wax", "Glitter",
-	"Embers", "Ocean Glass", "Aurora", "Shimmer", "Firefly Dust", "Twinkle",
+	"Shimmer", "Twinkle", "Embers", "Ocean Glass", "Aurora", "Firefly Dust",
 ]
 ## BL-47's four, and the [field, speck] mask style LEVELS each one authors. The pair
 ## is the contract the display shader decodes against, and the smoke asserts both
@@ -660,10 +666,13 @@ func _check_crayon_sets() -> void:
 	# contiguous tail, however many of them there are.
 	_expect(animated.size() == 6,
 		"the ladder ships SIX animated boxes on top of the four bakeable ones (%s)" % [animated])
+	# BL-51 re-sorted this tail into two tiers of its own: the SUBTLE animated pair
+	# BL-38 shipped, then BL-47's four turned up into spectacle. A box that had to be
+	# squinted at to be told from the box below it is the bug this order fixes.
 	_expect(animated == PackedStringArray([
-			"embers", "ocean", "aurora", "shimmer", "firefly", "twinkle"]),
-		"...in loudness order -- embers barely moves, twinkle is still the last word (%s)"
-		% [animated])
+			"shimmer", "twinkle", "embers", "ocean", "aurora", "firefly"]),
+		"...in loudness order -- shimmer and twinkle stay the subtle pair, and BL-47's"
+		+ " four top the ladder as spectacle (%s)" % [animated])
 	_expect(first_animated == ladder.size() - animated.size(),
 		"...and they are the LAST boxes in the cycle, not sprinkled through it (first at %d of %d)"
 		% [first_animated, ladder.size()])

@@ -73,6 +73,12 @@ const int MODE_TWINKLE = 5;
 // close to one above -- aurora's satin is shimmer's, a touch gentler -- and that is
 // fine and deliberate: the bake mode and the mask level are different axes, so two
 // boxes may share a look when they are still and part company when they move.
+//
+// BL-51 re-aimed these four at the top of the ladder (see paint_display.gdshader's
+// header for why). Almost all of that is animation and lives over there; what
+// changed HERE is the two bases whose job is to hold the animation up -- the ember
+// crust went darker so the fire has something to glow through, and the firefly dust
+// went brighter so the wandering lights read as having come from somewhere.
 const int MODE_EMBERS = 6;
 const int MODE_OCEAN = 7;
 const int MODE_AURORA = 8;
@@ -286,15 +292,18 @@ void fragment() {
 			discard;
 		}
 		// A cooled CRUST: the same tooth as textured wax, but the grooves go much
-		// deeper (0.55x the crayon's own colour, against grain's 0.70x) so the wax
-		// reads as dark and crazed rather than merely scratchy, and the ridges carry
-		// a faint warm lift -- the heat still in the top of the coal. The glow that
-		// breathes through the cracks is NOT here: it is the mask's 0.15 field level,
-		// and baking it would flatten it the moment it was stamped.
+		// deeper (BL-51: 0.44x the crayon's own colour, against BL-47's 0.55x and
+		// grain's 0.70x) so the wax reads as dark and crazed rather than merely
+		// scratchy, and the ridges carry a warm lift -- the heat still in the top of
+		// the coal. Deeper because the animation over it got a great deal brighter:
+		// the coals only read as glowing THROUGH something if the something is dark,
+		// and BL-51's fire on BL-47's crust washed the crazing out. The glow itself
+		// is NOT here: it is the mask's 0.15 field level, and baking it would flatten
+		// it the moment it was stamped.
 		float crust = wax_grain(dir);
 		wax = mix(
-			wax * 0.55,
-			clamp(wax * 1.06 + vec3(0.055, 0.026, 0.0), vec3(0.0), vec3(1.0)),
+			wax * 0.44,
+			clamp(wax * 1.10 + vec3(0.10, 0.045, 0.0), vec3(0.0), vec3(1.0)),
 			crust
 		);
 		// The grooves are a COLOUR, not an alpha hole (BL-35's corollary): a hole
@@ -329,27 +338,33 @@ void fragment() {
 		if (d > 1.0) {
 			discard;
 		}
-		// Twinkle's flecked base, turned right down: a softer tooth, a SPARSER grid
-		// (26 px against twinkle's 17), fewer cells carrying a fleck, smaller flecks
-		// and a much weaker lift towards white. A frozen firefly page has to read as
-		// faint dust caught in the wax -- if it read as glitter, the box would be
-		// twinkle with a different animation instead of its own quieter idea.
+		// Twinkle's flecked base on a SPARSER grid (24 px against twinkle's 17), so
+		// the still page reads as dust rather than as glitter -- the two boxes have
+		// to be told apart with the animation frozen as well as running.
+		//
+		// BL-51 brightened the motes (0.85 towards white against BL-47's 0.62) and
+		// grew them, because the flies that wander off them got much brighter: a
+		// baked dust too faint to see under a bright firefly is not a base, it is a
+		// rounding error, and the box lost the "these lights came from somewhere"
+		// reading that makes the wander legible.
 		float dust_tooth = wax_grain(dir);
-		wax = mix(wax * 0.88, clamp(wax * 1.07, vec3(0.0), vec3(1.0)), dust_tooth);
-		const float DUST_CELL = 26.0;
+		wax = mix(wax * 0.86, clamp(wax * 1.09, vec3(0.0), vec3(1.0)), dust_tooth);
+		// Matches `firefly_cell` in paint_display.gdshader: the flies have to start
+		// from the motes, or the two halves of the box are unrelated grids.
+		const float DUST_CELL = 24.0;
 		vec2 dust_cell = floor(page_position / DUST_CELL);
 		vec2 dust_jitter = vec2(hash21(dust_cell + 2.3), hash21(dust_cell + 4.7));
 		float mote = 0.0;
-		if (hash21(dust_cell + effect_seed) > 0.62) {
-			float mote_radius = mix(1.1, 2.6, hash21(dust_cell + 6.1));
+		if (hash21(dust_cell + effect_seed) > 0.55) {
+			float mote_radius = mix(1.8, 3.6, hash21(dust_cell + 6.1));
 			mote = clamp(
 				1.0 - length(page_position - (dust_cell + dust_jitter) * DUST_CELL) / mote_radius,
 				0.0, 1.0
 			);
-			mote = pow(mote, 0.62) * effect_strength;
+			mote = pow(mote, 0.58) * effect_strength;
 		}
 		mote *= smoothstep(1.0, 0.70, d);
-		wax = mix(wax, vec3(1.0), mote * 0.62);
+		wax = mix(wax, vec3(1.0), mote * 0.85);
 		alpha = max(falloff, mote);
 	}
 
