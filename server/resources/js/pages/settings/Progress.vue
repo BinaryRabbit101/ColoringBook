@@ -64,7 +64,10 @@ const when = (iso: string) =>
                 {{ shelf.name ?? 'Everyone' }}
             </h2>
 
-            <p v-if="shelf.books.length === 0" class="text-sm text-muted-foreground">
+            <p
+                v-if="shelf.books.length === 0"
+                class="text-sm text-muted-foreground"
+            >
                 Nothing coloured yet.
             </p>
 
