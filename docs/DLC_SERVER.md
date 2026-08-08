@@ -199,7 +199,8 @@ sticker_sets          id, ulid, pack_id →packs, set_uid (unique, stable foreve
                       title, cover_asset_id →assets, sort_order, timestamps
 stickers              id, sticker_set_id →sticker_sets, sticker_index,
                       sticker_id, title, image_asset_id →assets,
-                      image_w, image_h, timestamps
+                      image_w, image_h,
+                      anim json (nullable — sprite sheet, BL-38), timestamps
                       UNIQUE(sticker_set_id, sticker_index)
                       UNIQUE(sticker_set_id, sticker_id)
 assets                id, ulid, kind ('display'|'mask'|'idmap'|'regions'|'cover'|'sticker'),
@@ -497,6 +498,30 @@ pack.zip                                   manifest kind: "sticker_set"
 - **Delta updates (§7.4, BL-26) are untouched.** They diff the manifest's per-file sha256
   map and have never cared what the files are; a sticker pack updates through the same
   code path, verbatim.
+- **A sticker may be animated** (BL-38, 2026-08-08). Its image is then a sprite-sheet PNG
+  and its entry carries one extra object:
+
+  ```json
+  { "sticker_id": "sparkle", "image": "stickers/…/sparkle.png",
+    "anim": { "hframes": 4, "vframes": 2, "frames": 7, "fps": 12 } }
+  ```
+
+  `hframes`/`vframes` are the grid, columns then rows; `frames` is how many cells are
+  actually drawn, read **row-major from the top left**, and may be fewer than
+  `hframes × vframes` so a 7-frame animation need not be padded to a rectangle nobody
+  drew; `fps` is 1–30. A **still sticker has no `anim` key at all** — not `null`, not an
+  empty object — which is what every sticker published before BL-38 looks like and the
+  whole of the back-compatibility story. The server validates the sheet against the grid
+  (it must divide evenly, and `sticker_min_px`/`sticker_max_px` are measured on **one
+  frame**, with the sheet itself bounded by `sticker_sheet_max_px`).
+
+**A book's cover may be authored** (BL-38, 2026-08-08). `books[].cover` and the pack-level
+`cover` are one path, and it is either `books/<book_uid>/cover.png` — art the artist drew to
+be a cover, shipped in the pack like any other file — or, when there is none,
+`books/<book_uid>/page_01.png`, which is exactly what every book published before BL-38
+shipped. The game uses the cover for the bookshelf grid and the book open/close animation
+and falls back to the first page's detail image when a pack has no cover at all, so the
+field stays optional at every layer.
 
 `manifest.json`:
 
@@ -807,6 +832,13 @@ hand-tuned pages), but a book can now be built end-to-end in the browser.
   publish path. The result is an immutable new `pack_versions` row (§7.3); the game
   sees the version bump through the existing entitlement/update check and downloads
   the delta. Edits after publishing accumulate as draft state until the next press.
+- **Cover** (BL-38, 2026-08-08). A book may carry an artist-supplied cover image,
+  uploaded and replaced on the book screen beside its pages. It is **optional**: with one,
+  the publisher ships `books/<book_uid>/cover.png` and names it as both the pack cover and
+  the book cover; without one, both stay page one's display art, which is what every book
+  published before BL-38 shipped. The game uses it for the bookshelf grid and the book
+  open/close animation and falls back to the first page when a pack has none, so the
+  optionality holds at every layer and no existing pack changed.
 
 ### 10.4 Web authoring — sticker sets (2026-08-07, BL-37)
 
@@ -836,6 +868,16 @@ whole point of the entry:
   `PublishPackVersion`. There is still **no second publisher**.
 - `sticker_id` stops being editable the moment a version exists, for the same reason
   `book_uid` never was.
+- **A sticker may be animated** (BL-38, 2026-08-08): its image is a sprite-sheet PNG and
+  the row carries `anim {hframes, vframes, frames, fps}`, which the publisher writes onto
+  the manifest entry verbatim (§7.2). A still sticker has **no `anim` key** and that
+  absence is the back-compatibility story. Two consequences worth stating: the size bounds
+  move onto **one frame** (a 4×2 sheet of 256 px frames is a 1024×512 file in which every
+  frame is right), with the sheet bounded separately by `admin.sticker_sheet_max_px`; and
+  the grid must divide the sheet exactly, because the game slices by `hframes`/`vframes`
+  without looking and a remainder puts a sliver of the next frame down every edge. The
+  admin screen plays the preview at the stated `fps` — a still thumbnail of a sprite sheet
+  is a grid of small drawings and tells the artist nothing.
 
 Operational note: this puts a headless Godot binary on the mini-pc after all. §10.1's
 cost arguments stand but are now paid on purpose: pin the binary path and version in
@@ -926,11 +968,20 @@ Web authoring (§10.3, BL-24) adds book/page CRUD alongside the pack routes:
 | Method | Path | Notes |
 |---|---|---|
 | `GET`/`POST` | `/admin/books` | list / create a book `{book_uid, title, is_free}` — creates its one-book draft pack |
-| `PATCH`/`DELETE` | `/admin/books/{book_uid}` | retitle / delete (retires the pack once published) |
+| `PATCH`/`DELETE` | `/admin/books/{book_uid}` | retitle, upload/replace/clear the cover / delete (retires the pack once published) |
+| `GET` | `/admin/books/{book_uid}/cover` | the authored cover PNG, 404 when the book has none (BL-38) |
 | `GET`/`POST` | `/admin/books/{book_uid}/pages` | list / add a page (multipart detail + optional mask, or asset ulids) |
 | `PATCH`/`DELETE` | `/admin/books/{book_uid}/pages/{index}` | title, reorder, replace detail/mask / remove |
 | `GET` | `/admin/books/{book_uid}/pages/{index}/status` | mapping-job state, validation verdict, preview URL |
+| `GET` | `/admin/books/{book_uid}/pages/{index}/display` | the page's own detail image (BL-38 — the book screen's thumbnail) |
+| `GET` | `/admin/books/{book_uid}/pages/{index}/mask` | the page's masking image, 404 when it has none (BL-38) |
 | `POST` | `/admin/books/{book_uid}/publish` | build + validate + publish a new pack version (§10.3) |
+
+`PATCH /admin/books/{book_uid}` takes the cover the way a page takes its art: multipart
+`cover`, or `cover_asset_ulid` naming a row already uploaded to `POST /admin/assets`, with a
+separate `remove_cover` boolean — an absent file field and a deliberately cleared one look
+identical in a multipart body. Codes this adds: `COVER_NOT_FOUND` (404),
+`PAGE_ART_NOT_FOUND` (404).
 
 Sticker-set authoring (§10.4, BL-37) mirrors it route for route, minus the mapping half:
 
@@ -938,8 +989,8 @@ Sticker-set authoring (§10.4, BL-37) mirrors it route for route, minus the mapp
 |---|---|---|
 | `GET`/`POST` | `/admin/sticker-sets` | list / create a set `{set_uid, title, is_free, sort_order}` — creates its one-set draft pack |
 | `PATCH`/`DELETE` | `/admin/sticker-sets/{set_uid}` | retitle, re-sort / delete (retires the pack once published) |
-| `GET`/`POST` | `/admin/sticker-sets/{set_uid}/stickers` | list / add a sticker (multipart image, or an asset ulid) |
-| `PATCH`/`DELETE` | `/admin/sticker-sets/{set_uid}/stickers/{index}` | title, reorder, replace the image / remove |
+| `GET`/`POST` | `/admin/sticker-sets/{set_uid}/stickers` | list / add a sticker (multipart image, or an asset ulid), plus optional `anim[…]` |
+| `PATCH`/`DELETE` | `/admin/sticker-sets/{set_uid}/stickers/{index}` | title, reorder, replace the image, set/clear `anim` / remove |
 | `GET` | `/admin/sticker-sets/{set_uid}/stickers/{index}/image` | the sticker's own PNG (the editor's preview) |
 | `POST` | `/admin/sticker-sets/{set_uid}/publish` | build + validate + publish a new pack version |
 
@@ -947,6 +998,13 @@ There is deliberately **no `status` route**: validation runs inline on upload, s
 nothing to poll. Codes this adds: `STICKER_SET_NOT_PUBLISHABLE` (422, `details.errors`
 carrying every reason), `STICKER_ID_FROZEN` (422, renaming a sticker in a published set),
 `STICKER_IMAGE_NOT_FOUND` (404).
+
+`anim` (BL-38) is submitted as `anim[hframes]`, `anim[vframes]`, `anim[frames]`,
+`anim[fps]` — the manifest's own names, so there is one vocabulary from the form to the
+pack. All four or none: a half-filled block is a validation error, an entirely blank one is
+a still sticker, and an **absent** `anim` key leaves an existing animation alone (which is
+what a reorder posts). Changing the grid re-validates the same bytes, because the four
+numbers change what the sheet *means*.
 
 `GET /packs` and `GET /packs/{slug}` gained `kind`, `sticker_set_count` and
 `sticker_count` beside `book_count`/`page_count`, so the shop can put the kind on the card
