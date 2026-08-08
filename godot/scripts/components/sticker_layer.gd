@@ -59,9 +59,13 @@ const SHADOW_ALPHA := 0.22
 const SHADOW_OFFSET := Vector2(0.0, 0.045)
 
 ## How big the peel badge is, as a fraction of the sticker it hangs off (BL-39).
-## 0.34 of a 0.17-of-the-page sticker is comfortably past the 48 px touch floor at
-## every zoom the page opens at, and it is what [method peel_badge_radius] answers.
-const PEEL_BADGE_RATIO := 0.34
+##
+## Measured, not guessed: a sticker is [constant DEFAULT_SIZE_RATIO] of the page's
+## short side, and the page opens drawn at roughly two thirds of its own pixels, so
+## 0.48 is what puts the badge past DESIGN.md §3.5's 48 px touch floor ON SCREEN at
+## the zoom the page actually opens at. [method peel_badge_radius] is what a test
+## should assert against; this number on its own means nothing.
+const PEEL_BADGE_RATIO := 0.48
 ## Where the badge parks, as a fraction of the sticker's drawn size from its
 ## centre. Deliberately NOT rotated with the placement: the tilt is at most
 ## [constant MAX_TILT] and a badge that moved with it would be harder to aim at.
@@ -137,6 +141,13 @@ func _init() -> void:
 	# input path is PageView's, and a sticker must never intercept a press.
 	y_sort_enabled = false
 	set_process(false)
+
+
+func _ready() -> void:
+	# Godot turns processing back on for any script that DEFINES _process when the
+	# node enters the tree, so the _init call is not the last word. A page with no
+	# animated sticker and nothing chosen has nothing to move, and must not tick.
+	_sync_processing()
 
 
 ## Tells the layer how big the page it is drawn over is. Called by [PageView] on

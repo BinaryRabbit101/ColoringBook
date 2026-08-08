@@ -152,6 +152,10 @@ func is_animated() -> bool:
 
 
 func _ready() -> void:
+	# Godot turns processing back on for any script that DEFINES _process when the
+	# node enters the tree, so the _init call is not the last word: a still card must
+	# not tick, and there are a dozen of them on the strip.
+	set_process(is_animated())
 	mouse_entered.connect(queue_redraw)
 	mouse_exited.connect(queue_redraw)
 	button_down.connect(queue_redraw)

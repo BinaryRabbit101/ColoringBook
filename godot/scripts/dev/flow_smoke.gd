@@ -1188,9 +1188,10 @@ func _check_stickers(screen: ColoringPage) -> void:
 	_expect(screen.get_selected_page_sticker() == 0 and layer.count() == 2,
 		"a tap ON a sticker CHOOSES it rather than placing another (%d chosen, %d on the page)"
 		% [screen.get_selected_page_sticker(), layer.count()])
+	await _screenshot("sticker_peel_badge.png")
 	var badge := layer.peel_badge_position(before_peel[0])
 	_expect(layer.peel_badge_hit(badge)
-			and layer.peel_badge_radius(float(before_peel[0][StickerLayer.KEY_SIZE])) > 24.0,
+			and layer.peel_badge_radius(float(before_peel[0][StickerLayer.KEY_SIZE])) >= 36.0,
 		"...and grows a peel badge big enough to aim at (%.0f px across)"
 		% (layer.peel_badge_radius(float(before_peel[0][StickerLayer.KEY_SIZE])) * 2.0))
 
@@ -1317,18 +1318,32 @@ func _check_stickers(screen: ColoringPage) -> void:
 ## so every check that is about placement has to aim at clear paper. Searched
 ## rather than hardcoded: the sticker size is a fraction of the page, so a constant
 ## that is clear today stops being clear the moment a page is re-authored bigger.
+##
+## [b]Clear by a MARGIN, not merely by [method StickerLayer.sticker_at].[/b] A
+## placement's tilt is random, and a point that misses a sticker's tilted box by a
+## pixel this run is inside it the next -- which made this harness flake before the
+## margin went in. A whole sticker's width of clearance is deterministic whatever
+## the tilt rolls.
 static func _clear_of(layer: StickerLayer, preferred: Vector2) -> Vector2:
-	if layer.sticker_at(preferred) < 0:
+	var margin := layer.sticker_pixels(StickerLayer.DEFAULT_SIZE_RATIO)
+	if _is_clear(layer, preferred, margin):
 		return preferred
 	var page := Vector2(layer.get_page_size())
-	for step in 32:
+	for step in 64:
 		var candidate := Vector2(
 			page.x * (0.08 + fmod(float(step) * 0.17, 0.84)),
 			page.y * (0.08 + fmod(float(step) * 0.29, 0.84))
 		)
-		if layer.sticker_at(candidate) < 0:
+		if _is_clear(layer, candidate, margin):
 			return candidate
 	return preferred
+
+
+static func _is_clear(layer: StickerLayer, point: Vector2, margin: float) -> bool:
+	for placement in layer.get_placements():
+		if point.distance_to(StickerLayer.placement_position(placement)) < margin:
+			return false
+	return true
 
 
 ## One pixel of the paint layer. The blocking readback is deliberate here -- this is
