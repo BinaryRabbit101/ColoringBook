@@ -45,12 +45,19 @@ extends Control
 ##   e  save schema v2: keyed by book_uid, and a v1 file migrates -- keys rekeyed,
 ##      paint directories renamed, nothing lost, unknown keys passed through,
 ##      re-runnable, and the v1 file left where it was
+##   h  the pack shop splits its catalogue into a Books tab and a Stickers tab
+##      (BL-41), keeps every row built so a download in the tab nobody is looking
+##      at carries on, and opens on a tab that has something on it
 ##   f  a DLC book and the built-in book that share a uid share one save entry --
 ##      migrated progress AND progress recorded live against the built-in book --
 ##      and the BL-25 release shape: with no built-in books at all the shelf is
 ##      exactly the installed packs, still carrying that progress
 ##
 ## Exit code is 0 only if every check passes.
+
+## The DLC catalogue overlay, for check (h)'s tab split (BL-41). Driven through
+## [method PackShop.set_packs], so this harness needs no server.
+const SHOP_SCENE: PackedScene = preload("res://scenes/components/pack_shop.tscn")
 
 const TEST_BOOK_PATH := "res://resources/books/test_book/book.tres"
 const COYOTE_BOOK_PATH := "res://resources/books/coyote/book.tres"
@@ -159,6 +166,7 @@ func _run() -> void:
 	_check_save_migration()
 	_check_shared_uid()
 	_check_sticker_packs()
+	await _check_shop_tabs()
 
 	print("\n   worker decode covered %d main-thread frames; take() cost %.1f ms prefetched"
 		% [_worker_frames, _prefetched_take_ms]
@@ -894,6 +902,77 @@ func _check_sticker_packs() -> void:
 	for i in range(1, visible.size()):
 		ordered = ordered and visible[i - 1].sort_order <= visible[i].sort_order
 	_expect(ordered, "...in authored sort_order, so the ring is stable between runs")
+
+
+func _check_shop_tabs() -> void:
+	print("\n-- check h: the shop's two tabs (BL-41) --")
+
+	# Injected rows, not a server: set_packs() is the shop's dependency-injection
+	# seam and is the SAME path the network answer takes.
+	var shop := SHOP_SCENE.instantiate() as PackShop
+	add_child(shop)
+	await get_tree().process_frame
+	shop.set_packs([
+		{PackShop.KEY_SLUG: "forest", PackShop.KEY_TITLE: "Forest", PackShop.KEY_BYTES: 4096},
+		{
+			PackShop.KEY_SLUG: "shiny",
+			PackShop.KEY_TITLE: "Shiny Stickers",
+			PackShop.KEY_KIND: PackShop.KIND_STICKER_SET,
+			PackShop.KEY_BYTES: 2048,
+		},
+		{PackShop.KEY_SLUG: "meadow", PackShop.KEY_TITLE: "Meadow", PackShop.KEY_BYTES: 8192},
+	])
+	await get_tree().process_frame
+
+	_expect(shop.get_rows().size() == 3,
+		"both kinds are LISTED as one set of rows (%d)" % shop.get_rows().size())
+	_expect(shop.get_tab() == PackShop.KIND_BOOK,
+		"...and the shop opens on the books tab ('%s')" % shop.get_tab())
+	_expect(shop.get_visible_rows().size() == 2,
+		"...showing only the book packs (%d of 3)" % shop.get_visible_rows().size())
+	_expect(not shop.get_row("shiny").visible,
+		"...with the sticker pack hidden rather than absent")
+
+	shop.set_tab(PackShop.KIND_STICKER_SET)
+	await get_tree().process_frame
+	_expect(shop.get_visible_rows().size() == 1
+			and shop.get_visible_rows()[0].get_slug() == "shiny",
+		"the stickers tab shows the sticker pack, and only it")
+	_expect(not shop.get_row("forest").visible and shop.get_row("forest").get_state()
+			== PackShop.PackRow.STATE_AVAILABLE,
+		"...and the book rows keep their state while they are put away")
+
+	# BL-31's wax stroke has to survive a tab switch: the row is still there, still
+	# fed, and still holding the ratio it was given.
+	shop.get_row("forest").set_downloading(2048, 4096)
+	_expect(is_equal_approx(shop.get_row("forest").get_progress_ratio(), 0.5)
+			and shop.get_row("forest").get_state() == PackShop.PackRow.STATE_DOWNLOADING,
+		"a download in the tab nobody is looking at still runs (%.2f)"
+		% shop.get_row("forest").get_progress_ratio())
+	shop.set_tab(PackShop.KIND_BOOK)
+	await get_tree().process_frame
+	_expect(shop.get_row("forest").visible
+			and is_equal_approx(shop.get_row("forest").get_progress_ratio(), 0.5),
+		"...and coming back to it finds the stroke where it should be, not at zero")
+
+	# An empty tab says so in its own words rather than showing nothing at all.
+	shop.set_packs([{
+		PackShop.KEY_SLUG: "shiny",
+		PackShop.KEY_TITLE: "Shiny Stickers",
+		PackShop.KEY_KIND: PackShop.KIND_STICKER_SET,
+	}])
+	await get_tree().process_frame
+	_expect(shop.get_tab() == PackShop.KIND_STICKER_SET,
+		"a catalogue with no books at all opens on the tab that HAS something")
+	_expect(shop.get_tab_buttons().size() == PackShop.TABS.size(),
+		"...and there is one button per tab (%d)" % shop.get_tab_buttons().size())
+	shop.set_tab(PackShop.KIND_BOOK)
+	await get_tree().process_frame
+	_expect(shop.get_visible_rows().is_empty()
+			and shop.get_status_text() == String(PackShop.TAB_EMPTY[PackShop.KIND_BOOK]),
+		"...and the empty books tab explains itself ('%s')" % shop.get_status_text())
+
+	shop.queue_free()
 
 
 # =================================================================== helpers ==
