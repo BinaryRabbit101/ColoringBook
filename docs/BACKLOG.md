@@ -80,33 +80,6 @@ requests the same way (godotengine/godot#76825). Not yet filed upstream for
 - Affected: web export only; blocks sign-in/downloads/sync in affected
   browsers. The game itself (shelf, coloring, saves) runs fine there.
 
-
-### BL-38: Animated crayon finishes — phase 2 of BL-35 — `open` (2026-08-07)
-BL-35 shipped the **bakeable** half of the finish ladder (classic wax → neon
-glow → textured wax → glitter): every finish is computed in `brush.gdshader` at
-stamp time, so it is flattened into the paint SubViewport and the saved PNG
-carries it for free. The finishes that have to keep MOVING after the stroke is
-down — a shimmer that travels, glitter that twinkles — are what is left.
-- **The seam already exists.** `BrushFinish.is_animated(id)` is false for every
-  shipped finish and is the thing to branch on; the palette already resolves a
-  finish per box and hands it to the paint path on `brush_effect_picked`, and
-  `PageView.brush_effect` already carries it into every stamp and every BL-17
-  recipe. An animated box is a new entry in `BrushFinish.FINISHES` plus whatever
-  answers the question below — no reshaping of any of the above.
-- **The open question is PERSISTENCE, and it is the whole entry.** A live effect
-  cannot live in the flattened paint layer: it needs either an effect-mask
-  channel rendered beside the paint (a second SubViewport, sampled by a display
-  shader, saved as a second PNG) or per-stroke metadata that survives save and
-  restore — and BL-17 recipes are per-visit only today, cleared on navigation and
-  never written to disk. Answer that first; the shading is the easy half.
-- Constraints that do not move: region clipping still owns every finish (an
-  animated glow is still discarded outside the locked region's id), coverage and
-  completion must not see the animation, and a page reopened must look the way it
-  looked when it was closed.
-- Affected: `scripts/components/brush_finish.gd`, `scenes/components/brush.gdshader`,
-  `page_view.gd` (a second layer, if that is the answer), `game_state.gd` (save
-  shape), `coloring_page.gd` (restore), paint/flow smokes.
-
 ## Completed — archived
 
 Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md):
@@ -146,3 +119,5 @@ Full entries with as-built notes live in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md
   (glow / grain / glitter). Animated finishes are BL-38.
 - **BL-36** — Sticker sets: the cycle ring keeps going past the last crayon box
 - **BL-37** — Sticker packs served by the API server (the manifest learns a content kind)
+- **BL-38** — Animated crayon finishes (Shimmer, Twinkle) — the effect-mask channel,
+  a second SubViewport saved as a second PNG

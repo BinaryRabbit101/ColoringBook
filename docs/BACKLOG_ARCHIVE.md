@@ -2016,3 +2016,177 @@ little had to change to make that true.
   `server/CLAUDE.md`; `godot/` — `pack_shop.gd`, `pack_installer.gd`, `backend.gd`,
   `palette_child.gd`, `tools/build_pack.gd`, `dlc_smoke.gd`;
   `docs/DLC_SERVER.md` §5/§7.2/§10.4/§11.
+
+### BL-38: Animated crayon finishes — phase 2 of BL-35 — `done`
+Logged 2026-08-07 as the half of the finish ladder BL-35 could not bake. Done
+2026-08-07. **Shipped: `shimmer.tres` `shimmer` "Shimmer"** (satin wax under a
+soft white sheen that travels across the page on a ~6 s loop, diagonally, one
+band for the whole page) and **`twinkle.tres` `twinkle` "Twinkle"** (baked
+glitter whose specks wink in and out on a page-space grid, each cell on its own
+phase plus the stroke's). They are boxes 5 and 6, the top of the cycle, announced
+and cycled by exactly the machinery BL-34/BL-36 built.
+
+- **THE DECISION: the effect-mask channel (option a), not persistent per-stroke
+  metadata (option b).** A second `SubViewport` the size of the page, rendered
+  beside the paint one, stamped by the **same `brush.gdshader`** with a new
+  `effect_target` uniform: identical dab, identical ID-map `discard`, but it
+  writes the finish's animation payload (`r` sheen, `g` spark, `b` the stroke's
+  phase, `a` the dab's coverage) instead of wax. `paint_display.gdshader` on the
+  PaintSprite samples it and adds a `TIME`-driven highlight where it is non-zero.
+  Saved as `user://paint/<slug>/page_NN_fx.png` beside the paint PNG.
+- **Why (a) won, point by point against the constraints that could not move.**
+  1. *Region clipping.* Free and exact, and not by discipline — by construction.
+     The mask is written by the SAME fragment shader invocation that decides
+     whether the wax survives, so a mask texel outside the locked region was
+     never written and a sheen physically cannot exist there. Option (b) would
+     have had to clip the animation a SECOND time, in the display shader, against
+     a region id it would have to look up per fragment — a second implementation
+     of the clip, which is the thing this project has refused to have since M2.
+  2. *Coverage blindness.* Free: `CoverageTracker` reads the paint viewport, and
+     the animation is on the sprite that draws it. The paint layer of an animated
+     stroke is a still image (the smoke asserts it byte-identical 24 frames apart
+     and with the animation frozen). Under (b) the base wax would still have been
+     baked, so this was a draw — but only because (b) would also have baked.
+  3. *A page reopened looks the way it was left.* A page-sized RGBA8 PNG restored
+     by the premultiplied one-frame composite the paint layer already uses. Under
+     (b) a reopened page would have to REPLAY every animated stroke — one frame
+     per batch (`PaintCanvas` flushes one batch per frame, by design), so a page
+     with thirty shimmer strokes opens over half a second of visibly redrawing
+     itself, and the replay has to be interleaved correctly with the flattened
+     paint underneath it or the strokes come back in the wrong order.
+  4. *Bounded cost.* The mask is one image, always the same size, whatever the
+     player does. A recipe is `points` — a `PackedVector2Array` that grows with
+     how long the child scribbled — and BL-17 keeps up to 50 of them per visit
+     with no bound on the ones frozen into the replay prefix. Persisting that is
+     persisting an unbounded, ever-growing file whose worst case is a determined
+     four-year-old.
+  5. *Paint over it and it goes away.* Free under (a): EVERY stamp writes to the
+     mask, and a bakeable finish's payload is zero, so ordinary wax laid over a
+     shimmer rubs the animation off through the ordinary alpha blend, with no
+     bookkeeping anywhere. Under (b) this is the hard case — the metadata says
+     "this stroke shimmers" and nothing in it knows that a later stroke covered
+     two thirds of it; you would be reconstructing occlusion from a stroke list.
+  6. *Mobile.* One extra render target and one extra render pass, only on pages
+     that have animated wax; no per-frame readback, no CPU pixel work, nothing
+     but `TIME` changing between frames.
+  The one thing (b) would have won on is disk: a few KB of recipes against ~1 MB
+  of PNG. That is the trade, it is taken deliberately, and the lazy layer below
+  is what keeps it from being paid by pages that do not use it.
+- **What "restoring the animation" actually means, and it is worth being exact.**
+  What is persisted is the animation ITSELF — which wax is alive, how alive, and
+  with what per-stroke phase — not a frame of it. A shimmer that was travelling
+  when the book was closed is still travelling when it is opened; it is not
+  frozen where it was. That is the right reading of "looks the way it was left"
+  for a thing whose whole nature is to move, and saving a wall-clock phase would
+  have been both meaningless (the page has been shut for a day) and a fifth
+  channel to keep in step.
+- **THE LAZY LAYER, and why it is load-bearing rather than an optimisation.** The
+  effect viewport is **dormant** — `2x2`, `UPDATE_DISABLED`, display shader in
+  pass-through — until an animated finish reaches `PageView.brush_effect`, or a
+  saved mask is restored. So a page coloured out of the four bakeable boxes
+  allocates no second render target, renders no second pass, costs no second
+  readback at a save point, and writes no second PNG; and any stale `_fx.png` is
+  DELETED when a page is saved with the layer dormant, so colouring over your
+  shimmer really does stop costing for it. It also makes "the existing four boxes
+  are unchanged" true at every level, not just in the pixels.
+  - It wakes at the **PICK**, not at the press: waking resizes a SubViewport and
+    arms a clear, and neither is a thing to do inside `begin_stroke()`. The player
+    has to choose the box before they can paint with it, which is frames of slack.
+- **THE GOTCHA THAT COST A ROUND OF RED: recipes needed `effect_masked`.** Waking
+  lazily means strokes laid BEFORE the wake never touched the mask — but a BL-17
+  rebuild replays every recipe, so it stamped them into the mask (with a zero
+  payload, so the picture was right, but with the dab's ALPHA, which the live
+  layer did not have). Three flow checks went red on byte comparisons that were
+  correct to demand. The fix is one bool in the recipe, written at
+  `_close_recipe` from `_effect_active`: whether this stroke reached the mask. It
+  is genuinely not derivable later — it depends on WHEN in the visit the first
+  animated box was picked — and with it a rebuild reproduces the mask exactly
+  rather than approximately. Undo→redo is byte-stable on **both** layers.
+- **The shader, both halves.** `brush.gdshader` gained two modes and one target.
+  `MODE_SHIMMER` bakes a long, low-contrast satin tooth (`silk_grain`, the same
+  idea as `wax_grain` stretched and flattened) plus a lift toward white;
+  `MODE_TWINKLE` bakes `wax_grain` plus white flecks on a 17 px page grid. Both
+  BAKE, on purpose: a frozen page still reads as satin/glitter, coverage sees
+  what it always saw, and a device that somehow never runs the display shader
+  still shows a finished-looking picture. The animated half is
+  `paint_display.gdshader`: the sheen is a Gaussian band along the page diagonal
+  whose position is `fract(TIME * 0.17)`, wrapped so it re-enters instead of
+  jumping; the wink is `pow(max(sin(TIME * 2.3 + phase), 0), 6)` per page-space
+  cell. Every addition is multiplied by the paint layer's own alpha, so the
+  animation can only brighten paint that is already there.
+  - **The sheen is GLOBAL, not per stroke** — two shimmer strokes that touch show
+    one band crossing both. A per-stroke band makes the seam between two strokes
+    the thing you look at. The per-stroke phase (mask `b`, derived from the BL-35
+    seed by `BrushFinish.phase_for_seed`) drives the twinkle only, where the
+    variety is the point.
+  - **BL-35's page-space rule still holds, and now for a second reason.** The
+    display shader keys off `UV * page_size`, not off the sprite's UV as a
+    fraction of the screen, so the sheen does not stretch or slide when the player
+    pans and zooms — and two adjacent strokes agree about where it is.
+- **`effect_animation_enabled`** on `PageView` freezes the clock at t = 0 rather
+  than branching the maths, so a frozen page is a valid still frame of the moving
+  one. It is the reduced-motion / low-end lever, and it is what makes "coverage is
+  identical with the animation on and off" a testable claim instead of an
+  argument. Graceful degradation where `RenderingDevice` is absent is unchanged
+  and needed nothing new: the display shader is an ordinary canvas shader, and the
+  effect readback falls back to the blocking call exactly as the paint one does.
+- **Save points and the one-readback rule.** Unchanged in WHEN. The rule is now
+  "one readback per LAYER at a save point, never in the paint loop, never
+  mid-stroke, never mid-replay": a page with animated wax costs two readbacks and
+  two PNGs, a page without costs one, as it always did. The effect readback is
+  deliberately NOT counted in `_last_readback_usec` / `get_readback_count()` —
+  those are the mobile pass's stall budget for the COVERAGE readback and are
+  asserted right after a coverage cycle; folding a save-point read into them would
+  make the headline measurement mean something else.
+- **What did NOT change.** The stroke lifecycle, the region lock, the ID-map clip,
+  `get_paint_image()`, the coverage tracker, the completion cascade, the palette
+  contract (`brush_effect_picked` carries an animated id exactly like a bakeable
+  one), the save VERSION (the effect mask is a file, not a key — the JSON is
+  untouched), and the rendered output of the four bakeable finishes. That last one
+  is measured, not asserted: the paint smoke prints a `hash()` of each bakeable
+  finish's dab, and `classic=2161738159 glow=3362623779 grain=1121124693
+  glitter=3754632733` immediately before and immediately after the shader change.
+  It is a printed diagnostic rather than a check because rendered bytes are
+  GPU-specific and would make the smoke red on any other machine.
+- **Not in scope, and deliberately**: WP11's paint sync (`install_page_paint`, the
+  sha-first protocol) knows nothing about `_fx.png`, so a synced page comes back
+  with its colours and without its animation. That is a correct-but-lossy fallback
+  rather than a bug — the mask is derived decoration over a picture that is
+  complete without it — and widening the protocol is a DLC_SERVER change.
+- **Smokes: paint 67 → 97, flow 206 → 234, palette 234 → 237**; shell 151 and
+  mobile 141 unchanged and green. Paint gained check 11, the whole contract at the
+  component level: the mask sleeps until an animated box is picked and a classic
+  stroke does not wake it, it never marks a texel the wax does not cover, it is
+  region-clipped at a real boundary, Shimmer writes red and not green, the PAINT
+  layer is byte-identical 24 frames later and with the animation frozen, the
+  composited SCREEN differs between two consecutive frames with it on and is
+  identical with it off, undo and redo round-trip BOTH layers byte for byte,
+  classic wax over a shimmer drops the mask's red to nothing, the mask survives a
+  PNG round trip and a restore composite bit-exactly, and the two new finishes
+  bake what they claim. Flow gained check 4c, the same contract at the screen's
+  level: the animated box announces itself over the strip and drives
+  `PageView.brush_effect` through the ordinary signal, the effect layer wakes on
+  the pick, the tracker's number does not move with the animation on or off, undo
+  takes the mask with the stroke and redo brings both back, `save_page_now()`
+  writes the second PNG holding exactly what was on screen, the other page pays
+  for no effect layer, coming back restores the mask byte for byte as BASELINE
+  (a new visit cannot undo it), and Start over deletes the file. Palette's
+  "every shipped finish is BAKEABLE" assertion was INVERTED rather than dropped —
+  the ladder must end with exactly two animated boxes, everything below them must
+  still be bakeable, and a bakeable finish's mask payload must be zero.
+- **Gotcha (harness, cost an hour): a parse error in the main scene's script makes
+  a windowed Godot run HANG rather than exit.** It retries the load forever at a
+  few percent CPU, prints nothing through a pipe until it dies, and looks exactly
+  like a smoke that is merely slow. `PackedByteArray` has neither `.sha256_text()`
+  nor `.hash()` — the global `hash(bytes)` is the one that exists — and either
+  typo produced a ten-minute nothing. When a smoke stops printing, check for a
+  parse error before believing the clock.
+- **Gotcha: a fresh worktree has no `.godot/`**, so the first run imports the
+  whole project. Run `<godot_exe> --path godot --headless --import` first, or the
+  first smoke looks hung for entirely different reasons.
+- Affected: `scenes/components/paint_display.gdshader` (new),
+  `scenes/components/brush.gdshader`, `scenes/components/page_view.tscn`,
+  `scripts/components/brush_finish.gd`, `paint_canvas.gd`, `page_view.gd`,
+  `crayon_button.gd`, `scripts/screens/coloring_page.gd`, `autoload/game_state.gd`,
+  `resources/palettes/sets/{shimmer,twinkle}.tres` (new), paint + flow + palette
+  smokes, DESIGN.md §1/§3.2, coloring-mechanics skill.

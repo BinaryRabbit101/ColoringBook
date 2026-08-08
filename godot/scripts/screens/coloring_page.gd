@@ -68,6 +68,17 @@ extends Control
 ## one-frame premult composite for the same reason. This screen still owns the
 ## TIMING and the generation checks around it.
 ##
+## [b]BL-38 gave the page a SECOND layer to save and restore[/b], the effect mask:
+## the animated finishes' "which wax is alive" channel. It is written and read at
+## exactly the same save points, through exactly the same premult composite, into a
+## second PNG beside the paint one -- so the one-readback rule became "one readback
+## per LAYER at a save point", and a page with no animated wax on it still costs one
+## and still writes one file (the effect layer is dormant, so the read returns null
+## and any stale mask is deleted). The two are always loaded together and always
+## composited paint-first, and [member _baseline_effect] rides beside
+## [member _baseline_paint] into every rebuild, because a page redrawn with its
+## colours and without its animation is not the page the player had.
+##
 ## [b]M6 additions[/b] -- the mobile pass, on top of the async readback above:
 ##
 ## 1. [b]Page navigation[/b] (the gap M5 flagged). The toolbar carries prev/next
