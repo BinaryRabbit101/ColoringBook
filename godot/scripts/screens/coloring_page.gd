@@ -159,11 +159,14 @@ extends Control
 ##    ([method _play_save_flourish]). It is hung on the TOAST, so every path that
 ##    says "Saved!" -- the button, a deferred manual save, an autosave that announces
 ##    itself -- gets it, and the silent interval autosave stays silent.
-## 4. [b]Start over gets a fresh sheet[/b] ([FreshSheetWipe]): clean paper sweeps
-##    across the page area with a shadow running ahead of it, flashes white as it
-##    lands and fades to reveal the blank page. It plays from
+## 4. [b]Start over gets a wash[/b] ([PageWash]): a front of soapy foam runs across
+##    the page, bubbles drift up through the film it leaves, and the film breaks
+##    into popping bubbles to let the blank page through -- one fragment shader,
+##    about a second and a sixth, and never brighter than the page's own paper.
+##    (It replaces BL-29's sliding sheet, whose white settle-bloom was the
+##    "flash-blind" a playtester named.) It plays from
 ##    [method restart_current_page], so the confirm overlay is untouched and the
-##    wipe follows the clear however it was asked for.
+##    wash follows the clear however it was asked for.
 ## 5. [b]Undo and redo feel connected to the paint.[/b] The button pops, tips and
 ##    throws sparks the instant it is pressed (the button's own job, in
 ##    [method HistoryButton.play_press]), and this screen adds a second, smaller
@@ -260,10 +263,10 @@ const HISTORY_PLACEMENT := "placement"
 const TOOLBAR_STYLE := preload("res://scripts/components/toolbar_style.gd")
 const POP := preload("res://scripts/components/pop_feedback.gd")
 const SPARKLES := preload("res://scripts/components/sparkle_burst.gd")
-const FRESH_SHEET := preload("res://scripts/components/fresh_sheet_wipe.gd")
+const PAGE_WASH := preload("res://scripts/components/page_wash.gd")
 
-## Seconds the Start-over sweep takes, end to end.
-const FRESH_SHEET_SECONDS := 0.72
+## Seconds the Start-over wash takes, end to end.
+const PAGE_WASH_SECONDS := PAGE_WASH.DEFAULT_SECONDS
 ## Sparks thrown by a save: gold, leaf and paper-white, so they read against both
 ## the green toast and the dark toolbar. Typed [Array]s, not [PackedColorArray]s --
 ## only the former can be a [code]const[/code].
@@ -302,7 +305,7 @@ const FRESH_SPARKS: Array[Color] = [
 @onready var _undo_button: HistoryButton = $Ui/Toolbar/Row/UndoButton
 @onready var _redo_button: HistoryButton = $Ui/Toolbar/Row/RedoButton
 ## Where BL-29's transient effects live: a full-rect, input-transparent overlay a
-## [SparkleBurst] or a [FreshSheetWipe] can be parented to. A plain [Control] on
+## [SparkleBurst] or a [PageWash] can be parented to. A plain [Control] on
 ## purpose -- a container would try to lay the effects out as if they were UI.
 @onready var _effects: Control = $Effects
 @onready var _celebration: Control = $Celebration
@@ -1570,11 +1573,12 @@ func restart_current_page() -> bool:
 	GameState.erase_page_progress(_book, page_index)
 	_build_coverage()
 	_refresh_nav()
-	# BL-29: the sweep goes over the page AFTER it has been wiped, so what the sheet
-	# uncovers is the real, already-blank page. It is pure decoration -- nothing here
-	# waits for it, and a child who starts colouring mid-sweep paints on the live
-	# page underneath.
-	_play_fresh_sheet()
+	# The wash goes over the page AFTER it has been wiped, so what it uncovers is the
+	# real, already-blank page. It is pure decoration -- nothing here waits for it,
+	# and a child who starts colouring mid-wash paints on the live page underneath.
+	# In particular the erase above has already been recorded and pushed (BL-18); the
+	# animation is downstream of that and can never be in its way.
+	_play_page_wash()
 	_show_toast("Page cleared")
 	page_restarted.emit(page_index)
 	return true
@@ -1657,20 +1661,56 @@ func _play_save_flourish() -> void:
 		SPARKLES.burst(_effects, from, SAVE_SPARKS, 9, 66.0, 74.0, 0.85)
 
 
-## A clean sheet of paper sweeping over the page area (BL-29). Called by
-## [method restart_current_page] once the paint is actually gone -- the sheet covers
+## A soapy wash over the page area ([PageWash]). Called by
+## [method restart_current_page] once the paint is actually gone -- the wash covers
 ## the frame the picture disappeared on and leaves a blank page behind it.
-func _play_fresh_sheet() -> void:
+##
+## The reduced-motion lever is [member PageView.effect_animation_enabled], the one
+## BL-38 already established for "this device should hold still": the same switch
+## that freezes an animated finish drops this to a quick fade. One lever, so a
+## device that asked for stillness gets it everywhere and not in two places out of
+## three.
+func _play_page_wash() -> void:
 	if not is_inside_tree() or not is_instance_valid(_effects) or not is_instance_valid(_page_view):
 		return
-	var rect := _page_view.get_global_rect()
+	var rect := _washable_rect()
+	if rect.size.x <= 1.0 or rect.size.y <= 1.0:
+		return
 	rect.position -= _effects.get_global_rect().position
-	FRESH_SHEET.play(_effects, rect, FRESH_SHEET_SECONDS)
-	# Added AFTER the sheet, so they draw on top of it (depth is tree order in the
-	# effects overlay) and read as the page being dusted off.
+	var animated := _page_view.effect_animation_enabled
+	PAGE_WASH.play(_effects, rect, PAGE_WASH_SECONDS, animated)
+	if not animated:
+		return
+	# Added AFTER the wash, so they draw on top of it (depth is tree order in the
+	# effects overlay) and read as the last of the suds catching the light.
 	SPARKLES.burst(
 		_effects, rect.get_center(), FRESH_SPARKS, 12, 96.0, minf(rect.size.x * 0.3, 220.0), 0.95
 	)
+
+
+## Where the wash is allowed to be: the PAGE IMAGE on screen, clipped to the part of
+## it the view is showing. In viewport coordinates, before the effects overlay's
+## origin is taken off.
+##
+## [b]Not the [PageView] control's rect[/b], which is what BL-29's sheet used. That
+## rect is the whole canvas slab, and most of it is the dark backdrop the page floats
+## on; a wash over all of it looked right while it was opaque and then broke up into
+## holes full of BLACK -- a page of dark polka dots, which is what an effect that
+## does not know where the paper is always ends up doing. Confining it to the page
+## means every hole it opens shows paper, which is the only thing it is supposed to
+## be revealing.
+##
+## Pan and zoom are handled for free by going through
+## [method PageView.to_viewport_position] and intersecting with the view: zoomed in,
+## the wash covers exactly the visible slab of page.
+func _washable_rect() -> Rect2:
+	var page := Vector2(_page_view.get_page_size())
+	var view := _page_view.get_global_rect()
+	if page.x <= 0.0 or page.y <= 0.0:
+		return view
+	var top_left := _page_view.to_viewport_position(Vector2.ZERO)
+	var bottom_right := _page_view.to_viewport_position(page)
+	return Rect2(top_left, bottom_right - top_left).intersection(view)
 
 
 ## The stroke has actually vanished (or come back). [HistoryButton] already answered
