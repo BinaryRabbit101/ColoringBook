@@ -24,6 +24,9 @@ extends Control
 ##      burst, both fading on their own and blocking nothing), pressing the
 ##      next-page arrow plays the flip, the second page is really loaded, the
 ##      palette still drives the brush
+##      ... and (4d, BL-50) a paint layer that arrives from the ACCOUNT while the
+##      page is open is adopted by the canvas without a restart -- and refused
+##      while the child is drawing on it
 ##   5  ... and finishing page 2 does NOT end the book: the last page celebrates
 ##      exactly like any other, its forward arrow is simply disabled, and Back is
 ##      the only way out (BL-11 -- there is no BookComplete screen any more)
@@ -803,6 +806,9 @@ func _check_coloring_flow() -> void:
 	# holding a reference to the one it was given.
 	await _check_stickers(screen)
 
+	# BL-50 for the same reason again: it wipes a page and rebuilds it from disk.
+	await _check_cloud_paint(screen)
+
 	# --- back button ---------------------------------------------------------
 	# M6: leaving the book flushes the paint layer through the ASYNC readback and
 	# only then reports back_requested, so the parent cannot free the screen out
@@ -1090,6 +1096,90 @@ static func _is_blank(image: Image) -> bool:
 		if bytes[i * 4 + 3] != 0:
 			return false
 	return true
+
+
+## BL-50: a paint layer that arrives from the ACCOUNT while the page is already
+## open. This is the client half of the playtest bug -- a grown-up saves a page on
+## one tablet, signs in on a second whose app has been running all along, and the
+## drawing is not there. [SyncQueue] downloads it and hands the bytes to
+## [method GameState.install_page_paint]; everything from that call onwards is what
+## this checks, with no server and no network in it at all.
+##
+## Two halves, and the second is the one that keeps the fix honest: a picture is
+## adopted by a page nobody is drawing on, and REFUSED by one somebody is.
+func _check_cloud_paint(screen: ColoringPage) -> void:
+	print("\n-- check 4d: a picture pulled from the account reaches the open page (BL-50) --")
+	var page_view := screen.get_page_view()
+	if GameState.current_page_index != 0:
+		await screen.go_to_page(0)
+	_expect(GameState.current_page_index == 0, "the book is open at page 1")
+	await _settle_layout()
+	await _wait_until(func() -> bool: return not screen.has_pending_restore(), 8.0)
+
+	# "Device A's picture": whatever is on this page now, as the PNG bytes a
+	# download would have handed over.
+	var cloud := page_view.get_paint_image()
+	_expect(cloud != null and not _is_blank(cloud), "page 1 holds a picture to stand in for the cloud's")
+	if cloud == null:
+		return
+	var probe := _painted_pixel(cloud)
+	_expect(probe.x >= 0, "...with a painted pixel to identify it by (%s)" % probe)
+	var expected := cloud.get_pixel(probe.x, probe.y)
+	var png := cloud.save_png_to_buffer()
+
+	# "Device B": the same page, blank, with the book still open on it.
+	_expect(screen.restart_current_page(), "the page was wiped back to blank paper")
+	await _wait_for_coverage(screen)
+	await _settle_layout()
+	_expect(not GameState.has_page_paint(_book, 0), "...and the file is gone with it")
+	_expect(_paint_pixel(page_view, probe).a == 0.0, "...the canvas really is empty")
+
+	# The instant the download lands. Nothing else about the screen changes -- no
+	# reload, no navigation, no restart.
+	_expect(GameState.install_page_paint(_book, 0, png),
+		"the pulled bytes were installed as page 1's paint layer")
+	var adopted := await _wait_until(func() -> bool:
+		return not screen.has_pending_restore() and _paint_pixel(page_view, probe).a > 0.0,
+		10.0)
+	_expect(adopted, "the OPEN page adopted it -- no restart, no closing the book")
+	var pixel := _paint_pixel(page_view, probe)
+	_expect(absf(pixel.r - expected.r) <= 0.02 and absf(pixel.g - expected.g) <= 0.02
+			and absf(pixel.b - expected.b) <= 0.02,
+		"...pixel for pixel the picture that was saved elsewhere (%s vs %s)" % [pixel, expected])
+	_expect(not screen.is_celebrating(),
+		"...and a page that arrives finished does not celebrate somebody else's colouring")
+
+	# The other half of the bug: the blank canvas used to be written back over the
+	# picture at the next save point, which destroyed it on the server too.
+	await screen.persist_current_page_settled()
+	var on_disk := GameState.load_page_paint(_book, 0)
+	_expect(on_disk != null and not _is_blank(on_disk),
+		"the next save point wrote the picture back, not the blank paper it replaced")
+
+	# And the refusal: a child drawing right now keeps their canvas (8.2 -- no
+	# response ever yanks a screen).
+	var busy_point := Vector2(probe) + Vector2(0.0, 0.0)
+	page_view.begin_stroke(busy_point)
+	page_view.continue_stroke(busy_point + Vector2(30.0, 0.0))
+	page_view.end_stroke()
+	await _wait_for_coverage(screen)
+	_expect(screen.has_unsaved_paint(), "the child painted a stroke that is not on disk")
+	var blank := Image.create_empty(cloud.get_width(), cloud.get_height(), false, Image.FORMAT_RGBA8)
+	_expect(GameState.install_page_paint(_book, 0, blank.save_png_to_buffer()),
+		"a second picture arrives from the account mid-stroke-run")
+	await _settle_layout()
+	_expect(_paint_pixel(page_view, probe).a > 0.0,
+		"...and the canvas was NOT yanked out from under them")
+
+
+## The first opaque pixel of [param image], scanned coarsely, or (-1, -1).
+static func _painted_pixel(image: Image) -> Vector2i:
+	var step := 4
+	for y in range(0, image.get_height(), step):
+		for x in range(0, image.get_width(), step):
+			if image.get_pixel(x, y).a > 0.9:
+				return Vector2i(x, y)
+	return Vector2i(-1, -1)
 
 
 func _check_stickers(screen: ColoringPage) -> void:

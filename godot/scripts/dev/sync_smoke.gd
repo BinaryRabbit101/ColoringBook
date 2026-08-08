@@ -57,7 +57,10 @@ extends Control
 ##   h  PAINT_STALE: device B uploads a newer picture, A's next upload is refused,
 ##      A pulls the server's bytes and GameState.load_page_paint (the ColoringPage
 ##      restore path) returns them
-##   i  download on demand: with the local file gone, opening the book fetches it
+##   i  download on demand: with the local file gone, opening the book fetches it --
+##      and (BL-50) a NEWER picture for the page the book is open AT is fetched too,
+##      because the resume page is the open page and refusing it meant a synced
+##      device could never refresh the one page a child looks at first
 ##   j  the "Sync pictures" toggle gates paint and never progress
 ##   k  offline: with the server unreachable, entries persist to disk, a FRESH queue
 ##      reads them back, and the drain converges once the server returns
@@ -671,6 +674,31 @@ func _check_paint_on_demand() -> void:
 	_expect(FileAccess.get_sha256(path).to_lower() == expected,
 		"...byte-for-byte what the server had")
 	await _idle()
+
+	# --- BL-50: the page that is OPEN is a page like any other -----------------
+	# The bug this half pins: the resume page IS the open page (start_book sets the
+	# cursor before it emits book_started), so a device that already held a synced
+	# copy refused every newer picture for it, on every book open, for ever. That
+	# is the playtest report -- "I saved on one device and the other never showed
+	# it" -- for a device that has synced this page before.
+	_expect(GameState.current_book == _book and GameState.current_page_index == 0,
+		"precondition: page 1 is the page the book is open at")
+	var newer_png := _solid_png(_page_view.get_page_size(), Color(0.85, 0.15, 0.55, 1.0))
+	var newer_sha := _sha256_of(newer_png)
+	var newer_stamp := SyncQueue.iso_from_unix(Time.get_unix_time_from_system() + 3600.0)
+	var pushed := await _b_upload_paint(BOOK_UID, 0, newer_png, newer_stamp)
+	_expect(pushed, "device B saved a NEWER picture for the page device A is looking at")
+	if not pushed:
+		return
+	GameState.start_book(_book, 0)
+	var refreshed := await _wait_for(
+		func() -> bool: return FileAccess.get_sha256(path).to_lower() == newer_sha, 20.0
+	)
+	_expect(refreshed,
+		"...and re-opening the book pulled it -- an acknowledged local copy is not unsent work")
+	await _idle()
+	_expect(Backend.get_sync_queue().pending_paint_count() == 0,
+		"...and it is not then pushed straight back: a pulled picture is already synced")
 
 
 # ======================================================= j: the picture toggle ==

@@ -349,6 +349,89 @@ A grid cannot dodge them; its job is to use the whole width. A rail can.
   `scenes/screens/book_select.tscn`, `scripts/screens/book_select.gd`,
   `scripts/components/book_cell.gd` (`cancel_press`), `scripts/main.gd`
   (`_apply_shelf_chrome`), flow + shell + mobile smokes, DESIGN.md §2.
+### BL-50: A page saved on one device never appeared on the other — `done` (2026-08-08)
+Playtest report: *"I'm logged in and saved my page canvas, yet when I logged in on
+another device, I didn't see my previously saved page. Both apps were continuously
+running without a refresh/restart."*
+
+**The picture was never missing. It was on the second device's disk, underneath a
+blank canvas.** The pull works and always did: signing in drains and pulls
+progress, opening a book pulls that book's paint, `install_page_paint` writes the
+PNG. What nothing did was tell the screen. `ColoringPage._apply_current_page()`
+reads the paint layer off disk once, at page load, some hundreds of milliseconds
+before the download lands — and then never looks again. So the child sat in front
+of blank paper with the drawing already in `user://paint/`.
+
+**And it got worse from there.** `_has_nothing_to_persist()` is "untouched AND no
+file"; the pulled file makes the second half false, so the next save point read the
+blank canvas back, wrote it over the picture and uploaded it — stamped *now*, which
+wins last-write-wins. The bug did not just fail to show device A's drawing on
+device B; leaving the page **destroyed it on the server**, and device A then pulled
+the blank over its own copy. Nobody hit that in the report because they never left
+the page, but it was one Back press away.
+
+Three parts, none of them a new sync concept:
+
+1. **`GameState.page_paint_installed`** — a second signal, emitted by
+   `install_page_paint` and by nothing else. `page_paint_written` means "a file
+   this device caused"; the new one means "a picture you did not draw is now on
+   disk", which is the only case a screen has anything to do about.
+   `SyncQueue` ignores it: it is the thing that wrote the file.
+2. **`ColoringPage` adopts it** (`_on_page_paint_installed` → `reload_saved_paint`)
+   when it is the open page and the visit has nothing of its own to lose — no
+   unsaved strokes, no stroke down, no replay, no restore, no flip. The canvas is
+   **cleared and rebuilt**, never composited over: the layer on screen and the file
+   are two pictures of the same page, not an update of one another, so drawing the
+   new over the old would leave the old showing wherever the new is transparent.
+   A page that arrives finished sets `_pre_completed` through the existing
+   `_restoring` branch, so it does not celebrate somebody else's colouring.
+   If the child *is* drawing, the screen keeps the canvas and wins the next
+   last-write-wins round with it — 8.2's "no response ever yanks a screen" is the
+   rule, and refusing is what keeps it true.
+3. **The persist guards** — `_persist_page` refuses while a restore is in flight and
+   `_persist_page_async` waits it out (`_await_restore`, the twin of
+   `_await_replay`). That closes the Back-pressed-mid-download window that was the
+   data-loss half.
+
+Plus the two the report's "both apps running" shape needs:
+
+- **`SyncQueue._wants_server_paint` no longer refuses the open page outright.** The
+  resume page **is** the open page by construction — `start_book` sets the cursor
+  *before* it emits `book_started`, which is what runs the pull — so the blanket
+  refusal meant a device that had already synced a page could never receive a newer
+  copy of the one page a child looks at first, on any device, ever. It now refuses
+  only when the two digests disagree, i.e. when this device holds pixels the server
+  has not got. A copy the server has acknowledged is safe to replace, and part 2
+  puts it on screen. (Only the *no local file* branch used to get through, which is
+  why check (i) passed while the bug was live.)
+- **`SyncQueue.on_signed_in` pulls the open book's paint** after its drain. The app
+  on this device has been running the whole time; "pulled on book open" already
+  fired for the book the player is in, back when there was no account to pull for.
+
+**Not changed, deliberately.** The resume *cursor* still refuses to move under an
+open book (`set_saved_page_index`) — turning the page under a colouring child is
+the same failure this entry is fixing in the other direction. And the shelf needs
+no refresh signal: `BookCell` draws a cover and a page count, never progress.
+
+**No server change, no migration.** The endpoints, the merge and the payloads are
+untouched; every line of this is client-side.
+
+- Verified against a local `php artisan serve --port=8123`:
+  **flow 256 → 270/270** (new check 4d: the picture is adopted by the OPEN page
+  with no restart, pixel for pixel; a page that arrives finished does not
+  celebrate; the next save point writes the picture back rather than the blank
+  paper it replaced; and a second picture arriving while the child is drawing is
+  refused). **sync 131 → 135/135** (check (i) extended: device B saves a NEWER
+  picture for the page device A has open, A's next book open pulls it, and it is
+  not pushed straight back). paint 97, shell 158, mobile 141, dlc 131 — all
+  unchanged and green. Not run: palette (touches nothing here; the known
+  windowed-focus flake).
+  The web build was NOT used to verify any of this — the claude-in-chrome
+  extension hangs Godot's `HTTPRequest` in a driven browser (BL-32).
+- Affected: `godot/autoload/game_state.gd`,
+  `godot/scripts/screens/coloring_page.gd`,
+  `godot/scripts/backend/sync_queue.gd`, `godot/scripts/dev/flow_smoke.gd`,
+  `godot/scripts/dev/sync_smoke.gd`
 
 ## Completed — archived
 
