@@ -262,10 +262,15 @@ const LADDER: Array[StringName] = [
 #
 # [b]Where two styles overlap-blend, nearest-level picks one of them[/b] -- the
 # blend of 0.15 and 0.80 is not a level, and the decode rounds it to whichever is
-# closer. That is deliberate and it is invisible: the only texels that can misfire
-# are the fringe where one stroke's soft edge lies over another's, and a fringe texel
-# carries a coverage-weighted amount of nearly zero. A wrong ANIMATION at zero
-# BRIGHTNESS is not a wrong pixel.
+# closer. That is deliberate, and what makes it free is that the seam is THIN, not
+# that it is dim: measured off the GPU (`paint_smoke` check 11c), an embers stroke
+# lapping over shimmer wax mis-decodes a band 5 px wide carrying up to 90% of a
+# level -- bright, and gone in five pixels, because a stroke's edge is eight
+# overlapping dabs deep and crosses the whole ladder of wrong levels at once. The
+# check pins that width, because a fifth field level or a softer brush would widen
+# it quietly. The ERASE is a different question and comes out cleaner: classic wax
+# saturates as fast as it rubs out, so an animated area painted over goes out rather
+# than changing style on the way (peak stray, measured: 2/255).
 #
 # The two tables are the contract with `paint_display.gdshader`, which carries the
 # same numbers as decode thresholds at their midpoints. Change one, change both --
@@ -328,19 +333,26 @@ static func display_name(id: StringName) -> String:
 
 ## Whether [param id] needs to keep MOVING after the stroke is down.
 ##
-## False for every BL-35 finish, true for BL-38's [constant SHIMMER] and
-## [constant TWINKLE]. This is the ONE thing the painting stack branches on: a page
-## that has never held an animated finish never allocates the effect mask, never
-## renders a second SubViewport and never writes a second PNG, so the four bakeable
-## boxes cost exactly what they cost before phase 2 existed.
+## False for every BL-35 finish, true for the six animated ones -- BL-38's
+## [constant SHIMMER] and [constant TWINKLE], and BL-47's [constant EMBERS],
+## [constant OCEAN], [constant AURORA] and [constant FIREFLY]. It is the flag on the
+## table that answers this, never a list of ids anywhere else, which is why adding
+## four boxes moved no code outside this file.
+##
+## This is the ONE thing the painting stack branches on: a page that has never held
+## an animated finish never allocates the effect mask, never renders a second
+## SubViewport and never writes a second PNG, so the four bakeable boxes cost exactly
+## what they cost before phase 2 existed.
 static func is_animated(id: StringName) -> bool:
 	return bool((FINISHES[resolve(id)] as Dictionary)["animated"])
 
 
-## The effect-mask payload a stamp of [param id] writes (BL-38): red = travelling
-## sheen, green = winking specks, blue is the per-stroke phase and is filled in by
-## the caller from the stroke's seed. Alpha is the dab's own coverage and comes from
-## the shader, not from here.
+## The effect-mask payload a stamp of [param id] writes (BL-38, re-read by BL-47):
+## red = the FIELD style level, green = the SPECK style level -- members of
+## [constant MASK_FIELD_LEVELS] / [constant MASK_SPECK_LEVELS], not raw amounts --
+## and blue is the per-stroke phase, filled in by the caller from the stroke's seed.
+## Alpha is the dab's own coverage and comes from the shader, not from here, which is
+## what lets the display shader divide it back out and recover the level.
 ##
 ## [b]Every finish has one, including the bakeable ones[/b], and theirs is zero. A
 ## mask entry is not "this stroke is animated", it is "this is how alive this wax
@@ -353,12 +365,19 @@ static func mask_payload(id: StringName, phase: float = 0.0) -> Color:
 
 ## The nearest entry of [param levels] to [param value]. The decode rule, in one
 ## place, so GDScript and the shader cannot disagree about where a boundary is.
+##
+## A value sitting EXACTLY on a midpoint takes the higher level, which is what the
+## shader's `normalized < threshold` chain does with the same number. The tables are
+## ascending and the comparison is [code]<=[/code] for that reason and no other: with
+## [code]<[/code] a tie kept the first level it met -- the lower one -- and the two
+## decoders disagreed on precisely the 0.25 / 0.45 / 0.675 / 0.90 / 0.75 boundaries
+## the whole contract is written in terms of.
 static func _nearest_level(levels: Array[float], value: float) -> float:
 	var best := levels[0]
 	var best_gap := absf(value - best)
 	for level in levels:
 		var gap := absf(value - level)
-		if gap < best_gap:
+		if gap <= best_gap:
 			best_gap = gap
 			best = level
 	return best

@@ -30,6 +30,14 @@ const FINISH_COLOR := Color(0.35, 0.55, 0.85, 1.0)
 ## the clip, and the clip has its own check above them.
 const FINISH_DAB := Vector2(788.5, 250.5)
 
+## How wide the mis-decoded seam between two overlapping field styles may get, in
+## page pixels (BL-47 review, check 11c). Measured at 5 on this tree; the headroom is
+## for the dab profile, not for a new level squeezed into the table.
+const SEAM_MAX_PX := 8
+## The brightest raw red byte allowed to survive at a WRONG level after classic wax
+## has rubbed an animated area out. Measured at 2 on this tree.
+const ERASE_MAX_STRAY := 26
+
 @onready var _page_view: PageView = $PageView
 
 var _id_rgba: Image
@@ -668,6 +676,7 @@ func _check_animated_finishes() -> void:
 		% [_brightest_core(twinkle_dab), FINISH_COLOR.get_luminance()])
 
 	await _check_mask_style_levels(line_x)
+	await _check_style_seam(line_x)
 
 	_page_view.brush_effect = BrushFinish.CLASSIC
 	await _clear()
@@ -757,6 +766,99 @@ func _check_mask_style_levels(line_x: float) -> void:
 		_expect(rubbed.r8 < 24 and rubbed.g8 < 24,
 			"...and classic wax over it ERASES the level (r %d, g %d)"
 			% [rubbed.r8, rubbed.g8])
+
+
+## BL-47's one ambiguity, measured instead of argued.
+##
+## Where strokes of two DIFFERENT field styles overlap, the blended ratio lands
+## between two levels and nearest-level picks one of them. The entry called those
+## texels free because they "carry a coverage-weighted amount of nearly zero", and
+## that is not what the pixels say: the seam between an embers stroke and the
+## shimmer wax it laps over carries up to 90% of a level. What actually makes it
+## free is GEOMETRY -- a stroke's edge is eight overlapping dabs deep, so the whole
+## ladder of wrong levels is crossed inside a few pixels. That width is the thing
+## worth pinning, because a fifth field level, a softer brush or a wider stamp
+## spacing would each widen it quietly.
+##
+## The second half is the ERASE, over wax that was properly coloured in first --
+## the case a player actually makes. Classic wax saturates just as fast as it
+## rubs out, so the residual never sits at a wrong level with any light left in
+## it, and the animation goes out rather than changing style on the way.
+func _check_style_seam(line_x: float) -> void:
+	print("\n-- check 11c: where two styles meet, and where wax rubs one out --")
+	await _clear()
+	_page_view.brush_effect = BrushFinish.SHIMMER
+	_page_view.begin_stroke(Vector2(line_x - 150.0, 250.5))
+	_page_view.continue_stroke(Vector2(line_x - 8.0, 250.5))
+	_page_view.end_stroke()
+	# Half a brush lower, so the embers stroke's whole soft edge lies on shimmer wax.
+	_page_view.brush_effect = BrushFinish.EMBERS
+	_page_view.begin_stroke(Vector2(line_x - 150.0, 250.5 + BRUSH_DIAMETER * 0.5))
+	_page_view.continue_stroke(Vector2(line_x - 8.0, 250.5 + BRUSH_DIAMETER * 0.5))
+	_page_view.end_stroke()
+	var seam := _field_misdecode(await _read_effect(), [1.0, 0.15])
+	_expect(int(seam["levels_seen"]) == 2,
+		"precondition: the mask really holds BOTH levels, 1.00 shimmer under 0.15 embers")
+	_expect(int(seam["worst_run"]) <= SEAM_MAX_PX,
+		"the seam between two field styles is %d px of mis-decode at worst, and it is"
+		% int(seam["worst_run"])
+		+ " bright (peak %d/255) -- the fringe is free because it is THIN, not because"
+		% int(seam["peak"])
+		+ " it is dim")
+
+	# --- and the erase, over wax that was coloured in first ---------------------
+	await _clear()
+	_page_view.brush_effect = BrushFinish.AURORA
+	for y in range(200, 305, 8):
+		_page_view.begin_stroke(Vector2(line_x - 150.0, y + 0.5))
+		_page_view.continue_stroke(Vector2(line_x - 8.0, y + 0.5))
+		_page_view.end_stroke()
+	_page_view.brush_effect = BrushFinish.CLASSIC
+	_page_view.begin_stroke(Vector2(line_x - 150.0, 250.5))
+	_page_view.continue_stroke(Vector2(line_x - 8.0, 250.5))
+	_page_view.end_stroke()
+	var rubbed := _field_misdecode(await _read_effect(), [0.80])
+	_expect(int(rubbed["peak"]) <= ERASE_MAX_STRAY,
+		"...and classic wax over coloured-in aurora goes OUT rather than sideways:"
+		+ " the brightest texel that decodes to another style is %d/255 (%d texels)"
+		% [int(rubbed["peak"]), int(rubbed["count"])])
+	_page_view.brush_effect = BrushFinish.CLASSIC
+	await _clear()
+
+
+## Every texel of [param mask] whose FIELD level is none of [param allowed]:
+## { "count", "worst_run" (the longest vertical run, in px), "peak" (the biggest raw
+## red byte among them), "levels_seen" (how many of [param allowed] are actually on
+## the page, so the measurement cannot pass by measuring nothing) }.
+func _field_misdecode(mask: Image, allowed: Array) -> Dictionary:
+	var bytes := mask.get_data()
+	var seen := {}
+	var count := 0
+	var worst_run := 0
+	var peak := 0
+	for x in _page_width:
+		var run := 0
+		for y in _page_height:
+			var i := (y * _page_width + x) * 4
+			var red := float(bytes[i]) / 255.0
+			if red <= BrushFinish.MASK_CHANNEL_FLOOR:
+				run = 0
+				continue
+			var coverage := maxf(float(bytes[i + 3]) / 255.0, BrushFinish.MASK_COVERAGE_EPSILON)
+			var field := BrushFinish.decode_mask_field(red / coverage)
+			var known := false
+			for level in allowed:
+				if is_equal_approx(field, float(level)):
+					known = true
+					seen[level] = true
+			if known:
+				run = 0
+				continue
+			run += 1
+			count += 1
+			worst_run = maxi(worst_run, run)
+			peak = maxi(peak, int(bytes[i]))
+	return {"count": count, "worst_run": worst_run, "peak": peak, "levels_seen": seen.size()}
 
 
 ## Decodes every sufficiently covered texel of [param mask] and counts how many come

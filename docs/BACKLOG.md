@@ -51,11 +51,23 @@ architectural change that made room for them.
   overlapping dabs are down — which matters most at the feathered dab edge,
   where the raw channel is nearly nothing and the ratio is all there is. The
   decode rounds it to the NEAREST level.
-  - **The one place it can misfire is fringe, and fringe is free.** Where strokes
-    of two different styles overlap-blend, the normalised value lands between two
-    levels and nearest-level picks one of them. Those texels are where one soft
-    edge lies over another; they carry a coverage-weighted amount of nearly zero,
-    and a wrong animation at zero brightness is not a wrong pixel.
+  - **The one place it can misfire is the seam, and the seam is free because it
+    is THIN — not because it is dim.** Where strokes of two different styles
+    overlap-blend, the normalised value lands between two levels and
+    nearest-level picks one of them. ~~Those texels carry a coverage-weighted
+    amount of nearly zero~~ — **corrected by the BL-47 review**, which measured
+    it: an embers stroke lapping over shimmer wax mis-decodes a band **5 px
+    wide carrying up to 90% of a level**. Bright, and over in five pixels,
+    because a stroke's edge is eight overlapping dabs deep and crosses the whole
+    ladder of wrong levels at once. `paint_smoke` check 11c now pins that width,
+    since a fifth field level or a softer brush would widen it quietly.
+  - **The erase comes out cleaner than the seam**, and it was worth measuring
+    separately: classic wax saturates as fast as it rubs out, so an animated
+    area that was coloured in first goes OUT rather than changing style on the
+    way — the brightest texel left at a wrong level is 2/255. (Rub a *single*
+    animated stroke out with a single classic stroke of the same brush and the
+    two profiles cancel to a residual bounded by 0.25 instead. Still fading, not
+    switching.)
   - **Proved with pixels, not with algebra.** `paint_smoke` check 11b stamps a
     real stroke of each new family, runs it up to a real region boundary, reads
     the mask back off the GPU and asserts that *every* covered texel decodes to
@@ -105,10 +117,15 @@ architectural change that made room for them.
     own plus the stroke's, out of mask.b), sin/cos wander, and each speck swells
     and fades as it goes. **Twinkle puts its wink exactly on its baked fleck; a
     wanderer must not** — it starts near the baked mote and drifts off it, so its
-    home is the same hash pulled into the middle half of the cell, which is also
-    what keeps it inside the cell that draws it. Only fragments inside a cell draw
-    that cell's speck, so a speck that strayed over the edge would be sliced in
-    half by the boundary it crossed.
+    home is the same hash pulled into the middle half of the cell. Only fragments
+    inside a cell draw that cell's speck, so the middle-half home plus a 0.17
+    wander is what keeps the speck's CENTRE in the cell that draws it (1.8 px
+    clear of the boundary at worst). ~~And what keeps the speck inside it~~ —
+    **the BL-47 review found that overclaimed**: the radius runs to 5.5 px, so
+    the widest specks lose the outer few pixels of their skirt to a straight cut
+    when their drift takes them to the edge. Twinkle's trade inherited (its
+    full-cell jitter and 11 px arms clip harder), and the alternative is
+    evaluating nine cells per fragment.
 - **The ladder is loudness order, and the new boxes went INSIDE the animated tail
   rather than on the end**: classic → Neon glow → Textured wax → Glitter →
   **Embers → Ocean glass → Aurora** → Shimmer → **Firefly dust** → Twinkle. Ten
@@ -133,7 +150,8 @@ architectural change that made room for them.
   same primitives in the same canonical space, so the landscape dock's quarter
   turn is free (BL-21's rule). Each shows the finish's SHAPE, never its motion —
   BL-16's lesson that a strip full of moving things reads as noise.
-- **Smokes: paint 97 → 120, palette 241 → 247**; flow 258, shell 158, mobile 141
+- **Smokes: paint 97 → 120 → 123 (the review's check 11c), palette 241 → 247**;
+  flow 258, shell 158, mobile 141
   and dlc 131 unchanged and green. Paint gained check 11b (above) plus, per new
   finish, the authored level landing in the mask to the byte, the region clip
   holding, the baked base being a STILL image with the animation frozen, and
@@ -145,6 +163,21 @@ architectural change that made room for them.
   - **The counts recorded in the skill were stale before this round** — measured
     on this tree at HEAD, palette was 241 (recorded 237), flow 258 (234), shell
     158 (151) and dlc 131 (116). Corrected in the skill along with this entry.
+- **Adversarial review, same day.** No defect in the shipped animation, three
+  fixes: (1) `BrushFinish._nearest_level` broke a tie DOWN (`<`) while the
+  shader's `normalized < threshold` chain breaks it UP, so the two decoders
+  disagreed on exactly the 0.25 / 0.45 / 0.675 / 0.90 / 0.75 boundaries the
+  contract is written in terms of — the loop compares `<=` now; (2) the two
+  justifications above, corrected to what the pixels say and pinned by check
+  11c; (3) `is_animated()` still documented itself as "true for SHIMMER and
+  TWINKLE" and `mask_payload()` as "red = travelling sheen", both falsified by
+  this very entry. Cleared on inspection: the four bakeable bases and shimmer's
+  and twinkle's are untouched (the new modes are `else if` arms after them), the
+  frozen `t = 0` frame is finite for all four, `hue_shift` is byte-identical to
+  `brush.gdshader`'s, the aurora's peak rotation is the 0.35 rad the comment
+  claims, `sort_order` 32/34/36/45 collides with nothing and matches `LADDER`,
+  the four `.tres` ids are all KNOWN, and the 8-bit quantisation of the decode
+  only misfires below ~4/255 of coverage, where the light amount is nothing.
 - **Gotcha: `PackedFloat32Array` cannot hold a level table you intend to compare
   for equality.** `0.35` goes in and `0.3499999940395355` comes out, so `.has()`
   finds nothing and `is_equal_approx` against a `Vector2` component fails the

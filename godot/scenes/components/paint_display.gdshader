@@ -105,8 +105,13 @@ uniform float aurora_gain = 0.10;
 // Firefly dust: the same page-space cell discipline as twinkle at a sparser grid,
 // matching the baked motes brush.gdshader lays down for MODE_FIREFLY. `wander` is
 // how far a speck strays from its home, as a fraction of a cell -- small on purpose,
-// because only fragments INSIDE a cell draw that cell's speck, so a speck that
-// wandered over the edge would be sliced off by the cell it left.
+// because only fragments INSIDE a cell draw that cell's speck, so what wanders over
+// the edge is not drawn at all. The CENTRE always stays in its own cell (home
+// 0.24..0.76 plus wander 0.17 keeps it 1.8 px clear of the boundary at worst); a
+// speck's soft skirt does not, and the widest ones -- radius runs to 5.5 px -- lose
+// the outer few pixels of it to a straight cut when their drift takes them to the
+// edge. That is twinkle's trade inherited, and the alternative is evaluating the
+// nine surrounding cells at every fragment.
 uniform float firefly_cell = 26.0;
 uniform float firefly_wander = 0.17;
 uniform float firefly_gain = 1.85;
@@ -170,10 +175,17 @@ vec3 hue_shift(vec3 color, float radians_) {
 //
 // The thresholds below are the MIDPOINTS between adjacent levels -- nearest-level
 // rounding, written out, because a loop over a const array costs more than four
-// compares. Where strokes of two DIFFERENT styles overlap-blend the normalised
-// value lands between two levels and this picks one of them; those texels are the
-// fringe where one soft edge lies over another, they carry almost no coverage, and
-// a wrong animation at zero brightness is not a wrong pixel.
+// compares. A value sitting exactly on one takes the HIGHER level, and
+// BrushFinish._nearest_level breaks its ties the same way on purpose.
+//
+// Where strokes of two DIFFERENT styles overlap-blend the normalised value lands
+// between two levels and this picks one of them. Those texels are the seam where one
+// stroke's soft edge lies over another, and the seam is free because it is THIN, not
+// because it is dim: measured off the GPU (paint_smoke check 11c) an embers stroke
+// lapping over shimmer wax mis-decodes a band 5 px wide carrying up to 90% of a
+// level. Five pixels, because a stroke's edge is eight overlapping dabs deep and
+// crosses the whole ladder of wrong levels at once. The check pins that width, so a
+// fifth field level or a softer brush cannot widen it unnoticed.
 int decode_field(float normalized) {
 	if (normalized < 0.25) {
 		return FIELD_EMBERS;   // level 0.15
@@ -310,8 +322,9 @@ void fragment() {
 					// Firefly dust: the speck WANDERS instead of winking where it
 					// sits. Its home is kept off the cell's edges and the wander is
 					// a fraction of a cell, because only fragments inside the cell
-					// draw its speck -- one that strayed over the edge would be
-					// sliced in half by the boundary it crossed.
+					// draw its speck -- a centre that strayed over the edge would be
+					// sliced in half by the boundary it crossed. The skirt of the
+					// widest specks still is; see the uniform block above.
 					vec2 cell = floor(page_position / firefly_cell);
 					float rate = mix(0.30, 0.85, hash21(cell + 12.7));
 					float phase = hash21(cell + 9.1) * TAU + mask.b * TAU;
