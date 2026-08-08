@@ -526,6 +526,10 @@ func _check_animated_finishes() -> void:
 	await _settle()
 	_expect(not _page_view.is_effect_layer_active(),
 		"painting classic wax does not wake it either")
+	var dormant_recipe := _page_view.take_last_stroke_recipe()
+	_expect(not bool(dormant_recipe.get("effect_masked", true)),
+		"...and its recipe records that it never touched the mask, so a rebuild"
+		+ " after the mask wakes does not stamp it into one")
 
 	_page_view.brush_effect = BrushFinish.SHIMMER
 	_expect(_page_view.is_effect_layer_active(),
@@ -601,6 +605,9 @@ func _check_animated_finishes() -> void:
 	var recipe_a := _page_view.take_last_stroke_recipe()
 	_expect(StringName(recipe_a.get("effect", &"")) == BrushFinish.SHIMMER,
 		"the recipe names the animated finish, like any other ('%s')" % recipe_a.get("effect"))
+	_expect(bool(recipe_a.get("effect_masked", false)),
+		"...and records that it DID reach the mask -- the one bit a replay cannot"
+		+ " work out for itself")
 	var paint_a := (await _read_paint()).get_data()
 	var mask_a := (await _read_effect()).get_data()
 

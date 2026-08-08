@@ -722,6 +722,11 @@ func _check_coloring_flow() -> void:
 	_expect(screen.get_next_page_button().disabled and not screen.get_back_button().disabled,
 		"the only control that leaves the book is still Back")
 
+	# BL-38's animated finishes go here for the same reason BL-36's stickers do: the
+	# check navigates and presses Start over, both of which rebuild the coverage
+	# tracker that every assertion above is holding a reference to.
+	await _check_animated_finishes(screen)
+
 	# BL-36's stickers run LAST, deliberately: the check navigates and presses Start
 	# over, both of which rebuild the coverage tracker, and every assertion above is
 	# holding a reference to the one it was given.
@@ -866,6 +871,156 @@ func _check_undo_redo(screen: ColoringPage) -> void:
 ## (4b) BL-36: stickers. The cycle ring reaches them, sticker mode stops painting,
 ## a tap sticks one on TOP of the page without touching coverage, undo peels it off
 ## and redo puts it back, the padlock refuses one, and the save round-trips.
+## BL-38 at the screen's level: an animated box announces and cycles like any box,
+## its wax keeps moving after the stroke is down, and the page comes back tomorrow
+## the way it was left.
+##
+## The pixel arithmetic -- the mask's clip, its byte-exact replay, the fact that the
+## screen genuinely changes between frames -- is proved in the M2 paint smoke, where
+## whole layers are compared. What matters HERE is the four things only the screen
+## can be wrong about: that the palette's finish reaches the paint path, that the
+## coverage tracker cannot see the animation, that the second PNG is written and
+## read at the same moments the first one is, and that Start over takes it away.
+func _check_animated_finishes(screen: ColoringPage) -> void:
+	print("\n-- check 4c: animated crayon finishes (BL-38) --")
+	var page_view := screen.get_page_view()
+	var tracker := screen.get_coverage_tracker()
+	var palette := screen.get_palette() as PaletteChild
+	var book := screen.get_book()
+	var page_index := GameState.current_page_index
+	if palette == null:
+		_expect(false, "the screen has a crayon palette")
+		return
+
+	# --- the animated box is a box: it cycles, it announces --------------------
+	var def := palette.get_palette()
+	var shimmer_box := -1
+	for i in def.crayon_set_count():
+		if def.get_crayon_set_effect(i) == BrushFinish.SHIMMER:
+			shimmer_box = i
+	_expect(shimmer_box > 0,
+		"the palette offers an animated box in the ordinary cycle (box %d of %d)"
+		% [shimmer_box, def.crayon_set_count()])
+	if shimmer_box < 0:
+		return
+	palette.set_crayon_set(shimmer_box)
+	await _settle_layout()
+	_expect(page_view.brush_effect == BrushFinish.SHIMMER,
+		"cycling to it drives PageView.brush_effect through the ordinary"
+		+ " brush_effect_picked ('%s')" % page_view.brush_effect)
+	var flash := palette.get_box_flash()
+	_expect(flash != null and flash.is_showing(),
+		"...and it is ANNOUNCED over the strip like any other box ('%s!')"
+		% palette.get_crayon_set_name())
+	_expect(page_view.is_effect_layer_active(),
+		"...and the effect layer woke on the PICK, before any press")
+
+	# --- an animated stroke, inside a real region ------------------------------
+	var region_id := page_view.get_region_ids()[0]
+	var centroid: Vector2 = page_view.get_region_data(region_id)["centroid"]
+	_expect(page_view.begin_stroke(centroid),
+		"a shimmer stroke locks region %d like any stroke" % region_id)
+	page_view.continue_stroke(centroid + Vector2(30.0, 0.0))
+	page_view.end_stroke()
+	await _wait_for_coverage(screen)
+	var mask := page_view.get_effect_image()
+	_expect(mask != null and mask.get_size() == Vector2i(page_view.get_page_size()),
+		"...and leaves an effect mask the size of the page (%s)"
+		% [mask.get_size() if mask else Vector2i.ZERO])
+
+	# --- coverage is BLIND to the animation ------------------------------------
+	# The tracker reads the paint layer, and the paint layer does not move. Proved
+	# twice over: the image is byte-identical with the animation running and frozen,
+	# and re-settling the tracker from either one moves no number.
+	var coverage_before := tracker.page_coverage()
+	var live_image := page_view.get_paint_image()
+	page_view.effect_animation_enabled = false
+	for i in 6:
+		await get_tree().process_frame
+	var frozen_image := page_view.get_paint_image()
+	_expect(live_image.get_data() == frozen_image.get_data(),
+		"the paint layer is byte-identical with the animation on and off")
+	tracker.update_all(frozen_image)
+	var coverage_frozen := tracker.page_coverage()
+	page_view.effect_animation_enabled = true
+	for i in 6:
+		await get_tree().process_frame
+	tracker.update_all(page_view.get_paint_image())
+	_expect(is_equal_approx(coverage_before, coverage_frozen)
+			and is_equal_approx(coverage_frozen, tracker.page_coverage()),
+		"...so coverage is the same number either way (%.4f / %.4f / %.4f)"
+		% [coverage_before, coverage_frozen, tracker.page_coverage()])
+
+	# --- undo and redo carry the animation with the stroke ---------------------
+	var painted_mask := page_view.get_effect_image().get_data()
+	var painted_paint := page_view.get_paint_image().get_data()
+	_expect(screen.can_undo(), "the animated stroke joined the BL-17 timeline")
+	_expect(await screen.undo(), "undo takes it back")
+	await _settle_layout()
+	_expect(page_view.get_effect_image().get_data() != painted_mask,
+		"...and the mask goes with it -- the sheen is not left travelling over"
+		+ " wax that has been rubbed out")
+	_expect(await screen.redo(), "redo puts it back")
+	await _settle_layout()
+	_expect(page_view.get_paint_image().get_data() == painted_paint
+			and page_view.get_effect_image().get_data() == painted_mask,
+		"...and BOTH layers come back byte for byte (BL-17's pixel-stability, with"
+		+ " an animated stroke in the timeline)")
+
+	# --- the save writes a second PNG, at the same save point ------------------
+	_expect(await screen.save_page_now(true), "saving the page writes it")
+	_expect(GameState.has_page_paint(book, page_index),
+		"...the paint layer, where it always was")
+	_expect(GameState.has_page_effect(book, page_index),
+		"...and the effect mask beside it ('%s')"
+		% GameState.get_effect_path(book, page_index).get_file())
+	var saved_mask := GameState.load_page_effect(book, page_index)
+	_expect(saved_mask != null and saved_mask.get_data() == painted_mask,
+		"...holding exactly what was on screen")
+
+	# --- a page reopened looks the way it was left -----------------------------
+	var other_page := 1 - page_index
+	_expect(await screen.go_to_page(other_page), "leaving for the other page")
+	await _settle_layout()
+	_expect(not page_view.is_effect_layer_active(),
+		"...which has no animated wax on it, so it pays for no effect layer")
+	_expect(await screen.go_to_page(page_index), "and back again")
+	await _settle_layout()
+	await _wait_until(func() -> bool: return not screen.has_pending_restore(), 8.0)
+	_expect(page_view.is_effect_layer_active(),
+		"the page comes back WITH its animation, not just its colours")
+	_expect(page_view.get_effect_image().get_data() == painted_mask,
+		"...restored byte for byte from the second PNG")
+	_expect(page_view.get_paint_image().get_data() == painted_paint,
+		"...over a paint layer that is byte-identical too")
+	_expect(not screen.can_undo(),
+		"...as BASELINE, like the paint and the stickers: a new visit cannot undo it")
+
+	# --- Start over takes the animation away, and the file with it -------------
+	_expect(screen.restart_current_page(), "Start over on a page with animated wax")
+	await _settle_layout()
+	_expect(not GameState.has_page_effect(book, page_index),
+		"...deletes the effect mask from disk as well as the paint")
+	var wiped := page_view.get_effect_image()
+	_expect(wiped == null or _is_blank(wiped),
+		"...and leaves nothing animating on the page")
+
+	palette.set_crayon_set(0)
+	await _settle_layout()
+	_expect(page_view.brush_effect == BrushFinish.CLASSIC,
+		"cycling home puts plain wax back in hand ('%s')" % page_view.brush_effect)
+
+
+## True when every pixel of [param image] is fully transparent.
+static func _is_blank(image: Image) -> bool:
+	var bytes := image.get_data()
+	var pixels := image.get_width() * image.get_height()
+	for i in pixels:
+		if bytes[i * 4 + 3] != 0:
+			return false
+	return true
+
+
 func _check_stickers(screen: ColoringPage) -> void:
 	print("\n-- check 4b: sticker sets (BL-36) --")
 	var page_view := screen.get_page_view()

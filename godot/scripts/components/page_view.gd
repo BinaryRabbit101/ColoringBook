@@ -881,16 +881,22 @@ func _stamp(points: PackedVector2Array) -> void:
 ## stroke writes zeros into the mask through the same alpha blend that wrote ones,
 ## and the shimmer stops. A mask that only animated finishes wrote to would leave a
 ## sheen travelling under paint that has covered it.
+## [param to_mask] is false only for a REPLAY of a stroke that was laid while the
+## mask was still asleep. Live, that stroke touched no mask texel; a rebuild that
+## stamped it anyway would leave the mask's alpha channel a little different from
+## the layer it is supposed to be reproducing, and BL-17's whole promise is that a
+## rebuilt page is the same page. See [method _close_recipe].
 func _queue_stamps(
 	points: PackedVector2Array,
 	radius: float,
 	color: Color,
 	id_color: Vector3,
 	hardness: float,
-	effect: Dictionary
+	effect: Dictionary,
+	to_mask: bool = true
 ) -> void:
 	_paint_canvas.queue_stamps(points, radius, color, id_color, hardness, effect)
-	if _effect_active:
+	if _effect_active and to_mask:
 		_effect_canvas.queue_stamps(points, radius, color, id_color, hardness, effect)
 
 
@@ -938,6 +944,13 @@ func _close_recipe(region_id: int) -> void:
 		# functions of it and a rebuild that re-rolled one would not be pixel-exact.
 		"effect": brush_effect,
 		"effect_seed": _effect_seed,
+		# BL-38: whether this stroke reached the EFFECT MASK. It is not the same
+		# question as "is the finish animated" -- ordinary wax laid after the mask
+		# woke reaches it too, to rub the animation off what it covers -- and it is
+		# not derivable later, because it depends on when in the visit the first
+		# animated box was picked. One bool, and a rebuild reproduces the mask
+		# exactly instead of approximately.
+		"effect_masked": _effect_active,
 		"points": _recipe_points,
 	}
 	_recipe_points = PackedVector2Array()
@@ -954,10 +967,11 @@ func stamp_recipe(recipe: Dictionary) -> bool:
 	if points.is_empty():
 		return false
 	var effect: StringName = recipe.get("effect", BrushFinish.CLASSIC)
+	var animated := BrushFinish.is_animated(effect)
 	# BL-38: replaying an animated stroke onto a page whose mask went to sleep (a
 	# fresh load, then a redo) has to wake it first, or the wax would come back
 	# without the thing that made it that box.
-	if BrushFinish.is_animated(effect):
+	if animated:
 		_activate_effect_layer()
 	_queue_stamps(
 		points,
@@ -967,7 +981,8 @@ func stamp_recipe(recipe: Dictionary) -> bool:
 		float(recipe.get("hardness", brush_hardness)),
 		# A recipe with no finish (one recorded before BL-35, or by a test that only
 		# cares about geometry) is classic wax at seed 0 -- the shader's default path.
-		_effect_params(effect, float(recipe.get("effect_seed", 0.0)))
+		_effect_params(effect, float(recipe.get("effect_seed", 0.0))),
+		animated or bool(recipe.get("effect_masked", false))
 	)
 	return true
 
