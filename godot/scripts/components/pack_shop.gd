@@ -105,9 +105,17 @@ var _installing := ""
 var _tab := KIND_BOOK
 ## The tab buttons, in [constant TABS] order.
 var _tab_buttons: Array[Button] = []
+## BL-48's shared overlay scaler. Held so it is not collected; it parents itself.
+##
+## This is the one overlay whose contents are BUILT rather than authored, so it is
+## also the one that has to re-apply: [method OverlayMetrics.apply] captures a
+## control's baseline the first time it sees it, which is why a freshly-built row
+## only has to be walked, not registered.
+var _metrics: OverlayMetrics
 
 
 func _ready() -> void:
+	_metrics = OverlayMetrics.attach(self)
 	_scrim.pressed.connect(_on_close_pressed)
 	_close_button.pressed.connect(_on_close_pressed)
 	Backend.pack_install_progress.connect(_on_progress)
@@ -154,6 +162,9 @@ func set_packs(packs: Array) -> void:
 		_rows.append(row)
 	_open_a_tab_with_something_on_it()
 	_apply_tab()
+	# BL-48: the rows that just appeared were built at their authored sizes.
+	if is_instance_valid(_metrics):
+		_metrics.apply()
 
 
 ## Lands the player on a tab that has packs on it, when the one they would have
@@ -384,6 +395,11 @@ func get_close_button() -> Button:
 	return _close_button
 
 
+## BL-48's shared scaler, for the harnesses.
+func get_overlay_metrics() -> OverlayMetrics:
+	return _metrics
+
+
 # ======================================================================== rows ==
 
 ## One pack in the list: title, size, and a button whose label IS its state.
@@ -429,7 +445,10 @@ class PackRow extends PanelContainer:
 		column.add_theme_constant_override("separation", 8)
 		add_child(column)
 
-		var row := HBoxContainer.new()
+		# A PLAIN BoxContainer, which is BL-48's convention for "a row that stacks in
+		# portrait": title-and-blurb, then Not now, then Get, each the full width of
+		# the card, instead of three things fighting over 390 pt of phone.
+		var row := BoxContainer.new()
 		row.add_theme_constant_override("separation", 14)
 		column.add_child(row)
 

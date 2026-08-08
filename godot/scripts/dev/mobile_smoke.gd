@@ -39,7 +39,9 @@ extends Control
 ##      over -- and nothing else -- across a page change
 ##   e  portrait: the WINDOW is resized to PORTRAIT_WINDOW and the title screen,
 ##      the shelf and the coloring page are all checked and screenshotted through
-##      the real stretch pipeline
+##      the real stretch pipeline -- including (BL-48) the settings overlay, at the
+##      squeeze the window really produces rather than a forced one, and the
+##      Start-over confirm on the open page
 ##   f  the shared safe-area wrapper really insets the screens it wraps
 ##   g  the quit path: a close request saves synchronously, then DRAINS the GPU
 ##      readback queue -- tearing the engine down on a queued
@@ -766,6 +768,41 @@ func _check_portrait() -> void:
 	var gear := main.get_gear_button()
 	_expect(minf(gear.size.x, gear.size.y) >= 72.0,
 		"the settings gear is at least 72 px (%.0fx%.0f)" % [gear.size.x, gear.size.y])
+	# --- BL-48: the overlay layer, at the squeeze this window really produces -----
+	# No debug override here: shell_smoke's check (i) forces a phone's 2.95x to prove
+	# the 44 pt guarantee; this one takes whatever a 720x1280 window measures, which
+	# is what keeps the MEASUREMENT honest as well as the arithmetic.
+	var overlay_scale := OverlayMetrics.content_scale(get_viewport())
+	var touch_floor := OverlayMetrics.min_touch_px(get_viewport())
+	print("   overlay scale %.2f, touch floor %.0f canvas px" % [overlay_scale, touch_floor])
+	_expect(overlay_scale > 1.0,
+		"a portrait phone window really squeezes the overlays (scale %.2f)" % overlay_scale)
+	gear.pressed.emit()
+	await _settle_layout()
+	var settings := main.get_settings_panel()
+	_expect(settings != null, "the gear opens the settings panel in portrait")
+	if settings != null:
+		var box := settings.get_node("Center/Panel") as Control
+		_expect(box.size.x >= viewport_size.x * OverlayMetrics.PORTRAIT_PANEL_FRACTION - 1.0
+				and box.size.x <= viewport_size.x + 0.5,
+			"the settings panel uses %.0f%% of the portrait canvas (%.0f of %.0f)"
+			% [box.size.x / viewport_size.x * 100.0, box.size.x, viewport_size.x])
+		_expect(settings.get_close_button().size.y >= touch_floor,
+			"Done is a real touch target (%.0f of %.0f px)"
+			% [settings.get_close_button().size.y, touch_floor])
+		_expect(settings.get_erase_button().size.y >= touch_floor,
+			"...and so is Erase all progress (%.0f)" % settings.get_erase_button().size.y)
+		_expect((settings.get_node("Center/Panel/Margin/Column/AccountRow") as BoxContainer)
+				.vertical,
+			"the account row stacks, so the address gets a line of its own")
+		_expect(box.get_global_rect().end.y <= viewport_size.y + 1.0
+				and box.global_position.y >= -1.0,
+			"the whole panel is on the screen (%.0f..%.0f of %.0f)"
+			% [box.global_position.y, box.get_global_rect().end.y, viewport_size.y])
+		await _screenshot("settings_portrait.png")
+	main.close_settings()
+	await get_tree().process_frame
+
 	var coyote_cell: BookCell = null
 	for cell in shelf.get_cells():
 		if cell.get_book() == _coyote_book:
@@ -830,6 +867,28 @@ func _check_portrait() -> void:
 			.intersects(coloring.get_prev_page_button().get_global_rect()),
 		"the toolbar controls do not overlap in portrait")
 
+	# BL-48: the in-game confirm is an overlay too, on the same one mechanism -- and
+	# it is the only one a CHILD ever sees, so it gets the same treatment.
+	coloring.get_reset_button().pressed.emit()
+	await _settle_layout()
+	_expect(coloring.is_reset_confirming(), "Start over raised its confirm overlay")
+	var confirm := coloring.get_reset_confirm_overlay()
+	var confirm_box := confirm.get_node("Center/Panel") as Control
+	_expect(confirm_box.size.x >= confirm.size.x * OverlayMetrics.PORTRAIT_PANEL_FRACTION - 1.0
+			and confirm_box.size.x <= confirm.size.x + 0.5,
+		"the Start-over panel uses %.0f%% of the portrait canvas (%.0f of %.0f)"
+		% [confirm_box.size.x / confirm.size.x * 100.0, confirm_box.size.x, confirm.size.x])
+	_expect((confirm.get_node("Center/Panel/Margin/Column/Row") as BoxContainer).vertical,
+		"...and its two 250 px buttons stack instead of sharing a phone's width")
+	_expect(coloring.get_reset_confirm_button().size.y >= touch_floor
+			and coloring.get_reset_cancel_button().size.y >= touch_floor,
+		"...both clearing the %.0f px touch floor (%.0f / %.0f)"
+		% [touch_floor, coloring.get_reset_confirm_button().size.y,
+			coloring.get_reset_cancel_button().size.y])
+	await _screenshot("start_over_portrait.png")
+	coloring.get_reset_cancel_button().pressed.emit()
+	_expect(not coloring.is_reset_confirming(), "...and backing out leaves the page alone")
+
 	# Paint the coyote for real, so the screenshot shows the mechanic working on
 	# the user's own art rather than an empty page.
 	var region_ids := page_view.get_region_ids()
@@ -888,6 +947,24 @@ func _check_portrait() -> void:
 		_expect((docked[0] as CrayonButton).lift_direction() == Vector2.LEFT,
 			"...and lifts LEFT when picked, into the canvas it sits beside")
 	await _screenshot("coloring_landscape_dock.png")
+
+	# BL-48's other half: the same window, back in landscape, puts the overlays back
+	# where they were authored. The scale is 1.0 by construction on any canvas at
+	# least as big as the 1152 px base, so this is the "desktop did not regress"
+	# assertion, made on the very screen that was just showing the phone form.
+	_expect(is_equal_approx(OverlayMetrics.content_scale(get_viewport()), 1.0),
+		"a landscape desktop window is back to an overlay scale of exactly 1.0 (%.3f)"
+		% OverlayMetrics.content_scale(get_viewport()))
+	var landscape_settings := main.open_settings()
+	await _settle_layout()
+	var landscape_box := landscape_settings.get_node("Center/Panel") as Control
+	_expect(is_equal_approx(landscape_box.size.x, 600.0),
+		"...so the settings panel is its authored 600 px again (%.0f)" % landscape_box.size.x)
+	_expect(not (landscape_settings.get_node("Center/Panel/Margin/Column/AccountRow")
+			as BoxContainer).vertical,
+		"...and the account row is a row again")
+	main.close_settings()
+	await get_tree().process_frame
 
 	main.queue_free()
 	await get_tree().process_frame

@@ -69,9 +69,19 @@ const MIN_PASSWORD_LENGTH := 8
 
 var _state := STATE_SIGN_IN
 var _busy := false
+## BL-48's shared overlay scaler. Held so it is not collected; it parents itself.
+var _metrics: OverlayMetrics
 
 
 func _ready() -> void:
+	# BL-48: the two [LineEdit]s are the reason this panel needed the pass most --
+	# a sign-in form is the one place in the game a grown-up TYPES, and at a 3x
+	# squeeze the fields were 19 pt tall. [OverlayMetrics] gives every interactive
+	# control the 44 pt floor, fields included.
+	_metrics = OverlayMetrics.attach(self)
+	_metrics.applied.connect(_on_overlay_scaled)
+	# attach() applies as it enters the tree, before that connection exists.
+	_metrics.apply()
 	_scrim.pressed.connect(_on_close_pressed)
 	_close_button.pressed.connect(_on_close_pressed)
 	_submit_button.pressed.connect(_on_submit_pressed)
@@ -249,6 +259,12 @@ func _set_status(text: String) -> void:
 	_status.visible = text != ""
 
 
+## BL-48: the signed-in email is one long unbreakable token, exactly like the
+## settings panel's, and gets the same treatment.
+func _on_overlay_scaled(_scale: float, portrait: bool) -> void:
+	OverlayMetrics.fit_long_text(_email_label, portrait)
+
+
 func _on_close_pressed() -> void:
 	closed.emit()
 
@@ -297,3 +313,13 @@ func get_pictures_check() -> CheckBox:
 
 func is_busy() -> bool:
 	return _busy
+
+
+## The label the signed-in address is written into (BL-48's harness measures it).
+func get_email_label() -> Label:
+	return _email_label
+
+
+## BL-48's shared scaler, for the harnesses.
+func get_overlay_metrics() -> OverlayMetrics:
+	return _metrics

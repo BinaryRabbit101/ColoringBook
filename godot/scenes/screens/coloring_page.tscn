@@ -331,6 +331,7 @@ layout_mode = 2
 mouse_filter = 2
 theme_override_colors/font_color = Color(0.972549, 0.803922, 0.478431, 1)
 theme_override_font_sizes/font_size = 36
+autowrap_mode = 3
 text = "Start this page over?"
 horizontal_alignment = 1
 
@@ -343,7 +344,7 @@ text = "All the colour on THIS page goes away. Your other pages are safe."
 horizontal_alignment = 1
 autowrap_mode = 3
 
-[node name="Row" type="HBoxContainer" parent="ResetConfirm/Center/Panel/Margin/Column"]
+[node name="Row" type="BoxContainer" parent="ResetConfirm/Center/Panel/Margin/Column"]
 layout_mode = 2
 theme_override_constants/separation = 16
 alignment = 1

@@ -51,9 +51,14 @@ const TENS: PackedStringArray = [
 
 var _expected := 0
 var _wrong := 0
+## BL-48's shared overlay scaler. Held so it is not collected; it parents itself.
+var _metrics: OverlayMetrics
 
 
 func _ready() -> void:
+	# BL-48: one number sizes every overlay. The gate's answer field is a text input
+	# on a phone, so it gets the touch floor like any button (see OverlayMetrics).
+	_metrics = OverlayMetrics.attach(self)
 	_scrim.pressed.connect(_on_cancel_pressed)
 	_cancel_button.pressed.connect(_on_cancel_pressed)
 	_submit_button.pressed.connect(submit)
@@ -118,6 +123,11 @@ func get_submit_button() -> Button:
 
 func get_cancel_button() -> Button:
 	return _cancel_button
+
+
+## BL-48's shared scaler, for the harnesses.
+func get_overlay_metrics() -> OverlayMetrics:
+	return _metrics
 
 
 func get_hint_text() -> String:

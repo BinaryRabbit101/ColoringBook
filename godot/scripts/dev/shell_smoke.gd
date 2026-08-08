@@ -39,6 +39,10 @@ extends Control
 ##   g  NOTIFICATION_WM_CLOSE_REQUEST writes the save
 ##   h  a corrupt save, and a save from a FUTURE schema, both start fresh without
 ##      crashing (the future one is backed up first)
+##   i  BL-48: the overlay layer is sized for a phone. Desktop first (nothing may
+##      have moved), then a real portrait window with a real phone's squeeze forced
+##      on, across all five overlays -- panel width, the 44 pt touch floor, the
+##      stacked rows, and an account email that is readable rather than clipped
 ##
 ## Exit code is 0 only if every check passes.
 
@@ -68,6 +72,21 @@ const NAV_TIMEOUT := 8.0
 ## Longer budget for things that involve painting a whole page.
 const PAINT_TIMEOUT := 45.0
 
+## Check (i), BL-48. The window this harness runs in, and the phone shape it is
+## briefly resized to.
+const DESKTOP_WINDOW := Vector2i(1280, 820)
+const PORTRAIT_WINDOW := Vector2i(720, 1280)
+## A real phone in portrait: 1152 logical canvas pixels painted across ~390 pt of
+## glass. A Windows window can never produce this (it is never smaller than the
+## 1152 px base canvas), so it is forced through OverlayMetrics.debug_squeeze --
+## the same dev hook SafeArea.debug_insets is, and for the same reason.
+const PHONE_SQUEEZE := 2.95
+## Long enough to be the complaint BL-48 opened with.
+const LONG_EMAIL := "binaryrabbit101@gmail.com"
+## The settings panel's authored width, which the desktop half of check (i) says
+## must not have moved.
+const DESKTOP_PANEL_WIDTH := 600.0
+
 @onready var _host: Control = $Host
 
 var _checks := 0
@@ -84,7 +103,7 @@ var _probe_color := Color.MAGENTA
 
 
 func _ready() -> void:
-	get_window().size = Vector2i(1280, 820)
+	get_window().size = DESKTOP_WINDOW
 	# The coverage readback stalls on the presentation queue under FIFO v-sync
 	# (see coloring_page.gd); the run is minutes shorter on mailbox.
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_MAILBOX)
@@ -116,6 +135,7 @@ func _run() -> void:
 	await _check_single_palette_mid_book()
 	await _check_quit_save()
 	_check_broken_saves()
+	await _check_overlay_scaling()
 
 	print("\n=== %d/%d checks passed ===" % [_checks - _failures, _checks])
 	if "--stay" in OS.get_cmdline_user_args():
@@ -870,6 +890,227 @@ func _check_broken_saves() -> void:
 	_expect(not GameState.load_save(), "a missing save file starts fresh")
 	_expect(GameState.save_now() and FileAccess.file_exists(GameState.get_save_path()),
 		"and a fresh save can be written over it")
+
+
+# ============================ i: the overlay layer on a phone (BL-48) ==
+# The overlay layer is this harness's beat (the gear, the panel, the WP10 overlays
+# are all main's), so BL-48's portrait pass is asserted here. It runs LAST because
+# it resizes the window out from under everything, and it puts it back.
+#
+# The check has two halves and the FIRST one is the important one: on a desktop the
+# overlay scale is exactly 1.0 by construction, so every authored number must come
+# back unchanged. If that half ever fails, the mechanism has started charging
+# desktop players for a phone fix.
+
+func _check_overlay_scaling() -> void:
+	print("\n-- check i: the overlay layer is sized for a phone (BL-48) --")
+	var viewport := get_viewport()
+	# Back to the shelf: the gear and "More books" are only live there, and they are
+	# half of what this check is about.
+	var open_book := _main.get_current_screen() as ColoringPage
+	if open_book != null:
+		open_book.get_back_button().pressed.emit()
+		_expect(await _wait_for_screen(Main.SCREEN_BOOK_SELECT, PAINT_TIMEOUT),
+			"the harness is back on the shelf, where both shell buttons live (%s)"
+			% _main.get_current_screen_id())
+	await _settle_layout()
+
+	# ---------------------------------------------- desktop: nothing has moved --
+	_expect(is_equal_approx(OverlayMetrics.content_scale(viewport), 1.0),
+		"a desktop window scales the overlays by exactly 1.0 (%.3f)"
+		% OverlayMetrics.content_scale(viewport))
+	_expect(is_equal_approx(OverlayMetrics.min_touch_px(viewport),
+			OverlayMetrics.DESKTOP_TOUCH_FLOOR_PX),
+		"...and its touch floor is DESIGN.md's 48 px, not a phone's (%.0f)"
+		% OverlayMetrics.min_touch_px(viewport))
+
+	var panel := _main.open_settings()
+	await _settle_layout()
+	if panel == null:
+		_expect(false, "the settings panel opened")
+		return
+	var box := panel.get_node("Center/Panel") as Control
+	var account_row := panel.get_node("Center/Panel/Margin/Column/AccountRow") as BoxContainer
+	var email := panel.get_account_label()
+	_expect(is_equal_approx(box.size.x, DESKTOP_PANEL_WIDTH),
+		"the settings panel is still its authored %.0f px wide (%.0f)"
+		% [DESKTOP_PANEL_WIDTH, box.size.x])
+	_expect(panel.get_close_button().custom_minimum_size.y == 56.0,
+		"Done is still the 56 px it was authored at (%.0f)"
+		% panel.get_close_button().custom_minimum_size.y)
+	_expect(not account_row.vertical, "the account row is still a ROW on a desktop")
+	_expect(email.clip_text, "...and the email still clips there, exactly as authored")
+	_expect(is_equal_approx(_main.get_gear_button().size.x, Main.GearButton.SIZE.x),
+		"the settings gear is still %.0f px (%.0f)"
+		% [Main.GearButton.SIZE.x, _main.get_gear_button().size.x])
+	var desktop_header := (panel.get_node("Center/Panel/Margin/Column/Header") as Label) \
+		.get_theme_font_size("font_size")
+	_expect(desktop_header == 36, "the header type is still 36 px (%d)" % desktop_header)
+
+	# ------------------------------------- portrait, at a real phone's squeeze --
+	# The WINDOW is resized, not a Control: only that exercises the canvas_items /
+	# expand pipeline the shipped game runs on (the same reason mobile_smoke does it).
+	get_window().size = PORTRAIT_WINDOW
+	OverlayMetrics.debug_squeeze = PHONE_SQUEEZE
+	await _settle_layout()
+	var canvas := panel.size
+	var scale := OverlayMetrics.content_scale(viewport)
+	var floor_px := OverlayMetrics.min_touch_px(viewport)
+	print("   portrait canvas %s, overlay scale %.2f, touch floor %.0f px (= %.0f pt)"
+		% [canvas, scale, floor_px, floor_px / PHONE_SQUEEZE])
+	_expect(canvas.y > canvas.x,
+		"a 720x1280 window gives the overlay layer a PORTRAIT canvas (%s)" % canvas)
+	_expect(is_equal_approx(scale, OverlayMetrics.MAX_CONTENT_SCALE),
+		"a %.2fx squeeze pins the content scale at its %.1fx cap (%.2f)"
+		% [PHONE_SQUEEZE, OverlayMetrics.MAX_CONTENT_SCALE, scale])
+	_expect(floor_px > OverlayMetrics.MAX_CONTENT_SCALE * OverlayMetrics.TOUCH_TARGET_PT,
+		"...while the touch floor keeps going past the cap, because a finger does (%.0f px)"
+		% floor_px)
+	_expect(is_equal_approx(floor_px / PHONE_SQUEEZE, OverlayMetrics.TOUCH_TARGET_PT),
+		"...and it really is %.0f POINTS of glass (%.1f)"
+		% [OverlayMetrics.TOUCH_TARGET_PT, floor_px / PHONE_SQUEEZE])
+
+	_check_panel_fits("settings", box, canvas, floor_px)
+	_expect(account_row.vertical,
+		"the account row STACKS in portrait -- caption, address, button, one each per line")
+	_expect((panel.get_node("Center/Panel/Margin/Column/ConfirmBox/Row") as BoxContainer)
+			.vertical,
+		"...and so does the erase confirm's yes/no pair")
+
+	# --- the email: the complaint BL-48 opened with ---------------------------
+	email.text = LONG_EMAIL
+	panel.get_account_button().visible = true
+	await _settle_layout()
+	_expect(not email.clip_text and email.autowrap_mode == TextServer.AUTOWRAP_ARBITRARY,
+		"the account email wraps instead of clipping (clip=%s, wrap=%d)"
+		% [email.clip_text, email.autowrap_mode])
+	_expect(email.text == LONG_EMAIL,
+		"...and the label still holds every character ('%s')" % email.text)
+	var needed := email.get_theme_font("font").get_string_size(
+		LONG_EMAIL, HORIZONTAL_ALIGNMENT_LEFT, -1, email.get_theme_font_size("font_size")).x
+	var room := email.size.x * float(maxi(email.get_line_count(), 1))
+	_expect(room >= needed,
+		"...with room to draw all %.0f px of it across %d line(s) (%.0f px available)"
+		% [needed, email.get_line_count(), room])
+	_expect(email.size.x > DESKTOP_PANEL_WIDTH * 0.6,
+		"...on a line of its own rather than beside the button (%.0f px)" % email.size.x)
+	await _screenshot("settings_portrait.png")
+
+	# --- the gear and the shelf's shop button ---------------------------------
+	var gear := _main.get_gear_button()
+	_expect(minf(gear.size.x, gear.size.y) >= floor_px,
+		"the settings gear clears the touch floor in portrait (%.0f of %.0f)"
+		% [minf(gear.size.x, gear.size.y), floor_px])
+	var more := _main.get_more_books_button()
+	_expect(minf(more.size.x, more.size.y) >= floor_px,
+		"...and so does 'More books' (%.0f of %.0f)"
+		% [minf(more.size.x, more.size.y), floor_px])
+	_main.close_settings()
+
+	# --- the other three overlays, on the same one mechanism ------------------
+	var gate := _main.open_adult_gate(Callable())
+	await _settle_layout()
+	_check_panel_fits("adult gate", gate.get_node("Center/Panel") as Control, canvas, floor_px)
+	_expect((gate.get_node("Center/Panel/Margin/Column/Row") as BoxContainer).vertical,
+		"the gate's Continue/Back pair stacks in portrait")
+	_expect(gate.get_answer_field().size.y >= floor_px,
+		"the gate's answer FIELD is a touch target too (%.0f of %.0f)"
+		% [gate.get_answer_field().size.y, floor_px])
+	await _screenshot("adult_gate_portrait.png")
+	gate.get_cancel_button().pressed.emit()
+	await get_tree().process_frame
+
+	var account := _main.open_account_panel()
+	await _settle_layout()
+	_check_panel_fits("account", account.get_node("Center/Panel") as Control, canvas, floor_px)
+	_expect(account.get_email_field().size.y >= floor_px
+			and account.get_password_field().size.y >= floor_px,
+		"both sign-in fields clear the touch floor (%.0f / %.0f of %.0f)"
+		% [account.get_email_field().size.y, account.get_password_field().size.y, floor_px])
+	await _screenshot("account_portrait.png")
+	_main.close_account_panel()
+
+	var shop := _main.open_pack_shop()
+	shop.set_packs([
+		{
+			PackShop.KEY_SLUG: "coyote-book", PackShop.KEY_TITLE: "Coyote & Friends",
+			PackShop.KEY_BLURB: "Six new pages from the desert.",
+			PackShop.KEY_IS_FREE: true, PackShop.KEY_BYTES: 964_000,
+			PackShop.KEY_PAGE_COUNT: 6, PackShop.KEY_KIND: PackShop.KIND_BOOK,
+		},
+	])
+	await _settle_layout()
+	_check_panel_fits("pack shop", shop.get_node("Center/Panel") as Control, canvas, floor_px)
+	var rows := shop.get_visible_rows()
+	_expect(rows.size() == 1, "the shop built its one fixture row (%d)" % rows.size())
+	if rows.size() == 1:
+		_expect(rows[0].get_action_button().size.y >= floor_px,
+			"a row built in CODE is scaled too -- Get is %.0f px of %.0f"
+			% [rows[0].get_action_button().size.y, floor_px])
+	await _screenshot("pack_shop_portrait.png")
+	_main.close_pack_shop()
+
+	# --- and back to the desktop, which must be exactly where it was ----------
+	OverlayMetrics.debug_squeeze = -1.0
+	get_window().size = DESKTOP_WINDOW
+	await _settle_layout()
+	var again := _main.open_settings()
+	await _settle_layout()
+	var again_box := again.get_node("Center/Panel") as Control
+	_expect(is_equal_approx(again_box.size.x, DESKTOP_PANEL_WIDTH),
+		"back on a desktop the panel is its authored %.0f px again (%.0f)"
+		% [DESKTOP_PANEL_WIDTH, again_box.size.x])
+	_expect(not (again.get_node("Center/Panel/Margin/Column/AccountRow") as BoxContainer).vertical
+			and again.get_account_label().clip_text,
+		"...the account row is a row again and the email clips again")
+	_expect(is_equal_approx(_main.get_gear_button().size.x, Main.GearButton.SIZE.x),
+		"...and the gear is back to %.0f px (%.0f)"
+		% [Main.GearButton.SIZE.x, _main.get_gear_button().size.x])
+	_main.close_settings()
+	await get_tree().process_frame
+
+
+## The two things every overlay must be true of in portrait: it uses most of the
+## width it has (and none that it does not), and everything in it that takes a tap
+## is at least a finger across.
+func _check_panel_fits(
+	label: String, box: Control, canvas: Vector2, floor_px: float
+) -> void:
+	if box == null:
+		_expect(false, "the %s panel exists" % label)
+		return
+	var fraction := box.size.x / canvas.x
+	_expect(fraction >= OverlayMetrics.PORTRAIT_PANEL_FRACTION - 0.01,
+		"the %s panel takes %.0f%% of the portrait canvas, not a third (%.0f of %.0f px)"
+		% [label, fraction * 100.0, box.size.x, canvas.x])
+	_expect(box.size.x <= canvas.x + 0.5,
+		"...and does not run off it (%.0f of %.0f px)" % [box.size.x, canvas.x])
+	var smallest := _smallest_touch_target(box)
+	_expect(float(smallest[0]) >= floor_px - 0.5,
+		"...and its smallest touch target is %.0f px against a %.0f px floor (%s)"
+		% [smallest[0], floor_px, smallest[1]])
+
+
+## The narrowest visible interactive control under [param root], as
+## [code][size, name][/code]. INF and "-" when there are none.
+static func _smallest_touch_target(root: Node) -> Array:
+	var worst := INF
+	var worst_name := "-"
+	for child in root.get_children():
+		if child is Control:
+			var control := child as Control
+			# is_interactive() already excludes scrollbars; visibility excludes the
+			# rows of the shop tab nobody is looking at.
+			if OverlayMetrics.is_interactive(control) and control.is_visible_in_tree():
+				var shortest := minf(control.size.x, control.size.y)
+				if shortest < worst:
+					worst = shortest
+					worst_name = String(control.name)
+		var deeper := _smallest_touch_target(child)
+		if float(deeper[0]) < worst:
+			worst = float(deeper[0])
+			worst_name = String(deeper[1])
+	return [worst, worst_name]
 
 
 # ================================================================= helpers ==
