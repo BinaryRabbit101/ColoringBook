@@ -62,7 +62,12 @@ signal drained(ok: bool, reason: String)
 const QUEUE_PATH := "user://sync_queue.json"
 ## A file from a newer build is IGNORED rather than misread: the cost is one full
 ## re-sync, which is free, against corrupting a base revision, which is not.
-const SCHEMA_VERSION := 1
+##
+## [b]v2 (BL-18)[/b] added the erase clocks. The bump matters in the DOWNGRADE
+## direction: a v1 build reading this file would copy the keys it knows and
+## silently drop the erasures, then push the state a grown-up had just erased.
+## Ignoring the file instead costs one full re-sync, which is free.
+const SCHEMA_VERSION := 2
 
 ## DLC_SERVER.md 6.2: "pushed at the existing save points, debounced 5 s".
 const DEBOUNCE_SECONDS := 5.0
@@ -93,6 +98,8 @@ const REASON_SAVE := "save_point"
 const REASON_BOOK_OPEN := "book_open"
 const REASON_SIGN_IN := "sign_in"
 const REASON_RETRY := "retry"
+## A grown-up erased something (BL-18). Its own reason so a log reads honestly.
+const REASON_ERASE := "erase"
 
 ## Keys of one book's queue entry.
 const KEY_BASE_REVISION := "base_revision"
@@ -111,18 +118,33 @@ const KEY_PAINTED_AT := "painted_at"
 ## The digest the server is known to hold. Equal to [constant KEY_SHA256] means
 ## there is nothing to upload -- re-syncing an unchanged page costs zero requests.
 const KEY_SYNCED_SHA256 := "synced_sha256"
+## When "Start over" (BL-7) was last pressed on this page, ISO 8601 (BL-18). The
+## page's erase clock: everything stamped at or before it is gone.
+const KEY_ERASED_AT := "erased_at"
+## The erase clock the server has acknowledged. Differing from the above means a
+## [code]DELETE /sync/paint/...[/code] is still owed.
+const KEY_SYNCED_ERASED_AT := "synced_erased_at"
 
 ## Keys of the state dictionaries [method merge_states] works on.
 const STATE_CURRENT := "current_page_index"
 const STATE_STATUSES := "page_statuses"
 const STATE_FURTHEST := "furthest_page_index"
 const STATE_UPDATED_AT := "client_updated_at"
+## Per-page erase clocks, index-parallel to [constant STATE_STATUSES]; "" means
+## the page has never been reset (BL-18).
+const STATE_PAGE_ERASED := "page_erased_at"
 
 ## Server error codes this class branches on (11, and server/CLAUDE.md WP4).
 const CODE_PAINT_STALE := "PAINT_STALE"
 const CODE_PAINT_CLOCK_SKEW := "PAINT_CLOCK_SKEW"
 const CODE_PAINT_NOT_FOUND := "PAINT_NOT_FOUND"
 const CODE_PAINT_TOO_LARGE := "PAINT_TOO_LARGE"
+## BL-18. [constant CODE_PAINT_ERASED]: that PAGE was started over more recently
+## than this picture -- delete the local copy. [constant CODE_PROGRESS_ERASED]:
+## the whole SHELF was, so pull progress and converge on empty. Two codes because
+## the remedies are different sizes.
+const CODE_PAINT_ERASED := "PAINT_ERASED"
+const CODE_PROGRESS_ERASED := "PROGRESS_ERASED"
 
 var _host: Node
 var _api: ApiClient
@@ -137,6 +159,15 @@ var _cursor := ""
 ## Which account this bookkeeping belongs to. A different grown-up signing in on
 ## the same tablet must not inherit the last one's base revisions.
 var _account := ""
+## BL-18: when this shelf was last erased, as far as this device knows -- its own
+## "Erase all progress", or one the server told it about. ISO 8601; "" is never.
+## Everything stamped at or before it is gone, which is what makes an erase a
+## state that WINS rather than an absence that loses.
+var _erased_at := ""
+## The erase clock the server has acknowledged. Differing from the above is the
+## whole of "a DELETE /sync/progress is still owed", and it survives the process
+## dying, so an erase made on a plane still lands.
+var _synced_erased_at := ""
 ## DLC_SERVER.md 6.2 wants paint on unmetered connections only. See
 ## [method is_picture_sync_enabled] for why that is a toggle rather than a probe.
 var _sync_pictures := true
@@ -157,6 +188,11 @@ var _applying := false
 ## True while a pulled picture is being installed, so the resulting
 ## [signal GameState.page_paint_written] is not mistaken for the player painting.
 var _installing := false
+## True while an erase the SERVER told us about is being applied to
+## [code]GameState[/code] (BL-18). Without it, converging on someone else's wipe
+## would fire [signal GameState.progress_erased], restamp the clock as if this
+## grown-up had just pressed the button, and push it straight back.
+var _erasing := false
 
 ## uid -> BookDef, built once per drain batch. Discovery loads resources, so it is
 ## not something to do per merged page.
@@ -191,6 +227,12 @@ func attach() -> void:
 	GameState.save_written.connect(_on_save_written)
 	GameState.page_paint_written.connect(_on_page_paint_written)
 	GameState.book_started.connect(_on_book_started)
+	# BL-18: the two erase points. They are separate signals from
+	# `save_written` on purpose -- a save says "this is what I hold now", an
+	# erase says "and everything before this instant is gone", which is the one
+	# thing a monotonic merge cannot infer from the state alone.
+	GameState.progress_erased.connect(_on_progress_erased)
+	GameState.page_progress_erased.connect(_on_page_progress_erased)
 
 
 func detach() -> void:
@@ -203,6 +245,10 @@ func detach() -> void:
 		GameState.page_paint_written.disconnect(_on_page_paint_written)
 	if GameState.book_started.is_connected(_on_book_started):
 		GameState.book_started.disconnect(_on_book_started)
+	if GameState.progress_erased.is_connected(_on_progress_erased):
+		GameState.progress_erased.disconnect(_on_progress_erased)
+	if GameState.page_progress_erased.is_connected(_on_page_progress_erased):
+		GameState.page_progress_erased.disconnect(_on_page_progress_erased)
 
 
 func is_attached() -> bool:
@@ -321,7 +367,58 @@ func is_active() -> bool:
 ## True when something is waiting to go up: a book whose local state the server has
 ## not acknowledged, or a painted page whose digest it does not hold.
 func is_pending() -> bool:
-	return pending_book_count() > 0 or pending_paint_count() > 0
+	return pending_book_count() > 0 or pending_paint_count() > 0 or has_pending_erasure()
+
+
+## True when an erasure is still owed to the server (BL-18): the shelf's own
+## "Erase all progress", or a page's "Start over". Kept separate from the two
+## counts above because an erasure is not a state the server can merge its way
+## to -- it has to be TOLD, which is the whole point of the entry.
+func has_pending_erasure() -> bool:
+	_ensure_loaded()
+	if not _acknowledged(_erased_at, _synced_erased_at):
+		return true
+	for uid: Variant in _books:
+		var pages: Dictionary = (_books[uid] as Dictionary)[KEY_PAGES]
+		for key: Variant in pages:
+			var page: Dictionary = pages[key]
+			if not _acknowledged(String(page[KEY_ERASED_AT]), String(page[KEY_SYNCED_ERASED_AT])):
+				return true
+	return false
+
+
+## Whether the server is known to hold an erase at least as new as [param made].
+##
+## [b]Compared as INSTANTS, never as strings.[/b] This device writes
+## [code]...T00:14:53.995Z[/code] and the server answers
+## [code]...T00:14:53.995000Z[/code] -- the same moment, spelled differently. A
+## string comparison reads that as "still owed", and the next drain then re-sends
+## a wipe that arrives AFTER the colouring done since, deleting it.
+static func _acknowledged(made: String, synced: String) -> bool:
+	if made == "":
+		return true
+	if synced == "":
+		return false
+	return parse_iso8601(synced) >= parse_iso8601(made)
+
+
+## When this shelf was last erased as far as this device knows, ISO 8601, or ""
+## for never. Public so the smoke can assert convergence rather than infer it.
+func get_erased_at() -> String:
+	_ensure_loaded()
+	return _erased_at
+
+
+## When one page was last started over, ISO 8601, or "" for never.
+func get_page_erased_at(book_uid: String, page_index: int) -> String:
+	_ensure_loaded()
+	if not _books.has(book_uid):
+		return ""
+	var pages: Dictionary = (_books[book_uid] as Dictionary)[KEY_PAGES]
+	var key := str(page_index)
+	if not pages.has(key):
+		return ""
+	return String((pages[key] as Dictionary)[KEY_ERASED_AT])
 
 
 func pending_book_count() -> int:
@@ -434,10 +531,72 @@ func set_picture_sync_enabled(enabled: bool) -> void:
 ## makes the queue idempotent -- there is no delta to lose, only "what this device
 ## holds now".
 func _on_save_written(_path: String) -> void:
-	if not is_active():
+	if _erasing or not is_active():
 		return
 	if _reconcile(false) and not _applying:
 		schedule_drain(REASON_SAVE)
+
+
+## Whether this device has ever signed in, i.e. whether an erasure has anywhere
+## to go. False means the erase is purely local, which is what it was before
+## BL-18 and still the right answer: a tablet that has never had an account has
+## no shelf to erase, and recording a clock now would wipe the FIRST account that
+## ever signs in on it. Signing out keeps the account name, so an erase made
+## offline (or between sessions) still lands.
+func _belongs_to_an_account() -> bool:
+	return _account != ""
+
+
+## BL-18's first erase point: a grown-up pressed "Erase all progress".
+##
+## [b]The bookkeeping is reset, not just the save.[/b] Every base revision, every
+## fingerprint and every known digest is dropped -- that is the "the client should
+## reset its sync-queue fingerprints/revisions when it erases locally" half of the
+## backlog entry, and without it the very next drain would re-upload the state
+## that was just erased at the revision the server is still on.
+##
+## What is KEPT is the instant, because that is the only thing the server can be
+## told. It survives the process dying and is re-sent until a drain succeeds, so
+## an erase made with no signal still lands.
+func _on_progress_erased() -> void:
+	if _erasing:
+		# Converging on somebody else's wipe, not making one.
+		return
+	_ensure_loaded()
+	if not _belongs_to_an_account():
+		return
+	_erased_at = _later(iso_now(), _erased_at)
+	_books.clear()
+	_save()
+	if is_active():
+		schedule_drain(REASON_ERASE)
+
+
+## BL-18's second erase point: "Start over" on one page (BL-7).
+##
+## The same shape one level down. The page's clock is what the server compares
+## against the picture it holds (last-write-wins, exactly as an upload would be)
+## AND what censors the page's status, so a device still holding [code]complete[/code]
+## cannot put the badge back on a blank page.
+func _on_page_progress_erased(book: BookDef, page_index: int) -> void:
+	if _erasing or book == null:
+		return
+	_ensure_loaded()
+	if not _belongs_to_an_account():
+		return
+	var uid := book.get_uid()
+	var page := _page_entry(uid, page_index)
+	page[KEY_ERASED_AT] = _later(iso_now(), String(page[KEY_ERASED_AT]))
+	# The bytes are gone from disk; nothing is left to upload.
+	page[KEY_SHA256] = ""
+	page[KEY_PAINTED_AT] = ""
+	# `erase_page_progress` saved BEFORE it emitted this, so the reconcile that
+	# ran off `save_written` has already been and gone without seeing the clock.
+	# Re-running it now is what makes the book dirty for the status half.
+	_reconcile(false)
+	_save()
+	if is_active():
+		schedule_drain(REASON_ERASE)
 
 
 ## DLC_SERVER.md 6.2's second hook: paint is lazy, and this is the only moment it
@@ -502,7 +661,24 @@ func _on_book_started(book: BookDef) -> void:
 ##
 ## Commutative and idempotent, therefore: replaying a sync never changes the result,
 ## and a conflict is never a question anybody asks a five year old.
-static func merge_states(a: Dictionary, b: Dictionary) -> Dictionary:
+##
+## [b]Erasure (BL-18).[/b] A rule that only climbs cannot say "this is gone", so an
+## erasure is a CLOCK and the merge is defined against it, at two scopes:
+## [codeblock]
+## shelf: a state whose client_updated_at <= param erased_at is the empty book
+## page:  page_erased_at[i] = max(a[i], b[i]); a side whose client_updated_at is
+##        <= that reads `untouched` for page i
+## [/codeblock]
+## Both are max over an instant and both censor each side INDEPENDENTLY, which is
+## what keeps the rule commutative and idempotent with a clock in play. Ties go to
+## the erase (<=, not <): a wipe is the newest thing anybody said about the shelf,
+## and a save from the same microsecond surviving it is the failure the button is
+## pressed to avoid. Matched to [code]App\Services\ProgressMerge[/code] and
+## [code]tests/Unit/ProgressMergeTest.php[/code], which runs its property grids
+## under four shelf clocks for exactly this reason.
+static func merge_states(a: Dictionary, b: Dictionary, erased_at: String = "") -> Dictionary:
+	a = _censored(a, erased_at)
+	b = _censored(b, erased_at)
 	var at := parse_iso8601(String(a.get(STATE_UPDATED_AT, "")))
 	var bt := parse_iso8601(String(b.get(STATE_UPDATED_AT, "")))
 	var current := 0
@@ -512,23 +688,68 @@ static func merge_states(a: Dictionary, b: Dictionary) -> Dictionary:
 		current = int(b.get(STATE_CURRENT, 0))
 	else:
 		current = maxi(int(a.get(STATE_CURRENT, 0)), int(b.get(STATE_CURRENT, 0)))
+	var erasures := _merge_erasures(
+		a.get(STATE_PAGE_ERASED, []) as Array, b.get(STATE_PAGE_ERASED, []) as Array
+	)
 	return {
 		STATE_CURRENT: current,
-		STATE_STATUSES: _merge_statuses(
-			a.get(STATE_STATUSES, []) as Array, b.get(STATE_STATUSES, []) as Array
-		),
+		STATE_STATUSES: _merge_statuses(a, b, erasures),
 		STATE_FURTHEST: maxi(int(a.get(STATE_FURTHEST, 0)), int(b.get(STATE_FURTHEST, 0))),
 		STATE_UPDATED_AT: String(a.get(STATE_UPDATED_AT, "")) if at >= bt \
 			else String(b.get(STATE_UPDATED_AT, "")),
+		STATE_PAGE_ERASED: erasures,
 	}
 
 
-static func _merge_statuses(a: Array, b: Array) -> Array:
+## One side as the shelf's erase clock leaves it: the empty book, still STAMPED
+## with the erase so it cannot lose a later comparison to the state it replaced,
+## and so merging the result again is a no-op.
+static func _censored(state: Dictionary, erased_at: String) -> Dictionary:
+	if erased_at == "":
+		return state
+	if parse_iso8601(String(state.get(STATE_UPDATED_AT, ""))) > parse_iso8601(erased_at):
+		return state
+	return {
+		STATE_CURRENT: 0,
+		STATE_STATUSES: [],
+		STATE_FURTHEST: 0,
+		STATE_UPDATED_AT: erased_at,
+		STATE_PAGE_ERASED: [],
+	}
+
+
+static func _merge_statuses(a: Dictionary, b: Dictionary, erasures: Array) -> Array:
+	var left_statuses: Array = a.get(STATE_STATUSES, [])
+	var right_statuses: Array = b.get(STATE_STATUSES, [])
+	var merged: Array = []
+	for i in maxi(left_statuses.size(), right_statuses.size()):
+		var clock := String(erasures[i]) if i < erasures.size() else ""
+		merged.append(STATUS_ORDER[maxi(
+			_status_after(a, left_statuses, i, clock),
+			_status_after(b, right_statuses, i, clock),
+		)])
+	return merged
+
+
+## One side's rank for one page, `untouched` when the page was reset at or after
+## that side wrote it.
+static func _status_after(state: Dictionary, statuses: Array, page: int, clock: String) -> int:
+	if clock != "" \
+			and parse_iso8601(String(state.get(STATE_UPDATED_AT, ""))) <= parse_iso8601(clock):
+		return 0
+	return status_rank(String(statuses[page])) if page < statuses.size() else 0
+
+
+## Per-page later-of-the-two, padded with "" and trimmed of trailing blanks -- a
+## book nobody has reset merges to [] and costs nothing on the wire.
+static func _merge_erasures(a: Array, b: Array) -> Array:
 	var merged: Array = []
 	for i in maxi(a.size(), b.size()):
-		var left := String(a[i]) if i < a.size() else STATUS_UNTOUCHED
-		var right := String(b[i]) if i < b.size() else STATUS_UNTOUCHED
-		merged.append(STATUS_ORDER[maxi(status_rank(left), status_rank(right))])
+		var left := String(a[i]) if i < a.size() else ""
+		var right := String(b[i]) if i < b.size() else ""
+		merged.append(_later(left, right))
+	while not merged.is_empty() and String(merged[merged.size() - 1]) == "":
+		merged.remove_at(merged.size() - 1)
 	return merged
 
 
@@ -557,6 +778,16 @@ func _pull_progress() -> Dictionary:
 	if typeof(data) != TYPE_DICTIONARY:
 		return result
 	var body := data as Dictionary
+	# BL-18, and BEFORE the rows: the shelf's erase clock is never filtered by
+	# `since` -- a wipe leaves no rows behind, so this field is the only thing a
+	# cursored pull can learn it from. Adopting it first means the rows that
+	# follow (which are, by definition, post-erase state from another device)
+	# are merged into an already-clean shelf.
+	# `null` is "this shelf has never been erased" and is deliberately not the
+	# epoch, so it is read as a Variant rather than coerced -- String(null) is
+	# not a conversion GDScript offers.
+	var published: Variant = body.get("erased_at", null)
+	_adopt_shelf_erasure("" if published == null else String(published))
 	var complete := true
 	for row: Variant in body.get("books", []):
 		if typeof(row) != TYPE_DICTIONARY:
@@ -586,7 +817,15 @@ func _apply_server_state(uid: String, server: Dictionary) -> bool:
 		return false
 	var entry := _entry(uid)
 	var local := _local_state(uid)
-	var merged := merge_states(local, _state_from_server(server))
+	# The device's own shelf clock is applied here too, not only the server's:
+	# both ends run the identical rule, and a pull that arrived before this
+	# device's own erase reached the server must not merge the old shelf back in.
+	var merged := merge_states(local, _state_from_server(server), _erased_at)
+	# BL-18: page resets come back as clocks, and a clock is not something
+	# `mark_page_status` can express -- it refuses downgrades on purpose. A page
+	# this device wrote at or before the winning clock is reset outright, which
+	# is what makes another device's "Start over" stick here.
+	_adopt_page_erasures(book, merged[STATE_PAGE_ERASED] as Array)
 	_applying = true
 	var statuses: Array = merged[STATE_STATUSES]
 	for i in mini(statuses.size(), book.page_count()):
@@ -605,9 +844,81 @@ func _apply_server_state(uid: String, server: Dictionary) -> bool:
 	return true
 
 
+## Converge on a shelf erase the server published (BL-18).
+##
+## The whole "a device that was offline during a dashboard wipe" case: this
+## device wakes holding a full shelf, learns of an instant later than anything
+## it wrote, and clears itself. The queue's bookkeeping goes too -- base
+## revisions and fingerprints for rows that no longer exist would only make the
+## next drain argue about them.
+func _adopt_shelf_erasure(iso: String) -> bool:
+	if iso == "":
+		return false
+	var theirs := parse_iso8601(iso)
+	var ours := parse_iso8601(_erased_at)
+	if theirs < ours:
+		# This device's own erase is the newer one; the drain will push it.
+		return false
+	if theirs == ours:
+		# The server is holding exactly our erase: nothing to converge on, and
+		# nothing left to send. Both are normalised onto the server's spelling of
+		# the instant so the two never merely LOOK different.
+		_erased_at = iso
+		_synced_erased_at = iso
+		return false
+	_erased_at = iso
+	_synced_erased_at = iso
+	_erasing = true
+	GameState.erase_all_progress()
+	_erasing = false
+	_books.clear()
+	_save()
+	print_verbose("SyncQueue: the shelf was erased at %s; this device converged." % iso)
+	return true
+
+
+## Apply the merged per-page erase clocks to the local save.
+##
+## A page whose local content was written at or before its clock is reset the
+## only way a reset can be expressed -- [method GameState.erase_page_progress],
+## which deletes the paint, puts the status back to untouched and (BL-36) takes
+## the stickers with it. Guarded, so the resulting
+## [signal GameState.page_progress_erased] is not mistaken for a grown-up
+## pressing the button again and re-pushed at a new instant.
+func _adopt_page_erasures(book: BookDef, erasures: Array) -> void:
+	var uid := book.get_uid()
+	for i in mini(erasures.size(), book.page_count()):
+		var clock := String(erasures[i])
+		if clock == "":
+			continue
+		var page := _page_entry(uid, i)
+		if parse_iso8601(clock) <= parse_iso8601(String(page[KEY_ERASED_AT])):
+			continue
+		# It came from the merge, so the server already knows it (or is about to
+		# be told by whichever device authored it) -- never re-sent from here.
+		page[KEY_ERASED_AT] = clock
+		page[KEY_SYNCED_ERASED_AT] = clock
+		if parse_iso8601(String(page[KEY_PAINTED_AT])) > parse_iso8601(clock):
+			# Painted again since the reset. The picture stands.
+			continue
+		_erasing = true
+		GameState.erase_page_progress(book, i)
+		_erasing = false
+		page[KEY_SHA256] = ""
+		page[KEY_SYNCED_SHA256] = ""
+		page[KEY_PAINTED_AT] = ""
+
+
 # ===================================================================== the push ==
 
 func _drain(reason: String, pull: bool) -> Dictionary:
+	# BL-18, and FIRST of everything, pull included. An erasure is the one thing
+	# the server cannot merge its way to, so until it has been told, a pull would
+	# hand back the very shelf that was just erased -- and a push would re-upload
+	# it at a revision the server still agrees with.
+	var erased := await _push_erasures()
+	if not bool(erased["ok"]):
+		return _result(false, String(erased["code"]), reason)
 	if pull:
 		var pulled := await _pull_progress()
 		if not bool(pulled[ApiClient.KEY_OK]):
@@ -622,6 +933,92 @@ func _drain(reason: String, pull: bool) -> Dictionary:
 		if not bool(painted["ok"]):
 			return _result(false, String(painted["code"]), reason)
 	return _result(true, "", reason)
+
+
+## Everything erased on this device that the server has not been told about yet
+## (BL-18): the shelf, then each reset page.
+##
+## In that order, because a shelf wipe subsumes every page reset under it -- the
+## server would delete the rows the page deletes name, and a
+## [code]DELETE /sync/paint/...[/code] against a wiped shelf would recreate one.
+func _push_erasures() -> Dictionary:
+	var shelf := await _push_shelf_erasure()
+	if not bool(shelf["ok"]):
+		return shelf
+	for uid_variant: Variant in _books.keys():
+		var uid := String(uid_variant)
+		var pages: Dictionary = (_books[uid] as Dictionary)[KEY_PAGES]
+		for key: Variant in pages.keys():
+			var page: Dictionary = pages[key]
+			if _acknowledged(String(page[KEY_ERASED_AT]), String(page[KEY_SYNCED_ERASED_AT])):
+				continue
+			if not is_active():
+				return {"ok": false, "code": ApiClient.CODE_CANCELLED}
+			var outcome := await _erase_page(uid, int(String(key)), page)
+			if not bool(outcome["ok"]):
+				return outcome
+	return {"ok": true, "code": ""}
+
+
+## [code]DELETE /sync/progress[/code] -- "Erase all progress", pushed up.
+##
+## Idempotent on the server (the clock only ever moves forward), which is why
+## this can simply keep re-sending the instant until a drain succeeds rather than
+## tracking whether the last attempt got through.
+func _push_shelf_erasure() -> Dictionary:
+	if _acknowledged(_erased_at, _synced_erased_at):
+		return {"ok": true, "code": ""}
+	var result: Dictionary = await _api.request_json(
+		HTTPClient.METHOD_DELETE, "/sync/progress", {"erased_at": _erased_at},
+		{"attempts": REQUEST_ATTEMPTS}
+	)
+	if not bool(result[ApiClient.KEY_OK]):
+		return {"ok": false, "code": String(result[ApiClient.KEY_CODE])}
+	var data: Variant = result[ApiClient.KEY_DATA]
+	# The server answers with the clock as it stands, which may be LATER than
+	# ours -- another device erased more recently. Adopting it keeps both ends
+	# on one instant and stops this device pushing an older one forever.
+	if typeof(data) == TYPE_DICTIONARY:
+		_erased_at = _later(_erased_at, String((data as Dictionary).get("erased_at", "")))
+	_synced_erased_at = _erased_at
+	# Whatever the server had is gone, so no base revision this device holds can
+	# still be true.
+	for uid: Variant in _books:
+		(_books[uid] as Dictionary)[KEY_BASE_REVISION] = 0
+	_save()
+	return {"ok": true, "code": ""}
+
+
+## [code]DELETE /sync/paint/{book}/{page}[/code] -- one page's "Start over".
+##
+## The response carries the book's new progress revision, because the reset
+## changes progress as well as pixels; storing it is what stops this device
+## conflicting against a row it just changed itself.
+func _erase_page(uid: String, page_index: int, page: Dictionary) -> Dictionary:
+	var erased_at := String(page[KEY_ERASED_AT])
+	var result: Dictionary = await _api.request_json(
+		HTTPClient.METHOD_DELETE, "/sync/paint/%s/%d" % [uid, page_index],
+		{"client_erased_at": erased_at}, {"attempts": REQUEST_ATTEMPTS}
+	)
+	var code := String(result[ApiClient.KEY_CODE])
+	if bool(result[ApiClient.KEY_OK]) or code in [CODE_PAINT_ERASED, CODE_PROGRESS_ERASED]:
+		page[KEY_SYNCED_ERASED_AT] = erased_at
+		page[KEY_SYNCED_SHA256] = ""
+		var data: Variant = result[ApiClient.KEY_DATA]
+		if typeof(data) == TYPE_DICTIONARY and (data as Dictionary).has("revision"):
+			_entry(uid)[KEY_BASE_REVISION] = int((data as Dictionary)["revision"])
+		_save()
+		return {"ok": true, "code": ""}
+	if code == CODE_PAINT_STALE:
+		# 6.3 in the other direction: another device painted this page AFTER the
+		# reset, so the later picture wins and the reset does not. Give up on it
+		# and take the server's copy -- the alternative is re-sending a deletion
+		# that will lose every time.
+		page[KEY_SYNCED_ERASED_AT] = erased_at
+		await _pull_page_paint(uid, page_index, stale_server_block(result))
+		_save()
+		return {"ok": true, "code": ""}
+	return _paint_failure(uid, page_index, result)
 
 
 ## The batched [code]PUT /sync/progress[/code] (11: "one call for the whole shelf"),
@@ -717,7 +1114,21 @@ func _push_row(uid: String, state: Dictionary) -> Dictionary:
 		"page_statuses": state[STATE_STATUSES],
 		"furthest_page_index": int(state[STATE_FURTHEST]),
 		"client_updated_at": String(state[STATE_UPDATED_AT]),
+		# BL-18. The server already learned these from the page DELETEs, but both
+		# ends running the identical rule is what makes the protocol converge in
+		# one retry -- and a clock this device learned from ANOTHER device has to
+		# travel on, or the two would disagree about the same page forever.
+		"page_erased_at": _wire_erasures(state[STATE_PAGE_ERASED] as Array),
 	}
+
+
+## The erase clocks as the API wants them: index-parallel to `page_statuses`,
+## null (not "") for a page nobody has reset.
+static func _wire_erasures(erasures: Array) -> Array:
+	var wire: Array = []
+	for clock: Variant in erasures:
+		wire.append(null if String(clock) == "" else String(clock))
+	return wire
 
 
 # ====================================================================== paint ==
@@ -775,6 +1186,9 @@ func _upload_page(uid: String, page_index: int, page: Dictionary) -> Dictionary:
 		page[KEY_SYNCED_SHA256] = sha
 		return {"ok": true, "code": ""}
 	if not bool(negotiation[ApiClient.KEY_OK]):
+		var refused := await _erasure_refusal(uid, page_index, page, negotiation)
+		if not refused.is_empty():
+			return refused
 		return _paint_failure(uid, page_index, negotiation)
 	var instructions := upload_instructions(negotiation)
 	if instructions.is_empty():
@@ -799,7 +1213,55 @@ func _upload_page(uid: String, page_index: int, page: Dictionary) -> Dictionary:
 		# 6.3: our copy is the older one. `details.server` means PULL, not retry.
 		await _pull_page_paint(uid, page_index, stale_server_block(upload))
 		return {"ok": true, "code": ""}
+	var refused := await _erasure_refusal(uid, page_index, page, upload)
+	if not refused.is_empty():
+		return refused
 	return _paint_failure(uid, page_index, upload)
+
+
+## The two BL-18 refusals, if that is what this result is. Empty when it isn't.
+##
+## Neither is a transport failure and neither is worth a backoff: the server is
+## telling this device that something it holds was deliberately erased somewhere
+## else, and the answer in both cases is to stop trying to upload it.
+func _erasure_refusal(uid: String, page_index: int, page: Dictionary,
+		result: Dictionary) -> Dictionary:
+	var code := String(result[ApiClient.KEY_CODE])
+	if code == CODE_PAINT_ERASED:
+		# This PAGE was started over more recently. Drop the local copy the same
+		# way a pulled clock would.
+		var book := _book_for_uid(uid)
+		page[KEY_ERASED_AT] = _later(String(page[KEY_ERASED_AT]), _erasure_stamp(result))
+		page[KEY_SYNCED_ERASED_AT] = String(page[KEY_ERASED_AT])
+		page[KEY_SHA256] = ""
+		page[KEY_SYNCED_SHA256] = ""
+		page[KEY_PAINTED_AT] = ""
+		if book != null:
+			_erasing = true
+			GameState.erase_page_progress(book, page_index)
+			_erasing = false
+		_save()
+		return {"ok": true, "code": ""}
+	if code == CODE_PROGRESS_ERASED:
+		# The whole SHELF was erased. One pull carries the clock, and adopting it
+		# clears everything this device is still trying to send.
+		await _pull_progress()
+		return {"ok": true, "code": ""}
+	return {}
+
+
+## The [code]details.erased_at[/code] of a BL-18 refusal, or "".
+static func _erasure_stamp(result: Dictionary) -> String:
+	var data: Variant = result[ApiClient.KEY_DATA]
+	if typeof(data) != TYPE_DICTIONARY:
+		return ""
+	var envelope: Variant = (data as Dictionary).get("error", null)
+	if typeof(envelope) != TYPE_DICTIONARY:
+		return ""
+	var details: Variant = (envelope as Dictionary).get("details", null)
+	if typeof(details) != TYPE_DICTIONARY:
+		return ""
+	return String((details as Dictionary).get("erased_at", ""))
 
 
 ## The [code]202[/code]'s instructions, taken VERBATIM (server/CLAUDE.md WP4: "the
@@ -862,6 +1324,11 @@ func _pull_book_paint(uid: String) -> void:
 		await _pull_page_paint(uid, page_index, server)
 
 
+## When the server says one of its pictures was painted.
+static func sha_painted_at(server: Dictionary) -> String:
+	return String(server.get("client_painted_at", ""))
+
+
 ## Whether the server's picture for this page should be fetched.
 func _wants_server_paint(uid: String, page_index: int, server: Dictionary) -> bool:
 	var sha := String(server.get("sha256", "")).to_lower()
@@ -869,6 +1336,13 @@ func _wants_server_paint(uid: String, page_index: int, server: Dictionary) -> bo
 		return false
 	var path := GameState.get_paint_path_for_key(uid, page_index)
 	var page := _page_entry(uid, page_index)
+	# BL-18: a picture painted at or before this device's own pending "Start
+	# over" must not be pulled back while the deletion is still queued -- the
+	# page has no local file precisely BECAUSE it was reset, and the branch
+	# below reads that as "this device has never seen it".
+	if String(page[KEY_ERASED_AT]) != "" \
+			and parse_iso8601(sha_painted_at(server)) <= parse_iso8601(String(page[KEY_ERASED_AT])):
+		return false
 	if path == "" or not FileAccess.file_exists(path):
 		# 6.2, verbatim: "downloaded on demand when a page is opened on a device that
 		# has no local paint".
@@ -1001,29 +1475,59 @@ func _local_state(uid: String) -> Dictionary:
 		STATE_STATUSES: statuses,
 		STATE_FURTHEST: furthest,
 		STATE_UPDATED_AT: String(entry[KEY_CLIENT_UPDATED_AT]),
+		STATE_PAGE_ERASED: _local_erasures(uid),
 	}
+
+
+## The per-page erase clocks (BL-18) as the index-parallel list the merge and the
+## wire both want. Held on the PAGE entries -- one place per page, beside the
+## digest -- and flattened here rather than stored twice.
+func _local_erasures(uid: String) -> Array:
+	var pages: Dictionary = _entry(uid)[KEY_PAGES]
+	var erasures: Array = []
+	for key: Variant in pages:
+		var index := int(String(key))
+		var clock := String((pages[key] as Dictionary)[KEY_ERASED_AT])
+		if clock == "":
+			continue
+		while erasures.size() <= index:
+			erasures.append("")
+		erasures[index] = clock
+	return erasures
 
 
 static func _state_from_server(server: Dictionary) -> Dictionary:
 	var statuses: Array = []
 	for raw: Variant in server.get("page_statuses", []):
 		statuses.append(STATUS_ORDER[status_rank(String(raw))])
+	var erasures: Array = []
+	for raw: Variant in server.get("page_erased_at", []):
+		erasures.append("" if raw == null else String(raw))
 	return {
 		STATE_CURRENT: int(server.get("current_page_index", 0)),
 		STATE_STATUSES: statuses,
 		STATE_FURTHEST: int(server.get("furthest_page_index", 0)),
 		STATE_UPDATED_AT: String(server.get("client_updated_at", "")),
+		STATE_PAGE_ERASED: erasures,
 	}
 
 
 ## Everything that identifies a book's state on the wire, as one comparable string.
 ## Two devices agreeing on this agree on the whole push.
+##
+## The erase clocks are in it (BL-18) because "Start over" on a page that was
+## already `untouched` changes no status at all -- without them the book would
+## not read as dirty and the deletion would never be pushed.
 static func _fingerprint(state: Dictionary) -> String:
 	var statuses := PackedStringArray()
 	for status: Variant in (state[STATE_STATUSES] as Array):
 		statuses.append(String(status))
-	return "%d|%d|%s" % [
-		int(state[STATE_CURRENT]), int(state[STATE_FURTHEST]), ",".join(statuses)
+	var erasures := PackedStringArray()
+	for clock: Variant in (state.get(STATE_PAGE_ERASED, []) as Array):
+		erasures.append(String(clock))
+	return "%d|%d|%s|%s" % [
+		int(state[STATE_CURRENT]), int(state[STATE_FURTHEST]),
+		",".join(statuses), ",".join(erasures)
 	]
 
 
@@ -1238,6 +1742,7 @@ func _page_entry(uid: String, page_index: int) -> Dictionary:
 	if not pages.has(key):
 		pages[key] = {
 			KEY_SHA256: "", KEY_BYTES: 0, KEY_PAINTED_AT: "", KEY_SYNCED_SHA256: "",
+			KEY_ERASED_AT: "", KEY_SYNCED_ERASED_AT: "",
 		}
 	return pages[key]
 
@@ -1254,6 +1759,10 @@ func _adopt_account(email: String) -> void:
 			% [email, _account])
 		_books.clear()
 		_cursor = ""
+		# An erase belongs to the account that was signed in when it happened.
+		# Carrying one across would wipe a household that never asked (BL-18).
+		_erased_at = ""
+		_synced_erased_at = ""
 	_account = email
 	_save()
 
@@ -1286,6 +1795,8 @@ func _read() -> void:
 	_account = String(data.get("account", ""))
 	_cursor = String(data.get("cursor", ""))
 	_sync_pictures = bool(data.get("sync_pictures", true))
+	_erased_at = String(data.get("erased_at", ""))
+	_synced_erased_at = String(data.get("synced_erased_at", ""))
 	var books: Variant = data.get("books", {})
 	if typeof(books) != TYPE_DICTIONARY:
 		return
@@ -1312,6 +1823,10 @@ func _read() -> void:
 			page[KEY_BYTES] = int((page_raw as Dictionary).get(KEY_BYTES, 0))
 			page[KEY_PAINTED_AT] = String((page_raw as Dictionary).get(KEY_PAINTED_AT, ""))
 			page[KEY_SYNCED_SHA256] = String((page_raw as Dictionary).get(KEY_SYNCED_SHA256, ""))
+			page[KEY_ERASED_AT] = String((page_raw as Dictionary).get(KEY_ERASED_AT, ""))
+			page[KEY_SYNCED_ERASED_AT] = String(
+				(page_raw as Dictionary).get(KEY_SYNCED_ERASED_AT, "")
+			)
 
 
 ## Writes the queue. Called after every mutation: an offline session's pending
@@ -1324,6 +1839,8 @@ func _save() -> void:
 		"account": _account,
 		"cursor": _cursor,
 		"sync_pictures": _sync_pictures,
+		"erased_at": _erased_at,
+		"synced_erased_at": _synced_erased_at,
 		"books": _books,
 	}
 	var directory := _path.get_base_dir()
@@ -1343,6 +1860,8 @@ func erase() -> void:
 	_books.clear()
 	_cursor = ""
 	_account = ""
+	_erased_at = ""
+	_synced_erased_at = ""
 	_loaded = true
 	if FileAccess.file_exists(_path):
 		DirAccess.remove_absolute(_path)
