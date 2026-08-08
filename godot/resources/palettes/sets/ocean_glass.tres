@@ -5,6 +5,6 @@
 [resource]
 script = ExtResource("1_crayon_set_def")
 display_name = "Ocean Glass"
-sort_order = 34
+sort_order = 62
 colors = PackedColorArray()
 effect = &"ocean"

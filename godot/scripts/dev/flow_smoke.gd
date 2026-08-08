@@ -1648,9 +1648,18 @@ func _check_sub_smokes() -> void:
 		)
 		var text := "\n".join(output.map(func(line: Variant) -> String: return String(line)))
 		var summary := ""
+		var failures := PackedStringArray()
 		for line in text.split("\n"):
 			if line.begins_with("==="):
 				summary = line.strip_edges()
+			elif line.begins_with("FAIL"):
+				failures.append(line.strip_edges())
+		# The child's own FAIL lines, forwarded. Without this a nested failure reads
+		# only as "exited 1" and the run has to be reproduced by hand to find out what
+		# broke -- which for a check whose behaviour differs between a focused and an
+		# unfocused window is exactly the run you cannot reproduce.
+		for failure in failures:
+			print("  [%s] %s" % [scene.get_file(), failure])
 		_expect(code == 0, "%s exited %d %s" % [scene.get_file(), code, summary])
 
 

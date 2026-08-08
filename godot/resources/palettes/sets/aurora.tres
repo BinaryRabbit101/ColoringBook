@@ -5,6 +5,6 @@
 [resource]
 script = ExtResource("1_crayon_set_def")
 display_name = "Aurora"
-sort_order = 36
+sort_order = 64
 colors = PackedColorArray()
 effect = &"aurora"

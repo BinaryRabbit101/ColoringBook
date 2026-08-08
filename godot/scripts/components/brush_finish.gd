@@ -31,6 +31,17 @@ extends RefCounted
 ## STYLE LEVELS, so each channel carries a whole FAMILY of animations instead of one.
 ## See the [constant MASK_FIELD_LEVELS] block for the decode and why it is exact.
 ##
+## [b]Phase 4 (BL-51) is a TUNING round, not an architectural one[/b] -- and the
+## distinction is the point. A playtest said BL-47's four boxes "missed the point":
+## the ladder is meant to run solid wax, then a band of SUBTLE effects, then a band
+## of SPECTACLE, and all four had landed in the middle band. They were re-aimed at
+## the top -- see [code]paint_display.gdshader[/code]'s header for what changed in
+## each -- and [constant LADDER] was re-sorted so the three tiers are three
+## contiguous runs. Shimmer and twinkle did not move a byte: they ARE the subtle
+## tier, and the round would have had nothing to say if they had been turned up too.
+## Neither did the mask levels, their decode thresholds or the save format, so a page
+## saved before this round reopens as the same STYLE and simply performs it louder.
+##
 ## [b]Why the effects are functions of PAGE POSITION, not of the dab.[/b] A stroke
 ## overlaps its own dabs by ~87% ([constant PageView.STAMP_SPACING_RATIO]), so an
 ## effect that varied per dab would be re-blended eight times over at every pixel
@@ -61,31 +72,33 @@ const GRAIN := &"grain"
 ## rainbow bands, plus bright specks of glitter caught in the wax. The loudest of
 ## the BAKEABLE finishes, and the last box that stops moving when the stroke does.
 const GLITTER := &"glitter"
-## Box 5 (BL-47 slotted three quieter animated boxes below it), and the FIRST
-## animated one by loudness: dark cooled-crust wax whose patches breathe warm, like
-## coals being blown on. The subtlest box in the game -- from across the room a page
-## of embers looks like ordinary dark wax that will not quite hold still.
-const EMBERS := &"embers"
-## Box 6: polished glass with sunlight rippling through shallow water over it --
-## two drifting noise fields multiplied and sharpened into caustics.
-const OCEAN := &"ocean"
-## Box 7: a curtain of light crossing the page. It is the only finish that changes
-## the wax's HUE rather than adding brightness to it -- the sheen reads as slowly
-## changing colour instead of white glare, which is what makes it louder than the
-## ocean and quieter than the shimmer.
-const AURORA := &"aurora"
-## Box 8, the first ANIMATED one BL-38 shipped: satin wax with a sheen that travels
-## across the page, over and over. Baked base plus a full-strength white-sheen level
-## in the effect mask's red channel.
+## Box 5, the first ANIMATED one and the one BL-38 shipped first: satin wax with a
+## sheen that travels across the page, over and over. Baked base plus a full-strength
+## white-sheen level in the effect mask's red channel. The quiet end of the animated
+## band -- BL-51 left it exactly there on purpose.
 const SHIMMER := &"shimmer"
-## Box 9: faint dust whose specks WANDER instead of winking where they are. Twinkle's
-## machinery at half the payload and half the volume -- the specks drift, swell and
-## fade rather than blinking, so it reads as a slow drift of light over the wax.
-const FIREFLY := &"firefly"
-## Box 10, the loudest box in the game: glitter that actually sparkles. Baked glitter
-## base plus a full-strength wink level in the effect mask's green channel, which the
-## display shader turns into specks that wink in and out where they sit.
+## Box 6: glitter that actually sparkles. Baked glitter base plus a full-strength
+## wink level in the effect mask's green channel, which the display shader turns into
+## specks that wink in and out where they sit. The loudest of the SUBTLE finishes and
+## the last box before the spectacle tier.
 const TWINKLE := &"twinkle"
+## Box 7, and the first of BL-51's SPECTACLE tier: live coals. Dark crazed crust with
+## a bed of heat churning under it, a fast flicker on top and cinders streaming
+## upward off it. (BL-47 shipped this as the SUBTLEST box in the game and a playtest
+## called that a mistake -- see BACKLOG BL-51.)
+const EMBERS := &"embers"
+## Box 8: polished glass with sunlight rippling through shallow water over it -- two
+## ridged noise fields multiplied into a caustic web of bright threads that swims
+## across the wax, with glints running along it.
+const OCEAN := &"ocean"
+## Box 9: two vivid crimson-green-violet curtains sweeping the page, undulating and
+## striped with rays. It is the finish that changes the wax's HUE as well as lighting
+## it, so the colour of the drawing itself moves as the curtain passes.
+const AURORA := &"aurora"
+## Box 10, the loudest box in the game: a swarm of bright fireflies wandering over
+## the wax, each a white-hot core inside a wide warm halo, swelling and fading as it
+## drifts. Baked dust plus the drift speck level in the effect mask's green channel.
+const FIREFLY := &"firefly"
 
 ## Shader [code]effect_mode[/code] values. Kept next to the ids so the two cannot
 ## drift; the shader has the same numbers in its own comments. They are BAKE modes --
@@ -164,10 +177,11 @@ const FINISHES := {
 		"strength": 1.0,
 		"display_name": "Embers",
 		"animated": true,
-		# Level 0.15: the warm breathing field. The QUIETEST level of the loudest
-		# channel, which is also why it is the lowest number in the table -- the
-		# decode's nearest-level rule reads best when the ladder and the numbers
-		# climb together.
+		# Level 0.15: the heat field. A style LEVEL is a name, not a volume -- BL-51
+		# made this the fire it is now without touching the number, because the
+		# number is what every saved `_fx.png` decodes through. (It was authored as
+		# the lowest in the table when embers was the quietest box; it no longer is,
+		# and moving it to say so would repaint saved work for nothing.)
 		"sheen": 0.15,
 		"spark": 0.0,
 	},
@@ -232,11 +246,16 @@ const FINISHES := {
 
 ## The finishes in ladder order, dullest first. What an authoring tool would offer
 ## and what the smoke walks. The ANIMATED finishes top it -- a box that keeps moving
-## is louder than any box that stops -- and BL-47 slotted its four new ones INSIDE
-## that animated tail by loudness rather than appending them: embers barely moves,
-## twinkle is still the last word.
+## is louder than any box that stops.
+##
+## [b]BL-51 re-sorted the animated tail into three tiers, not two.[/b] BL-47 slotted
+## its four new boxes INSIDE the tail by loudness and put three of them BELOW
+## shimmer; the playtest that followed said the ladder needs a clean top step --
+## solid wax, then a band of subtle effects, then a band of spectacle. So the order
+## is now shimmer and twinkle (subtle, and unchanged in every respect) followed by
+## BL-47's four, turned up. Firefly dust is the last word.
 const LADDER: Array[StringName] = [
-	CLASSIC, GLOW, GRAIN, GLITTER, EMBERS, OCEAN, AURORA, SHIMMER, FIREFLY, TWINKLE
+	CLASSIC, GLOW, GRAIN, GLITTER, SHIMMER, TWINKLE, EMBERS, OCEAN, AURORA, FIREFLY
 ]
 
 # ------------------------------------------------- mask style levels (BL-47) --

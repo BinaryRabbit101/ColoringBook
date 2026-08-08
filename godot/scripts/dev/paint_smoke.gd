@@ -38,6 +38,60 @@ const SEAM_MAX_PX := 8
 ## has rubbed an animated area out. Measured at 2 on this tree.
 const ERASE_MAX_STRAY := 26
 
+# --- BL-51: "outstanding, not subtle", as a number ---------------------------
+# The playtest that opened BL-51 could only be argued about, because nothing in the
+# suite measured how LOUD a finish is -- BL-47 shipped four boxes into the wrong tier
+# of the ladder and every check stayed green. Check 11d closes that: it profiles each
+# animated finish's effect on the composited SCREEN over a couple of seconds and
+# reports the two numbers that decide whether a child notices it.
+#
+## How many screen captures a profile takes, and how far apart in WALL-CLOCK
+## milliseconds. 20 x 150 ms is 3 s, which has to be at least one full cycle of the
+## slowest thing any of these styles does or the profile measures the window instead
+## of the finish -- at 1.4 s the embers' 2.6 s breath and the fireflies' swell were
+## both caught half way through and both read far quieter than they are.
+##
+## [b]Milliseconds, not frames, and that distinction had teeth.[/b] The first cut
+## waited a fixed number of frames between captures, which is 3 s only while the
+## window is v-sync limited. Run as a CHILD of `flow_smoke` the window is occluded,
+## v-sync stops limiting anything, 180 frames go by in well under a second, and the
+## aurora -- the slowest style, one sweep every 5 s -- measured a peak swing of 76
+## instead of 157 and failed. Shader `TIME` runs on the wall clock, so the profile
+## has to as well.
+const SPECTACLE_FRAMES := 20
+const SPECTACLE_CAPTURE_MS := 200
+## Every Nth pixel in both axes. The whole window at every frame is ~40 M byte
+## comparisons in GDScript; a 4-px lattice is 1/16 of that and cannot miss a feature,
+## because the smallest thing any of these styles draws (a firefly's core) is wider.
+const SPECTACLE_SAMPLE_STRIDE := 4
+## A sampled pixel is part of the animated PATCH once its brightest channel swings
+## this far at all -- the denominator of the coverage figure below, so that it is a
+## fraction of the wax rather than a pixel count that would move with the window.
+const SPECTACLE_PATCH_FLOOR := 8
+## ...and it counts as BOLDLY moving at this much. 64/255 is a quarter of the range:
+## a change nobody has to be told to look for.
+##
+## The first cut of this check used 24 and every field style pinned at 100% of the
+## patch, including shimmer -- a floor low enough that the subtle tier clears it
+## measures nothing. The number has to sit where the tiers actually separate.
+const SPECTACLE_MOVING_FLOOR := 64
+## The peak swing a SPECTACLE-tier box must reach, out of 255.
+const SPECTACLE_MIN_SWING := 120
+## ...over at least this fraction of the wax it is painted on. Amplitude alone would
+## pass one bright sparkle on a dead page; BL-51's brief was amplitude AND coverage,
+## and the firefly box failed exactly here on the first measurement (11% of the
+## stroke moving, because its halo did not reach the next cell).
+const SPECTACLE_MIN_COVERAGE := 0.45
+## How much louder than the subtle tier's reference (shimmer) a spectacle box must
+## PEAK. The tier claim has to be relative as well as absolute, or a future round
+## that turned the whole suite up would keep passing with the ladder flattened.
+##
+## Coverage is deliberately NOT compared this way. Shimmer's band is a page-wide
+## sweep: over a 3 s profile it crosses everything and measures ~100% covered, which
+## says nothing about how subtle it is. It is a WHITE sheen at half amplitude, and
+## amplitude is the axis the tiers actually separate on.
+const SPECTACLE_MIN_SWING_RATIO := 1.4
+
 @onready var _page_view: PageView = $PageView
 
 var _id_rgba: Image
@@ -677,6 +731,7 @@ func _check_animated_finishes() -> void:
 
 	await _check_mask_style_levels(line_x)
 	await _check_style_seam(line_x)
+	await _check_spectacle_tier()
 
 	_page_view.brush_effect = BrushFinish.CLASSIC
 	await _clear()
@@ -826,6 +881,147 @@ func _check_style_seam(line_x: float) -> void:
 	await _clear()
 
 
+## BL-51: the ladder's TOP TIER, measured rather than asserted by eye.
+##
+## BL-47 shipped Embers, Ocean glass, Aurora and Firefly dust believing them to be
+## the loudest boxes in the game; a playtest said they "missed the point" and read as
+## more of the subtle band. Every check in this suite stayed green through that,
+## because nothing here measured LOUDNESS -- only correctness. This is the missing
+## measurement, and it is deliberately made on the COMPOSITED SCREEN, which is the
+## only surface where an animated finish exists at all.
+##
+## Two numbers per finish, over a patch of wax the size a child actually colours:
+##   * SWING -- the biggest brightness change any sampled pixel goes through. This is
+##     "would you see it happen".
+##   * MOVING -- how many sampled pixels swing at all. This is "does it happen over
+##     the drawing, or in one corner of it", and it is what stops a lone bright
+##     sparkle passing as spectacle.
+##
+## The four spectacle boxes are held to an absolute swing floor AND to beating
+## shimmer -- the subtle tier's reference -- on coverage. Shimmer and twinkle are
+## measured and printed but held to nothing: being quieter is their job, and pinning
+## them here would turn the next deliberate tuning of the subtle band into a failure.
+func _check_spectacle_tier() -> void:
+	print("\n-- check 11d: the spectacle tier out-shouts the subtle one (BL-51) --")
+	_page_view.effect_animation_enabled = true
+	var profiles := {}
+	for finish in BrushFinish.animated_finishes():
+		var profile := await _animation_profile(finish)
+		profiles[finish] = profile
+		print("[spectacle] %-8s peak swing %3d/255, %5.1f%% of the wax moving boldly"
+			% [finish, int(profile["swing"]), float(profile["coverage"]) * 100.0]
+			+ " (%d of %d sampled px)" % [int(profile["moving"]), int(profile["patch"])])
+	var subtle_swing := int((profiles[BrushFinish.SHIMMER] as Dictionary)["swing"])
+	for finish in [
+		BrushFinish.EMBERS, BrushFinish.OCEAN, BrushFinish.AURORA, BrushFinish.FIREFLY
+	]:
+		var profile: Dictionary = profiles[finish]
+		_expect(int(profile["swing"]) >= SPECTACLE_MIN_SWING,
+			"'%s' is SPECTACLE, not a hint: peak swing %d/255 (floor %d)"
+			% [finish, int(profile["swing"]), SPECTACLE_MIN_SWING])
+		_expect(int(profile["swing"]) >= subtle_swing * SPECTACLE_MIN_SWING_RATIO,
+			"...and it out-swings the SUBTLE tier by x%.2f, so the ladder has a step in"
+			% (float(profile["swing"]) / maxf(subtle_swing, 1.0))
+			+ " it (shimmer peaks at %d/255, floor x%.2f)"
+			% [subtle_swing, SPECTACLE_MIN_SWING_RATIO])
+		_expect(float(profile["coverage"]) >= SPECTACLE_MIN_COVERAGE,
+			"...over the whole stroke rather than one corner of it: %.1f%% of the wax"
+			% (float(profile["coverage"]) * 100.0)
+			+ " swings %d/255 or more (floor %.0f%%)"
+			% [SPECTACLE_MOVING_FLOOR, SPECTACLE_MIN_COVERAGE * 100.0])
+	_page_view.brush_effect = BrushFinish.CLASSIC
+	await _clear()
+
+
+## How much [param finish] MOVES on screen, over a patch of wax rather than one dab:
+## { "swing": the biggest single-pixel brightness change across the profile,
+##   "patch": how many sampled pixels moved at all (i.e. the size of the animated
+##   wax on screen), "moving": how many of those swung by
+##   [constant SPECTACLE_MOVING_FLOOR] or more, "coverage": moving / patch }.
+##
+## The RATIO is the point: a pixel count would move with the window size and the
+## page's fit zoom, and BL-51's claim is about how much of the child's drawing comes
+## alive, which is a fraction whatever the screen is.
+func _animation_profile(finish: StringName) -> Dictionary:
+	await _clear()
+	_page_view.brush_effect = finish
+	# A filled patch well inside region 4, so the profile measures the FINISH and not
+	# the region clip -- which has checks of its own directly above.
+	for y in range(200, 306, 10):
+		_page_view.begin_stroke(Vector2(700.5, y + 0.5))
+		_page_view.continue_stroke(Vector2(880.5, y + 0.5))
+		_page_view.end_stroke()
+	await _settle()
+
+	# `-- --fx-shots <dir>` writes frames of each finish out, cropped to the animated
+	# wax and blown up. The numbers below say a finish MOVES; the frames are how a
+	# human decides whether it moves WELL, which is the half of BL-51 no assertion can
+	# hold -- and they have to be cropped, because the patch is a thumbnail inside a
+	# window and a full-window shot of it is unreadable at any review size.
+	var shot_dir := _cmdline_value("--fx-shots")
+	var kept: Array[Image] = []
+
+	var offsets := PackedInt32Array()
+	var low := PackedByteArray()
+	var high := PackedByteArray()
+	for frame in SPECTACLE_FRAMES:
+		var due := Time.get_ticks_msec() + SPECTACLE_CAPTURE_MS
+		while Time.get_ticks_msec() < due:
+			await get_tree().process_frame
+		var image := await _screen_image()
+		if shot_dir != "" and frame % maxi(SPECTACLE_FRAMES / 3, 1) == 0:
+			kept.append(image.duplicate())
+		var bytes := image.get_data()
+		if offsets.is_empty():
+			var width := image.get_width()
+			for y in range(0, image.get_height(), SPECTACLE_SAMPLE_STRIDE):
+				for x in range(0, width, SPECTACLE_SAMPLE_STRIDE):
+					offsets.append((y * width + x) * 4)
+			low.resize(offsets.size() * 3)
+			high.resize(offsets.size() * 3)
+			for i in low.size():
+				low[i] = 255
+				high[i] = 0
+		for s in offsets.size():
+			var base := offsets[s]
+			for channel in 3:
+				var value := bytes[base + channel]
+				var slot := s * 3 + channel
+				if value < low[slot]:
+					low[slot] = value
+				if value > high[slot]:
+					high[slot] = value
+
+	var swing := 0
+	var patch := 0
+	var moving := 0
+	var bounds := Rect2i()
+	var width := kept[0].get_width() if not kept.is_empty() else 1
+	for s in offsets.size():
+		var pixel_swing := 0
+		for channel in 3:
+			pixel_swing = maxi(pixel_swing, high[s * 3 + channel] - low[s * 3 + channel])
+		swing = maxi(swing, pixel_swing)
+		if pixel_swing >= SPECTACLE_PATCH_FLOOR:
+			patch += 1
+			var pixel := offsets[s] / 4
+			var at := Vector2i(pixel % width, pixel / width)
+			bounds = Rect2i(at, Vector2i.ONE) if patch == 1 else bounds.expand(at)
+		if pixel_swing >= SPECTACLE_MOVING_FLOOR:
+			moving += 1
+	for i in kept.size():
+		DirAccess.make_dir_recursive_absolute(shot_dir)
+		var crop := kept[i].get_region(bounds.grow(8))
+		crop.resize(crop.get_width() * 3, crop.get_height() * 3, Image.INTERPOLATE_NEAREST)
+		crop.save_png("%s/%s_%d.png" % [shot_dir, finish, i])
+	return {
+		"swing": swing,
+		"patch": patch,
+		"moving": moving,
+		"coverage": float(moving) / maxf(patch, 1.0),
+	}
+
+
 ## Every texel of [param mask] whose FIELD level is none of [param allowed]:
 ## { "count", "worst_run" (the longest vertical run, in px), "peak" (the biggest raw
 ## red byte among them), "levels_seen" (how many of [param allowed] are actually on
@@ -898,9 +1094,26 @@ func _read_effect() -> Image:
 ## The whole composited window, one frame at a time. Two calls are two different
 ## frames, which is what makes "the page is alive" testable without a clock.
 func _screen_bytes() -> PackedByteArray:
+	return (await _screen_image()).get_data()
+
+
+## The value after [param flag] in the user args, or "" when it is not given.
+func _cmdline_value(flag: String) -> String:
+	var args := OS.get_cmdline_user_args()
+	var at := args.find(flag)
+	return args[at + 1] if at >= 0 and at + 1 < args.size() else ""
+
+
+## The same capture as [method _screen_bytes], as an RGBA8 [Image] -- BL-51's profile
+## needs the window's WIDTH to walk a sample lattice across it, which a flat byte
+## array cannot tell it.
+func _screen_image() -> Image:
 	await get_tree().process_frame
 	await RenderingServer.frame_post_draw
-	return get_viewport().get_texture().get_image().get_data()
+	var image := get_viewport().get_texture().get_image()
+	if image.get_format() != Image.FORMAT_RGBA8:
+		image.convert(Image.FORMAT_RGBA8)
+	return image
 
 
 ## Texels marked in [param mask] that have no wax under them in [param paint].

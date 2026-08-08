@@ -194,6 +194,129 @@ architectural change that made room for them.
   `resources/palettes/sets/{embers,ocean_glass,aurora,firefly_dust}.tres` (new),
   paint + palette smokes, coloring-mechanics skill.
 
+### BL-51: The top four crayon boxes, turned up into spectacle — `done` (2026-08-08)
+Playtest on BL-47, verbatim: *"The last 4 crayon sets we created missed the point.
+We have solid crayon sets, then a few crayon sets with subtle visual effects; these
+latest crayon sets need to have OUTSTANDING visual effects and not subtle."* The
+ladder is meant to be three tiers — solid wax, then subtle effects, then spectacle —
+and BL-47 built its four boxes into the middle one. Done 2026-08-08: the four
+re-aimed at the top, the ladder re-sorted so the tiers are three contiguous runs,
+and a measurement added so this class of miss cannot ship green again.
+
+- **THE ROUND IS TUNING, NOT ARCHITECTURE, and that is the headline.** Not one byte
+  of BL-47's encoding moved: same `MASK_FIELD_LEVELS` / `MASK_SPECK_LEVELS`, same
+  decode thresholds, same seam behaviour, same save format, same recipe fields. A
+  `page_NN_fx.png` already on a player's disk reopens as **the same style** and
+  simply performs it louder. `PageView`, `PaintCanvas`, `ColoringPage`, the palette
+  contract and the region clip are untouched again.
+- **Shimmer and twinkle were deliberately left alone.** They ARE the subtle tier;
+  turning them up too would have left the round with nothing to say.
+- **The ladder is three tiers now**: classic → Neon glow → Textured wax → Glitter →
+  **Shimmer → Twinkle** → **Embers → Ocean glass → Aurora → Firefly dust**.
+  `sort_order` 60/62/64/66 (was 32/34/36/45, i.e. three of the four sat *below*
+  shimmer). Firefly dust is the last word. The palette smoke's animated-tail
+  assertion kept its SHAPE — a contiguous animated tail — and changed its order.
+- **What each box became** (all in `paint_display.gdshader` unless noted):
+  - **Embers** — live coals. Three octaves of page-space noise, each ROTATED off the
+    others, read at an orbit of 2.4 noise cells per 2.6 s breath (BL-47: 0.85 cells
+    per 7 s); a fast two-beat flicker phased per patch; cinders on a fine field
+    scrolling upward and cut hard. The crust it glows through went darker in
+    `brush.gdshader` (0.44x the crayon's colour, was 0.55x) — coals only read as
+    glowing through something if the something is dark.
+    - **The finding that cost the most iterations: you cannot make blue wax orange
+      by ADDING light.** The first cut added warm light at a modest gain over a wide
+      threshold, exactly as BL-38's styles do. On the smoke's blue crayon it came out
+      pale mauve and read as nothing — the blue channel is already high, so a warm
+      sum runs to white, not to fire. Embers now MIXES an incandescent colour into
+      the wax where it is hot, the way the aurora mixes its rotation, and adds the
+      white heat on top of that. It is the second style that overrides the crayon's
+      own hue, and like the aurora it leaves the wax alone everywhere it is not: the
+      cold crust between the coals is still the child's blue.
+    - **Gotcha: thresholding value noise draws its lattice.** Cubic-interpolated
+      value noise is C1 but not C2, and its second derivative jumps at every cell
+      boundary. BL-47's styles used the field gently and nothing showed; embers
+      thresholds it hard, and the creases came out as dead-straight axis-aligned
+      seams one noise cell apart, right across the stroke. `value_noise` in the
+      display shader is QUINTIC now, and every octave of embers and ocean is spun off
+      the others. (`brush.gdshader` keeps the cubic — nothing thresholds it there,
+      and changing it would repaint every saved page.)
+  - **Ocean glass** — a caustic web instead of two clouds. Each field is RIDGED
+    (`1 - |2n-1|`, which turns a smooth field's half-height contour into a thin
+    bright thread), two of them multiply, a finer faster glint layer rides on top,
+    and the whole thing drifts ~5x faster than BL-47's. The threads being thin is the
+    licence for making them this bright: the calm glass between them keeps the
+    crayon's colour.
+  - **Aurora** — two curtains, not one; undulating rather than marching as a straight
+    bar; striped with vertical rays; sweeping ~5x faster; hue swing 0.62 → 2.1 rad;
+    and carrying its own vivid light (gain 0.10 → 1.30) instead of a whisper of
+    white. The hue mix is CLAMPED now — a 2.1 rad rotation about the grey axis can
+    push a saturated crayon's channel negative, and a negative channel is an artefact
+    that returns as a halo the moment anything multiplies by it.
+    - **The colour ramp took three measurements.** Green-to-violet in two stops puts a
+      muddy mix of the pair exactly where the envelope is brightest, so the core came
+      out grey and the green never reached the screen. Three stops with BLUE at one
+      end cost 15% of the peak swing (156 → 133) and failed the tier floor, because
+      blue is where a blue crayon already is. Shipped: crimson → green → violet, i.e.
+      both ends far from ordinary wax, in opposite directions.
+  - **Firefly dust** — a swarm of bright wandering points with wide warm halos, each
+    a hard core inside a shallow halo so it reads as a light rather than a dot.
+    **It is drawn from the 3x3 cell NEIGHBOURHOOD** — the cost BL-47 named and
+    declined, and the reason its wander was pinned at 0.17 of a cell. Baked motes
+    brightened and enlarged in `brush.gdshader` to match, and both grids moved 26 → 24
+    px together.
+    - **The 3x3 window BOUNDS the wander and the halo, and getting that wrong is a
+      hard seam, not a soft one.** If a fly may stray `s` cells outside its own, the
+      nearest fly the loop cannot see can come within `(2 - s) - 1` cells of the
+      fragment, and any halo reaching past that is chopped along a straight cell
+      boundary at full brightness. A first pass at wander 0.62 put a fly it could not
+      see 13.8 px away with a halo reaching 30. Shipped: the centre stays inside its
+      own cell (0.02..0.98), the nearest unseen fly is 24.5 px off and the halo dies
+      at 24.6. Coverage is bought with DENSITY and brightness, which that bound does
+      not constrain.
+- **THE MEASUREMENT — `paint_smoke` check 11d, and it is the durable half of this
+  entry.** BL-47 shipped four boxes into the wrong tier with 123/123 checks green,
+  because every check measured CORRECTNESS and none measured LOUDNESS. Check 11d
+  profiles each animated finish on the composited screen over 3–4 s, on a patch of
+  wax the size a child actually colours, and reports two numbers: **peak swing** (the
+  biggest brightness change any sampled pixel goes through — "would you see it
+  happen") and **coverage** (what fraction of the wax swings ≥64/255 — "does it
+  happen over the drawing, or in one corner"). The four are held to a swing floor of
+  120/255, to out-swinging shimmer by 1.4x, and to 45% coverage. Shimmer and twinkle
+  are profiled and printed but held to nothing; being quieter is their job.
+  - Shipped numbers: shimmer 97/99.5%, twinkle 138/6.9%, **embers 191/98.4%, ocean
+    171/99.7%, aurora 160/99.5%, firefly 226/64.5%**.
+  - **Coverage had to be a RATIO and the threshold had to be high.** The first cut
+    counted pixels moving by 24/255 and every field style — shimmer included — pinned
+    at 100% of the patch. A floor the subtle tier clears measures nothing.
+  - **`-- --fx-shots <dir>`** dumps cropped, 3x-upscaled frames of each finish.
+    Numbers say a finish moves; frames are how a human decides whether it moves WELL,
+    and every design finding above came out of looking at them.
+- **Gotcha (harness): a frame-spaced profile is not a time-spaced one.** Spacing
+  captures by frame count is 3 s only while the window is v-sync limited. Run as a
+  child of `flow_smoke` the window is occluded, v-sync limits nothing, 180 frames go
+  by in well under a second, and the aurora — the slowest style — measured 76/255
+  instead of 157 and failed. It passed standalone and failed nested, which is the
+  worst shape a flake can have. Shader `TIME` runs on the wall clock, so the profile
+  does too (`Time.get_ticks_msec()`).
+- **`flow_smoke` now forwards a child smoke's FAIL lines.** Finding the above meant
+  reproducing a run that only fails when it is not the focused window; "exited 1" was
+  not enough to go on, and never will be.
+- **The one thing not verified on hardware: the firefly loop's cost on a phone.** It
+  is 9 cell evaluations per fragment, ~4 hashes each after the `present` reject, and
+  it runs ONLY on texels the mask says are firefly wax — the other nine boxes,
+  including the other three spectacle ones, are untouched. Desktop Vulkan shows
+  nothing. If a low-end phone ever struggles, the lever is `firefly_cell` (fewer,
+  bigger cells) or dropping to a 2x2 window with the wander bound tightened to match
+  — never a 5x5, which is 25 cells for a halo that already dies inside the 3x3.
+- **Smokes: paint 123 → 135**; palette 247, flow 258, dlc 131 unchanged and green.
+  Shell and mobile are 199 and 156 — BL-48's numbers, which the skill still recorded
+  as 158 and 141; corrected there with this entry.
+- Affected: `scenes/components/paint_display.gdshader`,
+  `scenes/components/brush.gdshader`, `scripts/components/brush_finish.gd`,
+  `resources/palettes/sets/{embers,ocean_glass,aurora,firefly_dust}.tres`,
+  `scripts/dev/paint_smoke.gd`, `scripts/dev/palette_smoke.gd`,
+  `scripts/dev/flow_smoke.gd`, coloring-mechanics skill.
+
 ### BL-48: The overlay layer, sized for a phone — `done` (2026-08-08)
 Playtest on an iPhone in portrait (web build): "the buttons and login forms, etc.
 on mobile are difficult to see and work with". The gameplay layer had its mobile
