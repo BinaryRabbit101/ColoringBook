@@ -65,6 +65,7 @@ class StickerController extends Controller
             $image,
             (string) $request->string('sticker_id'),
             $request->filled('title') ? (string) $request->string('title') : null,
+            $this->resolveAnim($request),
         );
 
         return response()->json(

@@ -105,12 +105,22 @@ class PublishAuthoredStickerSet
             $this->place($sticker, $path, $directory, $files);
             $cover ??= $path;
 
-            $entries[] = [
+            $entry = [
                 'sticker_index' => $sticker->sticker_index,
                 'sticker_id' => $sticker->sticker_id,
                 'title' => $sticker->title,
                 'image' => $path,
             ];
+
+            // BL-38: an animated sticker is a sprite sheet plus this object;
+            // a still one carries **no `anim` key at all**, which is what every
+            // sticker published before BL-38 looks like and what a client that
+            // has never heard of animation reads.
+            if ($sticker->anim !== null) {
+                $entry['anim'] = $sticker->anim;
+            }
+
+            $entries[] = $entry;
         }
 
         return [

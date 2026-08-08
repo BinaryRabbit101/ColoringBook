@@ -32,9 +32,11 @@ use Illuminate\Support\Str;
  * @property int $pack_id
  * @property string $title
  * @property string|null $blurb
+ * @property int|null $cover_asset_id
  * @property CarbonImmutable|null $created_at
  * @property CarbonImmutable|null $updated_at
  * @property-read Pack $pack
+ * @property-read Asset|null $coverAsset
  * @property-read Collection<int, AuthoredPage> $pages
  */
 #[Fillable(['book_uid', 'title', 'blurb'])]
@@ -60,11 +62,52 @@ class AuthoredBook extends Model
     }
 
     /**
+     * The artist's cover art (BL-38) — **optional**.
+     *
+     * When it is null the publisher falls back to page one's display image, as
+     * it always did, so a book that never gets a cover publishes exactly the
+     * pack it published before.
+     *
+     * @return BelongsTo<Asset, $this>
+     */
+    public function coverAsset(): BelongsTo
+    {
+        return $this->belongsTo(Asset::class, 'cover_asset_id');
+    }
+
+    /**
      * @return HasMany<AuthoredPage, $this>
      */
     public function pages(): HasMany
     {
         return $this->hasMany(AuthoredPage::class)->orderBy('page_index');
+    }
+
+    /**
+     * When this book was last touched in the workspace (BL-38).
+     *
+     * The book's own `updated_at` is not enough: replacing a page's art, adding
+     * one, reordering the lot — none of those write to this row, and all of them
+     * change what a publish would ship. So the answer is the newest timestamp
+     * anywhere in the book, which is what "has anything changed since the last
+     * release?" actually means.
+     *
+     * @param  Collection<int, AuthoredPage>|null  $pages  Pass an already loaded
+     *                                                     page list to avoid a
+     *                                                     second query.
+     */
+    public function lastModifiedAt(?Collection $pages = null): ?CarbonImmutable
+    {
+        $pages ??= $this->pages()->get();
+        $latest = $this->updated_at;
+
+        foreach ($pages as $page) {
+            if ($page->updated_at !== null && ($latest === null || $page->updated_at->greaterThan($latest))) {
+                $latest = $page->updated_at;
+            }
+        }
+
+        return $latest;
     }
 
     /**

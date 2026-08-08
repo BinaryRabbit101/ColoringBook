@@ -12,6 +12,7 @@ use App\Models\Sticker;
 use App\Models\StickerSet;
 use App\Services\PackManifest;
 use App\Services\PackManifestValidator;
+use App\Services\StickerAnim;
 use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -407,6 +408,9 @@ class PublishPackDirectory
                     'image_asset_id' => $asset->id,
                     'image_w' => $asset->width,
                     'image_h' => $asset->height,
+                    // BL-38: null for a still sticker, which is every manifest
+                    // entry with no `anim` key — i.e. everything before BL-38.
+                    'anim' => StickerAnim::of($stickerData),
                 ]);
             }
         }

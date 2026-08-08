@@ -67,7 +67,14 @@ class AuthoringTest extends DuskTestCase
         $this->browse(function (Browser $browser): void {
             $browser->loginAs(User::factory()->admin()->create())
                 ->visit('/admin/books')
-                ->waitForText('No books yet')
+                ->waitForText('No books yet');
+
+            // BL-38: creating a book is a button in the corner, not a form
+            // sitting under the list — it happens once and the list is read
+            // many times.
+            $this->clickUntil($browser, '[data-test="create-book"]', '#book_uid');
+
+            $browser
                 ->type('#book_uid', 'badger-2026')
                 ->type('#title', 'Badger')
                 ->clickAtXPath("//button[normalize-space()='Create']")
@@ -128,7 +135,7 @@ class AuthoringTest extends DuskTestCase
             $browser->loginAs(User::factory()->admin()->create())
                 ->visit('/admin/books/coyote-2026')
                 ->waitForText('Coyote at dusk')
-                ->clickAtXPath("//button[normalize-space()='Publish']")
+                ->clickAtXPath("//button[normalize-space()='Publish coloring book']")
                 ->waitForText('Published v1.');
         });
 
@@ -139,6 +146,55 @@ class AuthoringTest extends DuskTestCase
         $this->assertSame(Pack::STATUS_PUBLISHED, Pack::query()->sole()->status);
         // Built through the one publish path, so the catalog rows exist too.
         $this->assertDatabaseHas('books', ['book_uid' => 'coyote-2026']);
+    }
+
+    /**
+     * BL-38 — every delete goes through a modal.
+     *
+     * The book screen is a dense grid of small buttons and there is no undo
+     * anywhere below it, so the interesting assertion is the *cancel*: the
+     * dialog opened, the operator backed out, and the book is still there.
+     */
+    public function test_deleting_a_book_is_confirmed_in_a_modal(): void
+    {
+        $this->seedAuthoredBook();
+
+        $this->browse(function (Browser $browser): void {
+            $browser->loginAs(User::factory()->admin()->create())
+                ->visit('/admin/books/coyote-2026')
+                ->waitForText('Coyote at dusk');
+
+            $this->clickUntil(
+                $browser,
+                '[data-test="delete-book"]',
+                '[data-test="confirm-delete-book"]',
+            );
+
+            $browser->assertSee('There is no undo.')
+                ->clickAtXPath("//button[normalize-space()='Cancel']")
+                ->pause(300)
+                ->assertMissing('[data-test="confirm-delete-book"]');
+        });
+
+        $this->assertDatabaseCount('authored_books', 1);
+
+        $this->browse(function (Browser $browser): void {
+            $browser->loginAs(User::factory()->admin()->create())
+                ->visit('/admin/books/coyote-2026')
+                ->waitForText('Coyote at dusk');
+
+            $this->clickUntil(
+                $browser,
+                '[data-test="delete-book"]',
+                '[data-test="confirm-delete-book"]',
+            );
+
+            $browser->click('[data-test="confirm-delete-book"]')
+                ->waitForLocation('/admin/books')
+                ->waitForText('No books yet');
+        });
+
+        $this->assertDatabaseCount('authored_books', 0);
     }
 
     public function test_a_book_with_a_failing_page_cannot_be_published(): void

@@ -69,6 +69,51 @@ trait AuthorsStickerSets
     }
 
     /**
+     * A sprite sheet (BL-38): `$cols` × `$rows` cells of `$frame` px, each with
+     * a disc drawn in it on a transparent ground.
+     *
+     * A drawn shape AND clear space around it, per cell, is exactly what
+     * `StickerValidation` looks at — and now looks at *per frame*, which is the
+     * whole point of the animated path: a 4×2 sheet of 64 px frames is 256×128,
+     * a size the still checks would refuse in one direction and accept in the
+     * other for no reason an artist could explain.
+     */
+    protected function spriteSheetUpload(
+        int $cols = 4,
+        int $rows = 2,
+        int $frame = 64,
+        string $as = 'sparkle.png',
+    ): UploadedFile {
+        $path = (string) tempnam(sys_get_temp_dir(), 'sheet').'.png';
+
+        $image = imagecreatetruecolor($cols * $frame, $rows * $frame);
+        imagealphablending($image, false);
+        imagesavealpha($image, true);
+        imagefill($image, 0, 0, (int) imagecolorallocatealpha($image, 0, 0, 0, 127));
+        imagealphablending($image, true);
+
+        $ink = (int) imagecolorallocatealpha($image, 240, 190, 40, 0);
+
+        for ($row = 0; $row < $rows; $row++) {
+            for ($col = 0; $col < $cols; $col++) {
+                imagefilledellipse(
+                    $image,
+                    (int) (($col + 0.5) * $frame),
+                    (int) (($row + 0.5) * $frame),
+                    (int) ($frame * 0.6),
+                    (int) ($frame * 0.6),
+                    $ink,
+                );
+            }
+        }
+
+        imagepng($image, $path);
+        imagedestroy($image);
+
+        return new UploadedFile($path, $as, 'image/png', null, true);
+    }
+
+    /**
      * A sticker set with `$stickers` valid stickers — the shape that can
      * publish. Driven through the real endpoints, so the rows are what the
      * authoring flow actually produces.

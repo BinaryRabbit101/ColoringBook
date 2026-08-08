@@ -100,6 +100,38 @@ trait ResolvesAuthoringAssets
     }
 
     /**
+     * The edits a book `PATCH` body asks for (BL-24 + BL-38's cover), read once
+     * for both doors.
+     *
+     * `$validated` carries the scalar fields the FormRequest already checked;
+     * the cover is resolved off the raw request because it is a file or a ULID,
+     * which validation cannot turn into an `assets` row.
+     *
+     * @param  array<string, mixed>  $validated
+     * @return array{title?: string, blurb?: string|null, is_free?: bool, cover?: Asset|null}
+     */
+    protected function bookChanges(Request $request, array $validated): array
+    {
+        /** @var array{title?: string, blurb?: string|null, is_free?: bool, cover?: Asset|null} $changes */
+        $changes = array_intersect_key($validated, array_flip(['title', 'blurb', 'is_free']));
+
+        // A deliberately cleared cover and an untouched one look identical in a
+        // multipart body, so removal is its own boolean — the `remove_mask`
+        // rule, one level up.
+        if ($request->boolean('remove_cover')) {
+            $changes['cover'] = null;
+        } else {
+            $cover = $this->resolveAsset($request, 'cover', 'cover_asset_ulid', 'cover');
+
+            if ($cover instanceof Asset) {
+                $changes['cover'] = $cover;
+            }
+        }
+
+        return $changes;
+    }
+
+    /**
      * The per-page tuning overrides, normalised to the knobs the pipeline
      * actually has. An empty submission is **null**, not `[]`, so "this page
      * uses the defaults" is one value rather than two.

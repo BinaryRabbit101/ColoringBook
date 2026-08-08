@@ -48,6 +48,12 @@ class AuthoredStickerResource extends JsonResource
                 ? [$this->image_w, $this->image_h]
                 : null,
 
+            // BL-38: the sprite-sheet grid, verbatim as the manifest carries
+            // it, or null for a still sticker. The admin UI animates the
+            // preview off these four numbers, which means what the operator
+            // watches is what the game will play.
+            'anim' => $this->anim,
+
             'validation_errors' => $this->validation_errors ?? [],
             'validation_warnings' => $this->validation_warnings ?? [],
             'publishable' => $this->isPublishable(),

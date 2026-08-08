@@ -162,6 +162,53 @@ class StickerSetsTest extends TestCase
         );
     }
 
+    /**
+     * BL-38 — the set list is the book list one content kind over, and asks the
+     * same two questions: when did this last ship, and has anything changed
+     * since.
+     */
+    public function test_the_set_list_answers_when_it_last_shipped(): void
+    {
+        $admin = User::factory()->admin()->create();
+
+        $this->withToken($this->adminToken($admin));
+        $set = $this->authorStickerSet(stickers: 2);
+        $this->useSessionGuard();
+
+        $this->actingAs($admin)
+            ->get('/admin/sticker-sets')
+            ->assertInertia(fn ($page) => $page
+                ->where('stickerSets.0.sticker_count', 2)
+                ->where('stickerSets.0.last_published_at', null)
+                ->where('stickerSets.0.modified_since_publish', true)
+                ->where('stickerSets.0.animated_sticker_count', 0),
+            );
+
+        $this->travel(2)->minutes();
+        $this->actingAs($admin)->post("/admin/sticker-sets/{$set->set_uid}/publish");
+
+        $this->actingAs($admin)
+            ->get('/admin/sticker-sets')
+            ->assertInertia(fn ($page) => $page
+                ->where('stickerSets.0.latest_published_version', 1)
+                ->where('stickerSets.0.modified_since_publish', false),
+            );
+
+        // Replacing a sticker's art has to move the set's clock: it never
+        // writes to the set row and it changes what a publish would ship.
+        $this->travel(2)->minutes();
+        $this->actingAs($admin)->patch("/admin/sticker-sets/{$set->set_uid}/stickers/0", [
+            'title' => 'A different name',
+        ]);
+
+        $this->actingAs($admin)
+            ->get('/admin/sticker-sets')
+            ->assertInertia(fn ($page) => $page
+                ->where('stickerSets.0.modified_since_publish', true));
+
+        $this->travelBack();
+    }
+
     public function test_a_sticker_can_be_added_and_removed_from_the_browser(): void
     {
         $admin = User::factory()->admin()->create();

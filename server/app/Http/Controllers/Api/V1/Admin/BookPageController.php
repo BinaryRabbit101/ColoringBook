@@ -7,6 +7,7 @@ use App\Actions\Authoring\StoreAuthoredPage;
 use App\Actions\Authoring\UpdateAuthoredPage;
 use App\Concerns\ResolvesAuthoredBooks;
 use App\Concerns\ResolvesAuthoringAssets;
+use App\Concerns\ServesAuthoringImages;
 use App\Exceptions\ApiException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\StorePageRequest;
@@ -30,7 +31,7 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class BookPageController extends Controller
 {
-    use ResolvesAuthoredBooks, ResolvesAuthoringAssets;
+    use ResolvesAuthoredBooks, ResolvesAuthoringAssets, ServesAuthoringImages;
 
     private const ROUTE_PREFIX = 'api.v1.admin.';
 
@@ -115,6 +116,44 @@ class BookPageController extends Controller
             // Keyed by the artifacts' digests, so a re-map is a different URL.
             'Cache-Control' => 'private, max-age=3600',
         ]);
+    }
+
+    /**
+     * The page's own detail image (BL-38) — the thumbnail the restructured book
+     * screen shows, and the file itself rather than the region overlay above.
+     */
+    public function display(string $book, int $index): Response
+    {
+        return $this->artwork($book, $index, mask: false);
+    }
+
+    /**
+     * The page's masking image, when it has one. A page with no mask is a
+     * normal page, so this is a `404 PAGE_ART_NOT_FOUND` and not an error state
+     * anybody has to route around.
+     */
+    public function mask(string $book, int $index): Response
+    {
+        return $this->artwork($book, $index, mask: true);
+    }
+
+    private function artwork(string $book, int $index, bool $mask): Response
+    {
+        $page = $this->authoredPage($this->authoredBook($book), $index);
+        $asset = $mask ? $page->maskAsset : $page->displayAsset;
+        $bytes = $asset === null ? null : $this->assetBytes($asset);
+
+        if ($asset === null || $bytes === null) {
+            throw new ApiException(
+                'PAGE_ART_NOT_FOUND',
+                $mask
+                    ? __('That page has no masking image.')
+                    : __('That page has no detail image on disk.'),
+                Response::HTTP_NOT_FOUND,
+            );
+        }
+
+        return $this->assetImage($asset, $bytes);
     }
 
     protected static function missingDisplay(): ApiException

@@ -28,6 +28,7 @@ use Illuminate\Support\Str;
  * @property int $image_asset_id
  * @property int|null $image_w
  * @property int|null $image_h
+ * @property array{hframes: int, vframes: int, frames: int, fps: float}|null $anim
  * @property list<string>|null $validation_errors
  * @property list<string>|null $validation_warnings
  * @property CarbonImmutable|null $created_at
@@ -35,7 +36,7 @@ use Illuminate\Support\Str;
  * @property-read AuthoredStickerSet $set
  * @property-read Asset $imageAsset
  */
-#[Fillable(['sticker_index', 'sticker_id', 'title', 'image_asset_id'])]
+#[Fillable(['sticker_index', 'sticker_id', 'title', 'image_asset_id', 'anim'])]
 class AuthoredSticker extends Model
 {
     /** @use HasFactory<AuthoredStickerFactory> */
@@ -71,6 +72,17 @@ class AuthoredSticker extends Model
     public function fileName(): string
     {
         return $this->sticker_id.'.png';
+    }
+
+    /**
+     * Is this a sprite sheet rather than one drawing? (BL-38)
+     *
+     * The whole difference between a static sticker and an animated one, on
+     * this row and in the manifest, is whether `anim` is there at all.
+     */
+    public function isAnimated(): bool
+    {
+        return $this->anim !== null;
     }
 
     public function isPublishable(): bool
@@ -120,6 +132,9 @@ class AuthoredSticker extends Model
             'sticker_index' => 'integer',
             'image_w' => 'integer',
             'image_h' => 'integer',
+            // BL-38: null for a static sticker, and null is what a manifest
+            // entry with no `anim` key means — one value, not four nulls.
+            'anim' => 'array',
             'validation_errors' => 'array',
             'validation_warnings' => 'array',
         ];

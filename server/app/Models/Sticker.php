@@ -27,12 +27,13 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property int $image_asset_id
  * @property int|null $image_w
  * @property int|null $image_h
+ * @property array{hframes: int, vframes: int, frames: int, fps: float}|null $anim
  * @property CarbonImmutable|null $created_at
  * @property CarbonImmutable|null $updated_at
  * @property-read StickerSet $set
  * @property-read Asset $imageAsset
  */
-#[Fillable(['sticker_index', 'sticker_id', 'title', 'image_asset_id', 'image_w', 'image_h'])]
+#[Fillable(['sticker_index', 'sticker_id', 'title', 'image_asset_id', 'image_w', 'image_h', 'anim'])]
 class Sticker extends Model
 {
     /** @use HasFactory<StickerFactory> */
@@ -63,6 +64,9 @@ class Sticker extends Model
             'sticker_index' => 'integer',
             'image_w' => 'integer',
             'image_h' => 'integer',
+            // BL-38: null for a static sticker, which is every sticker
+            // published before it and the shape the game still reads.
+            'anim' => 'array',
         ];
     }
 }

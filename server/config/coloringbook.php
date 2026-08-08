@@ -181,6 +181,13 @@ return [
         // ceiling is "not megabytes of texture for a shape a thumb covers".
         'sticker_min_px' => (int) env('COLORINGBOOK_STICKER_MIN_PX', 64),
         'sticker_max_px' => (int) env('COLORINGBOOK_STICKER_MAX_PX', 1024),
+
+        // BL-38 animated stickers. The two bounds above are measured on ONE
+        // FRAME, not on the file: a 4x2 sheet of 256 px frames is a 1024x512
+        // image that would fail a naive `sticker_max_px` check while every
+        // frame in it is exactly the right size. The sheet gets its own,
+        // roomier ceiling — a texture the GPU still has to hold.
+        'sticker_sheet_max_px' => (int) env('COLORINGBOOK_STICKER_SHEET_MAX_PX', 4096),
     ],
 
     /*

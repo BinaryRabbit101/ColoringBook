@@ -74,6 +74,28 @@ class AuthoredStickerSet extends Model
     }
 
     /**
+     * When this set was last touched in the workspace (BL-38) — the newest
+     * timestamp anywhere in it, for the reason `AuthoredBook::lastModifiedAt()`
+     * gives: adding or replacing a sticker never writes to this row, and both
+     * change what a publish would ship.
+     *
+     * @param  Collection<int, AuthoredSticker>|null  $stickers
+     */
+    public function lastModifiedAt(?Collection $stickers = null): ?CarbonImmutable
+    {
+        $stickers ??= $this->stickers()->get();
+        $latest = $this->updated_at;
+
+        foreach ($stickers as $sticker) {
+            if ($sticker->updated_at !== null && ($latest === null || $sticker->updated_at->greaterThan($latest))) {
+                $latest = $sticker->updated_at;
+            }
+        }
+
+        return $latest;
+    }
+
+    /**
      * Every reason this set cannot be published right now, in the operator's
      * language — the list the publish button refuses with.
      *

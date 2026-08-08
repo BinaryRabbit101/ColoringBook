@@ -4,6 +4,7 @@ namespace App\Http\Requests\Admin;
 
 use App\Models\AuthoredSticker;
 use App\Models\AuthoredStickerSet;
+use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -21,6 +22,8 @@ use Illuminate\Validation\Rule;
  */
 class UpdateStickerRequest extends FormRequest
 {
+    use StickerAnimRules;
+
     /**
      * @return array<string, mixed>
      */
@@ -49,7 +52,24 @@ class UpdateStickerRequest extends FormRequest
 
             'image' => ['sometimes', 'file', 'mimes:png', 'max:'.$max],
             'image_asset_ulid' => ['sometimes', 'string', 'exists:assets,ulid'],
+
+            // BL-38. Submitting an empty animation block turns an animated
+            // sticker back into a still one; omitting `anim` entirely — which is
+            // what the reorder buttons post — leaves it exactly as it was.
+            ...$this->animRules(),
         ];
+    }
+
+    protected function prepareForValidation(): void
+    {
+        $this->prepareAnimInput();
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        $validator->after(function (Validator $validator): void {
+            $this->validateAnimFits($validator);
+        });
     }
 
     /**
@@ -59,6 +79,7 @@ class UpdateStickerRequest extends FormRequest
     {
         return [
             'image' => __('sticker image'),
+            ...$this->animAttributes(),
         ];
     }
 }

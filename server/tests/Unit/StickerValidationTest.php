@@ -93,6 +93,77 @@ class StickerValidationTest extends TestCase
         $this->assertTrue($result->passed());
     }
 
+    // ------------------------------------------------------------ BL-38 ---
+
+    /**
+     * The whole reason the animated path exists: a 4x2 sheet of 64 px frames is
+     * a 256x128 file, which the still checks would refuse for being 128 px tall
+     * against a 64 px floor in one direction and… no, they would pass it — and
+     * a 16x8 sheet of the same frames is 1024x512, which they would refuse for
+     * being over the 1024 ceiling in width while every frame in it is exactly
+     * the right size. The bounds have to move onto the frame.
+     */
+    public function test_a_sprite_sheet_is_measured_by_its_frames(): void
+    {
+        $sheet = $this->png(1024, 512, opaque: true);
+        $anim = ['hframes' => 16, 'vframes' => 8, 'frames' => 128, 'fps' => 12.0];
+
+        $this->assertSame([], $this->validation->validateBytes($sheet, $anim)->errors);
+    }
+
+    public function test_a_sheet_whose_frames_are_under_the_floor_is_refused(): void
+    {
+        // 256x128 in a 16x8 grid is 16 px frames: a smudge on a 2048 px page.
+        $result = $this->validation->validateBytes(
+            $this->png(256, 128, opaque: true),
+            ['hframes' => 16, 'vframes' => 8, 'frames' => 128, 'fps' => 12.0],
+        );
+
+        $this->assertCount(1, $result->errors);
+        $this->assertStringContainsString('at least', $result->errors[0]);
+    }
+
+    public function test_a_grid_that_does_not_divide_the_sheet_is_refused_alone(): void
+    {
+        $result = $this->validation->validateBytes(
+            $this->png(300, 100, opaque: true),
+            ['hframes' => 7, 'vframes' => 1, 'frames' => 7, 'fps' => 10.0],
+        );
+
+        // Exactly one problem: with the grid wrong, "the frames are 42 px" is
+        // noise about a frame nobody drew.
+        $this->assertCount(1, $result->errors);
+        $this->assertStringContainsString('does not divide evenly', $result->errors[0]);
+    }
+
+    public function test_more_frames_than_cells_is_refused(): void
+    {
+        $result = $this->validation->validateBytes(
+            $this->png(128, 128, opaque: true),
+            ['hframes' => 2, 'vframes' => 2, 'frames' => 9, 'fps' => 10.0],
+        );
+
+        $this->assertCount(1, $result->errors);
+        $this->assertStringContainsString('only holds 4', $result->errors[0]);
+    }
+
+    public function test_a_sheet_over_the_sheet_ceiling_is_refused(): void
+    {
+        $ceiling = (int) config('coloringbook.admin.sticker_sheet_max_px');
+
+        config(['coloringbook.admin.sticker_sheet_max_px' => 256]);
+
+        $result = $this->validation->validateBytes(
+            $this->png(512, 128, opaque: true),
+            ['hframes' => 4, 'vframes' => 1, 'frames' => 4, 'fps' => 10.0],
+        );
+
+        config(['coloringbook.admin.sticker_sheet_max_px' => $ceiling]);
+
+        $this->assertCount(1, $result->errors);
+        $this->assertStringContainsString('sprite sheet', $result->errors[0]);
+    }
+
     /**
      * A PNG of `$width` x `$height`, either wholly opaque or wholly clear.
      */

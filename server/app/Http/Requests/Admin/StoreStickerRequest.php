@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Admin;
 
 use App\Models\AuthoredStickerSet;
+use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -24,6 +25,8 @@ use Illuminate\Validation\Rule;
  */
 class StoreStickerRequest extends FormRequest
 {
+    use StickerAnimRules;
+
     /**
      * @return array<string, mixed>
      */
@@ -47,7 +50,23 @@ class StoreStickerRequest extends FormRequest
                     ->where('authored_sticker_set_id', $setId),
             ],
             'title' => ['nullable', 'string', 'max:120'],
+
+            // BL-38: absent means a still sticker, which is every sticker
+            // authored before it.
+            ...$this->animRules(),
         ];
+    }
+
+    protected function prepareForValidation(): void
+    {
+        $this->prepareAnimInput();
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        $validator->after(function (Validator $validator): void {
+            $this->validateAnimFits($validator);
+        });
     }
 
     /**
@@ -57,6 +76,7 @@ class StoreStickerRequest extends FormRequest
     {
         return [
             'image' => __('sticker image'),
+            ...$this->animAttributes(),
         ];
     }
 

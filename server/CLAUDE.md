@@ -1208,6 +1208,112 @@ of them at once, which is how a sticker sheet is actually reviewed. The grid put
 checkerboard behind each image so a sticker with no transparency reads as the
 mistake it is.
 
+## BL-38 — the authoring screens restructured, plus covers and animated stickers
+
+Design §7.2 (the two manifest additions), §10.3/§10.4 (authoring), §11's route
+tables. No new work package: this is BL-24 and BL-37's surface rearranged around
+what the artist actually does with it, plus one optional field on each side.
+
+### The screens
+
+Four pages, two shapes, and the shapes match:
+
+| | list | editor |
+|---|---|---|
+| books | `admin/Books.vue` | `admin/Book.vue` |
+| stickers | `admin/StickerSets.vue` | `admin/StickerSet.vue` |
+
+A **list** is four columns — name, count, status, last published — and the whole
+row is the link. Creating is a button in the top right opening a dialog, not a
+form parked under the list: it happens once per book and the list is read every
+day. An **editor** is picture rows: a page shows its detail image *and* its mask
+(empty slot when there is none — a maskless page is normal, not broken), each
+replaceable in place; a sticker shows its image, animated if it is a sheet.
+
+`resources/js/components/ConfirmDialog.vue` is the reusable modal every delete
+goes through — page, book, sticker, set. The form lives **inside** the dialog so
+`processing` belongs to the button that was pressed. Nothing below these screens
+has an undo.
+
+### `last_published_at` and `modified_since_publish`
+
+The list's third and fourth columns. `AuthoredBook::lastModifiedAt()` (and its
+sticker twin) is the newest `updated_at` **anywhere in the book**, not the book
+row's own: adding a page, replacing its art and reordering the lot all change
+what a publish would ship and none of them writes to the book. Compared against
+the newest published version's `published_at`; never published reads as
+modified, because everything in the workspace is unpublished.
+
+### Covers are optional at every layer
+
+`authored_books.cover_asset_id`, nullable. `PublishAuthoredBook` ships it as
+`books/<book_uid>/cover.png` and names it as **both** the pack `cover` and the
+book `cover`; with no cover both stay page one's display art, byte for byte the
+pre-BL-38 manifest. The upload rides `PATCH /admin/books/{book}` as multipart
+`cover` / `cover_asset_ulid`, cleared by `remove_cover` — the `remove_mask` rule,
+one level up, and for the same reason.
+
+A missing cover **blob** at publish time is a refusal, not a quiet fallback: the
+operator uploaded a cover and would otherwise get a pack wearing page one with
+nothing saying why.
+
+### Animated stickers: the contract is the absence
+
+```json
+"anim": { "hframes": 4, "vframes": 2, "frames": 7, "fps": 12 }
+```
+
+`App\Services\StickerAnim` is the single normaliser — form body, manifest entry,
+validator, all through it. Three things that are easy to get wrong:
+
+- **A still sticker has no `anim` key.** Not `null`, not `{}`. Every sticker
+  published before BL-38 looks like that and so does every client reading them.
+  `PublishAuthoredStickerSet` only adds the key when the row has one.
+- **`frames` may be fewer than `hframes * vframes`.** Seven frames on a 4×2 sheet
+  is normal. The admin preview therefore counts frames in a timer rather than
+  using a two-axis CSS `steps()` pair, which always walks the whole grid and
+  would show the artist a blank cell the game never plays.
+- **The size bounds moved onto the frame.** `sticker_min_px`/`sticker_max_px`
+  measure one cell; the file is bounded by `admin.sticker_sheet_max_px` (4096).
+  The grid must divide the sheet exactly — the game slices by `hframes`/`vframes`
+  without looking. Changing the grid **re-validates the same bytes**, because the
+  four numbers change what the sheet means.
+
+`anim` is submitted as `anim[hframes]` etc. — the manifest's own names. All four
+or none (`required_with` across the set); an entirely blank block is a still
+sticker, because `StickerAnimRules::prepareAnimInput()` strips the empty strings
+an HTML form posts for fields nobody touched; an **absent** `anim` key leaves an
+existing animation alone, which is what the reorder buttons post.
+
+### Routes this adds
+
+Both doors, mirrored as always:
+
+```
+GET /admin/books/{book}/cover                  the authored cover PNG (404: none)
+GET /admin/books/{book}/pages/{i}/display      the page's own art
+GET /admin/books/{book}/pages/{i}/mask         the mask (404: none)
+```
+
+`App\Concerns\ServesAuthoringImages` is the shared half; the doors differ only in
+what missing looks like (a 404 page, or `COVER_NOT_FOUND` / `PAGE_ART_NOT_FOUND`
+in the house error shape). These are the *files*, not the region overlay —
+`preview` still answers "did the mapping work", these answer "which drawing is
+this".
+
+### Testing
+
+`tests/Feature/Admin/BookCoverTest.php` (7),
+`tests/Feature/Admin/AnimatedStickersTest.php` (11), the `anim` block in
+`tests/Unit/StickerValidationTest.php` and `tests/Feature/StickerPackDeliveryTest.php`,
+and the list-column tests in `AuthoringPagesTest` / `StickerSetsTest`.
+`AuthorsStickerSets::spriteSheetUpload()` draws a real grid of discs.
+
+The two tests worth keeping if everything else goes: "a book with no cover still
+publishes page one as the cover", and "publishing omits `anim` for a still
+sticker". Both assert that **nothing moved** for content that predates the
+feature, which is the only way this stays true.
+
 ## WP8 — Dusk browser tests
 
 `laravel/dusk` v8.6 (`php-webdriver/webdriver` 1.16) covers the human-facing
@@ -1297,7 +1403,7 @@ through the real `PublishPackDirectory` as an unpublished draft.
 | `AccountDeletionTest` | Wrong password deletes nothing; the right one hard-deletes the household, its paint blobs included, and nobody else's. |
 | `PicturesTest` | A contested page is listed under the right shelf; restore swaps the two versions on disk and in the database; twice puts it back. |
 | `AdminTest` | Non-admin: no sidebar entry and a 404. Admin: pack list, create a draft, publish a version, grant a promo entitlement, unknown email is a field error. |
-| `AuthoringTest` | WP14: non-admin sees no Books entry and gets a 404; the book list, creating a book (one-book draft pack, slug = uid), the page editor rendering the region overlay, a giant region saying "a line has a gap", one-button publish, and the button disabled on a book that cannot publish. |
+| `AuthoringTest` | WP14: non-admin sees no Books entry and gets a 404; the book list, creating a book (one-book draft pack, slug = uid), the page editor rendering the region overlay, a giant region saying "a line has a gap", one-button publish, and the button disabled on a book that cannot publish. BL-38 moved creation into a dialog behind `[data-test="create-book"]` and added the delete-confirm modal, cancel included. |
 
 `AuthoringTest` seeds pages **already mapped** (`SeedsBrowserFixtures::seedAuthoredBook()`).
 The mapping job shells out inside the `php artisan serve` process, which has no

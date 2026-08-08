@@ -72,6 +72,10 @@ export type AuthoredPage = {
     effective_tuning: Record<string, number>;
     preview_url: string | null;
     status_url: string;
+    /** BL-38 — the page's own art, for the book screen's thumbnails. */
+    display_url: string;
+    /** Null on a page with no mask, which is the normal case. */
+    mask_url: string | null;
 };
 
 export type AuthoredBook = {
@@ -84,6 +88,14 @@ export type AuthoredBook = {
     page_count: number;
     unpublishable_page_count: number;
     latest_published_version: number | null;
+    /** BL-38 — when this book last shipped, and whether anything has changed since. */
+    last_published_at: string | null;
+    last_modified_at: string | null;
+    modified_since_publish: boolean;
+    /** BL-38 — the artist's optional cover art. */
+    cover: AuthoredAsset | null;
+    has_cover: boolean;
+    cover_url: string | null;
     publishable: boolean;
     blockers: string[];
     created_at: string | null;
@@ -95,6 +107,18 @@ export type AuthoredBook = {
  * BL-37 — sticker sets. Deliberately shorter than a page: a sticker has no
  * regions, so there is no mapping status, no tuning and no derived artifacts.
  */
+/**
+ * BL-38 — the animation metadata on an animated sticker's manifest entry.
+ * A static sticker carries no `anim` key at all, which is what `null` means
+ * everywhere this type is optional.
+ */
+export type StickerAnim = {
+    hframes: number;
+    vframes: number;
+    frames: number;
+    fps: number;
+};
+
 export type AuthoredSticker = {
     ulid: string;
     sticker_index: number;
@@ -103,6 +127,7 @@ export type AuthoredSticker = {
     file_name: string;
     image: AuthoredAsset | null;
     image_size: [number, number] | null;
+    anim: StickerAnim | null;
     validation_errors: string[];
     validation_warnings: string[];
     publishable: boolean;
@@ -122,6 +147,11 @@ export type AuthoredStickerSet = {
     sticker_count: number;
     unpublishable_sticker_count: number;
     latest_published_version: number | null;
+    /** BL-38 — when this set last shipped, and whether anything has changed since. */
+    last_published_at: string | null;
+    last_modified_at: string | null;
+    modified_since_publish: boolean;
+    animated_sticker_count: number;
     publishable: boolean;
     blockers: string[];
     created_at: string | null;

@@ -205,6 +205,50 @@ class StickerPackDeliveryTest extends TestCase
         $this->assertStringContainsString('already belongs to a different pack', implode(' ', $errors));
     }
 
+    /**
+     * BL-38 — `anim` is optional, and the fixture pack has none. A manifest
+     * written before animation existed must still validate clean, because every
+     * pack already installed on a device is one.
+     */
+    public function test_a_manifest_with_no_anim_is_still_valid(): void
+    {
+        $this->assertSame([], $this->validate([]));
+    }
+
+    public function test_a_malformed_anim_is_refused(): void
+    {
+        $manifest = $this->fixtureManifest();
+        $manifest['sticker_sets'][0]['stickers'][0]['anim'] = ['hframes' => 4];
+
+        $errors = $this->validate($manifest);
+
+        $this->assertStringContainsString('anim that is not', implode(' ', $errors));
+    }
+
+    public function test_an_anim_claiming_more_frames_than_cells_is_refused(): void
+    {
+        $manifest = $this->fixtureManifest();
+        $manifest['sticker_sets'][0]['stickers'][0]['anim'] = [
+            'hframes' => 2, 'vframes' => 2, 'frames' => 9, 'fps' => 12,
+        ];
+
+        $errors = $this->validate($manifest);
+
+        $this->assertStringContainsString('only holds 4', implode(' ', $errors));
+    }
+
+    public function test_an_anim_with_an_absurd_fps_is_refused(): void
+    {
+        $manifest = $this->fixtureManifest();
+        $manifest['sticker_sets'][0]['stickers'][0]['anim'] = [
+            'hframes' => 2, 'vframes' => 2, 'frames' => 4, 'fps' => 240,
+        ];
+
+        $errors = $this->validate($manifest);
+
+        $this->assertStringContainsString('outside 1-30', implode(' ', $errors));
+    }
+
     public function test_an_unknown_kind_is_refused_rather_than_read_as_a_book(): void
     {
         $errors = $this->validate(['kind' => 'wallpaper']);

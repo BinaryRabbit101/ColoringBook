@@ -241,6 +241,84 @@ class AuthoringPagesTest extends TestCase
         );
     }
 
+    /**
+     * BL-38 — the four columns the restructured book list is made of. A prop
+     * that stopped being shared would leave the screen rendering em-dashes with
+     * nothing failing anywhere else.
+     */
+    public function test_the_book_list_answers_when_it_last_shipped(): void
+    {
+        $admin = User::factory()->admin()->create();
+        $this->actingAs($admin)->post('/admin/books', ['book_uid' => 'coyote-2026', 'title' => 'Coyote']);
+        $this->fakeMapping();
+        $this->actingAs($admin)->post('/admin/books/coyote-2026/pages', ['display' => $this->pageUpload()]);
+
+        // Never published: no date, and "there are unpublished changes" is
+        // trivially true — everything in the workspace is unpublished.
+        $this->actingAs($admin)
+            ->get('/admin/books')
+            ->assertInertia(fn ($page) => $page
+                ->where('books.0.page_count', 1)
+                ->where('books.0.last_published_at', null)
+                ->where('books.0.modified_since_publish', true),
+            );
+
+        $this->travel(2)->minutes();
+        $this->actingAs($admin)->post('/admin/books/coyote-2026/publish');
+
+        $this->actingAs($admin)
+            ->get('/admin/books')
+            ->assertInertia(fn ($page) => $page
+                ->where('books.0.latest_published_version', 1)
+                ->where('books.0.modified_since_publish', false)
+                ->where('books.0.last_published_at', fn ($at): bool => is_string($at)),
+            );
+
+        // Editing a PAGE has to move the book's clock: it never writes to the
+        // book row, and it changes exactly what a publish would ship.
+        $this->travel(2)->minutes();
+        $this->actingAs($admin)->patch('/admin/books/coyote-2026/pages/0', ['title' => 'Coyote at dusk']);
+
+        $this->actingAs($admin)
+            ->get('/admin/books')
+            ->assertInertia(fn ($page) => $page->where('books.0.modified_since_publish', true));
+
+        $this->travelBack();
+    }
+
+    /**
+     * BL-38 — the page thumbnails. The region overlay answers "did the mapping
+     * work"; these answer "which drawing is this", which is what the book screen
+     * is for.
+     */
+    public function test_a_pages_own_art_is_served_for_the_thumbnails(): void
+    {
+        $admin = User::factory()->admin()->create();
+        $this->actingAs($admin)->post('/admin/books', ['book_uid' => 'coyote-2026', 'title' => 'Coyote']);
+        $this->fakeMapping();
+        $this->actingAs($admin)->post('/admin/books/coyote-2026/pages', ['display' => $this->pageUpload()]);
+
+        $response = $this->actingAs($admin)
+            ->get('/admin/books/coyote-2026/pages/0/display')
+            ->assertOk();
+
+        $this->assertSame('image/png', $response->headers->get('Content-Type'));
+        $this->assertNotFalse(@imagecreatefromstring($response->getContent()));
+
+        // A page with no mask is a normal page, so the mask route 404s and the
+        // resource says null rather than handing the screen a broken <img>.
+        $this->actingAs($admin)->get('/admin/books/coyote-2026/pages/0/mask')->assertNotFound();
+
+        $this->actingAs($admin)
+            ->get('/admin/books/coyote-2026')
+            ->assertInertia(fn ($page) => $page
+                ->where('book.pages.0.has_mask', false)
+                ->where('book.pages.0.mask_url', null)
+                ->where('book.pages.0.display_url', fn ($url): bool => is_string($url)
+                    && str_ends_with($url, '/admin/books/coyote-2026/pages/0/display')),
+            );
+    }
+
     public function test_removing_a_published_book_retires_it_rather_than_deleting(): void
     {
         $admin = User::factory()->admin()->create();
