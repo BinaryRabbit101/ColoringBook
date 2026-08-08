@@ -111,6 +111,61 @@ class PaintUploads
         return $clientPaintedAt;
     }
 
+    /**
+     * Refuse a picture the page has already been reset past (BL-18).
+     *
+     * "Start over" writes an instant to `book_progress.page_erased_at`, and it
+     * beats a picture painted at or before it for the same reason a newer
+     * upload does: it is the later statement about that page. A device that
+     * has been offline since before the reset would otherwise put the picture
+     * straight back, which is the whole bug BL-18 is about — and it would put
+     * it back *without* a status, because the merge censors that separately,
+     * leaving the two halves of one page disagreeing.
+     *
+     * A distinct code rather than `PAINT_STALE`, because the remedy is
+     * different: `PAINT_STALE` means "pull the server's picture", this means
+     * "delete yours".
+     */
+    public function assertNotErased(?CarbonImmutable $erasedAt, CarbonImmutable $clientPaintedAt): void
+    {
+        if ($erasedAt === null || $clientPaintedAt->greaterThan($erasedAt)) {
+            return;
+        }
+
+        throw new ApiException(
+            'PAINT_ERASED',
+            __('That page was started over more recently than this picture was painted.'),
+            Response::HTTP_CONFLICT,
+            ['erased_at' => $erasedAt->utc()->format('Y-m-d\TH:i:s.up')],
+        );
+    }
+
+    /**
+     * Refuse a picture the whole shelf has been erased past (BL-18).
+     *
+     * The shelf wipe deletes rows, so without this a stale upload would not
+     * merely re-add a picture — it would recreate the `book_progress` row it
+     * hangs off, putting a book back on a shelf the parent just cleared. The
+     * clock is the only thing left to stop it, and it is enough.
+     *
+     * Separate from `PAINT_ERASED` because the remedy is bigger: the device
+     * should pull progress and converge on an empty shelf, not just drop one
+     * page.
+     */
+    public function assertShelfNotErased(?CarbonImmutable $erasedAt, CarbonImmutable $clientPaintedAt): void
+    {
+        if ($erasedAt === null || $clientPaintedAt->greaterThan($erasedAt)) {
+            return;
+        }
+
+        throw new ApiException(
+            'PROGRESS_ERASED',
+            __('This shelf was erased more recently than that picture was painted.'),
+            Response::HTTP_CONFLICT,
+            ['erased_at' => $erasedAt->utc()->format('Y-m-d\TH:i:s.up')],
+        );
+    }
+
     public function maxBytes(): int
     {
         return (int) config('coloringbook.paint.max_bytes');

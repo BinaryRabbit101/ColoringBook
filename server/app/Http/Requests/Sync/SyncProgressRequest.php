@@ -43,6 +43,13 @@ class SyncProgressRequest extends FormRequest
             'books.*.page_statuses.*' => ['required', 'string', Rule::in(ProgressMerge::statuses())],
 
             'books.*.client_updated_at' => ['required', 'date'],
+
+            // BL-18: the per-page "Start over" clocks, index-parallel to
+            // `page_statuses`. Nullable *elements*, because a list with a hole
+            // in it is exactly what "page 3 was reset and the others were not"
+            // looks like on the wire.
+            'books.*.page_erased_at' => ['sometimes', 'array', 'max:'.$this->maxPages()],
+            'books.*.page_erased_at.*' => ['nullable', 'date'],
         ];
     }
 
@@ -82,6 +89,7 @@ class SyncProgressRequest extends FormRequest
                     $this->statuses($book['page_statuses'] ?? []),
                     (int) $book['furthest_page_index'],
                     $this->clientUpdatedAt((string) $book['client_updated_at']),
+                    $this->erasures($book['page_erased_at'] ?? []),
                 ),
             ),
             $books,
@@ -96,6 +104,31 @@ class SyncProgressRequest extends FormRequest
         return is_array($statuses)
             ? array_values(array_map(static fn (mixed $s): string => (string) $s, $statuses))
             : [];
+    }
+
+    /**
+     * The per-page erase clocks (BL-18), clamped by the same rule as
+     * `client_updated_at`.
+     *
+     * The clamp matters more here than there: an erase clock censors every
+     * status stamped at or before it, so one stamped a decade ahead would keep
+     * a page blank on every device for a decade. Clamping to the server's now
+     * makes the worst case "the reset happened when it arrived".
+     *
+     * @return list<CarbonImmutable|null>
+     */
+    private function erasures(mixed $erasures): array
+    {
+        if (! is_array($erasures)) {
+            return [];
+        }
+
+        return ProgressState::trim(array_values(array_map(
+            fn (mixed $at): ?CarbonImmutable => is_string($at) && $at !== ''
+                ? $this->clientUpdatedAt($at)
+                : null,
+            $erasures,
+        )));
     }
 
     /**

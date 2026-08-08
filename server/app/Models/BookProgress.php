@@ -36,6 +36,7 @@ use Illuminate\Support\Carbon;
  * @property int $revision
  * @property int $current_page_index
  * @property array<int, mixed> $page_statuses
+ * @property array<int, mixed>|null $page_erased_at
  * @property int $furthest_page_index
  * @property CarbonImmutable $client_updated_at
  * @property Carbon|null $created_at
@@ -122,6 +123,7 @@ class BookProgress extends Model
             $this->pageStatuses(),
             $this->furthest_page_index,
             CarbonImmutable::instance($this->client_updated_at),
+            $this->pageErasures(),
         );
     }
 
@@ -134,8 +136,100 @@ class BookProgress extends Model
         $this->page_statuses = $state->pageStatuses;
         $this->furthest_page_index = $state->furthestPageIndex;
         $this->client_updated_at = $state->clientUpdatedAt;
+        $this->page_erased_at = self::encodeErasures($state->pageErasedAt);
 
         return $this;
+    }
+
+    /**
+     * The per-page "Start over" clocks (BL-18), index-parallel to
+     * `page_statuses`, as instants.
+     *
+     * The column is JSON and nullable, so it can hold anything or nothing;
+     * anything unparseable reads as null, which is "this page has never been
+     * reset" and therefore the safe answer — a bogus clock would silently wipe
+     * a page's status instead.
+     *
+     * @return list<CarbonImmutable|null>
+     */
+    public function pageErasures(): array
+    {
+        $raw = $this->page_erased_at;
+
+        if (! is_array($raw)) {
+            return [];
+        }
+
+        return ProgressState::trim(array_values(array_map(
+            static function (mixed $at): ?CarbonImmutable {
+                if (! is_string($at) || $at === '') {
+                    return null;
+                }
+
+                try {
+                    return CarbonImmutable::parse($at)->utc();
+                } catch (\Throwable) {
+                    return null;
+                }
+            },
+            $raw,
+        )));
+    }
+
+    /**
+     * When "Start over" was last pressed on one page of this book, or null.
+     */
+    public function erasedPageAt(int $pageIndex): ?CarbonImmutable
+    {
+        return $this->pageErasures()[$pageIndex] ?? null;
+    }
+
+    /**
+     * The inverse: instants as the microsecond ISO strings the column stores.
+     * Null for a book nobody has reset, so the common row stays as small as it
+     * was before BL-18.
+     *
+     * @param  list<CarbonImmutable|null>  $erasures
+     * @return list<string|null>|null
+     */
+    public static function encodeErasures(array $erasures): ?array
+    {
+        $trimmed = ProgressState::trim($erasures);
+
+        if ($trimmed === []) {
+            return null;
+        }
+
+        return array_map(
+            static fn (?CarbonImmutable $at): ?string => $at?->utc()->format('Y-m-d\TH:i:s.up'),
+            $trimmed,
+        );
+    }
+
+    /**
+     * Record "Start over" on one page, keeping the clock monotonic. Does not
+     * save. Returns true when the clock actually moved.
+     */
+    public function erasePage(int $pageIndex, CarbonImmutable $at): bool
+    {
+        $erasures = $this->pageErasures();
+        $current = $erasures[$pageIndex] ?? null;
+
+        if ($current !== null && $current->greaterThanOrEqualTo($at)) {
+            return false;
+        }
+
+        for ($page = count($erasures); $page < $pageIndex; $page++) {
+            $erasures[$page] = null;
+        }
+
+        $erasures[$pageIndex] = $at;
+        // Re-keyed rather than assigned in place: writing past the end leaves
+        // an array whose keys are a list only by luck, and `encodeErasures`
+        // is defined over a list.
+        $this->page_erased_at = self::encodeErasures(array_values($erasures));
+
+        return true;
     }
 
     /**
@@ -162,6 +256,7 @@ class BookProgress extends Model
     {
         return [
             'page_statuses' => 'array',
+            'page_erased_at' => 'array',
             'revision' => 'integer',
             'current_page_index' => 'integer',
             'furthest_page_index' => 'integer',

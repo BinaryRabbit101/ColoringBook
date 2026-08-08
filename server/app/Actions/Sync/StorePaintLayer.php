@@ -11,6 +11,8 @@ use App\Models\RetainedPaintLayer;
 use App\Models\User;
 use App\Services\PaintStorage;
 use App\Services\PaintUpload;
+use App\Services\PaintUploads;
+use App\Services\ShelfClock;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
@@ -51,7 +53,11 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class StorePaintLayer
 {
-    public function __construct(private readonly PaintStorage $storage) {}
+    public function __construct(
+        private readonly PaintStorage $storage,
+        private readonly PaintUploads $uploads,
+        private readonly ShelfClock $clock,
+    ) {}
 
     public function handle(
         User $user,
@@ -60,7 +66,20 @@ class StorePaintLayer
         int $pageIndex,
         PaintUpload $upload,
     ): PaintWriteOutcome {
+        // BL-18, and before `shelf()` on purpose: that method *creates* the
+        // `book_progress` row, so a stale upload against a wiped shelf would
+        // put the book back on it before anything had a chance to say no.
+        $this->uploads->assertShelfNotErased(
+            $this->clock->erasedAt($user, $profile),
+            $upload->clientPaintedAt,
+        );
+
         $progress = $this->shelf($user, $profile, $bookUid);
+
+        // A page that has been started over more recently than this picture
+        // was painted refuses it outright. Checked before the row is locked
+        // because it is a property of the page, not of the race.
+        $this->uploads->assertNotErased($progress->erasedPageAt($pageIndex), $upload->clientPaintedAt);
 
         return DB::transaction(function () use ($progress, $pageIndex, $upload): PaintWriteOutcome {
             $layer = PaintLayer::query()

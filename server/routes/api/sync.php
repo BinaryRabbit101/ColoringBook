@@ -16,9 +16,11 @@ use Illuminate\Support\Facades\Route;
 |
 |   GET  /sync/progress?profile=&since=          WP2  ✅
 |   PUT  /sync/progress                          WP2  ✅ batched, base_revision
+|   DELETE /sync/progress                        BL-18 ✅ wipe the shelf, stamp the clock
 |   POST /sync/paint/{book_uid}/{page}           WP4  ✅ sha256 → 204 have-it / 202 upload
 |   PUT  /sync/paint/{book_uid}/{page}           WP4  ✅ raw PNG, Content-Digest checked
 |   GET  /sync/paint/{book_uid}/{page}           WP4  ✅ 302 signed URL, or 404
+|   DELETE /sync/paint/{book_uid}/{page}         BL-18 ✅ "Start over", as a state
 |   GET  /sync/paint/{book_uid}                  WP4  ✅ per-page paint metadata (added)
 |
 | All of these require a token with the `save:sync` ability. The signed blob
@@ -46,6 +48,17 @@ Route::middleware(['auth:sanctum', 'abilities:save:sync'])->group(function (): v
 
     Route::get('sync/progress', [ProgressSyncController::class, 'index'])->name('sync.progress.index');
     Route::put('sync/progress', [ProgressSyncController::class, 'update'])->name('sync.progress.update');
+
+    /*
+     * BL-18 — "Erase all progress", pushed up rather than left local.
+     *
+     * The merge only ever climbs, so an erasure cannot be expressed as an
+     * absence: this wipes the shelf's rows AND records the instant it did, and
+     * `GET` publishes that instant so every other device censors itself
+     * against it. See DLC_SERVER.md §6.3 "Erasure".
+     */
+    Route::delete('sync/progress', [ProgressSyncController::class, 'destroy'])
+        ->name('sync.progress.destroy');
 
     /*
     |----------------------------------------------------------------------
@@ -79,6 +92,15 @@ Route::middleware(['auth:sanctum', 'abilities:save:sync'])->group(function (): v
     Route::get('sync/paint/{book_uid}/{page}', [PaintSyncController::class, 'show'])
         ->whereNumber('page')
         ->name('sync.paint.show');
+
+    /*
+     * BL-18 — the page's "Start over" (BL-7), pushed as a state. Deletes the
+     * picture under the same LWW rule an upload obeys, and stamps the page's
+     * erase clock so its status cannot climb back to `complete` either.
+     */
+    Route::delete('sync/paint/{book_uid}/{page}', [PaintSyncController::class, 'destroy'])
+        ->whereNumber('page')
+        ->name('sync.paint.destroy');
 
 });
 

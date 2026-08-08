@@ -62,6 +62,14 @@ extends Control
 ##   k  offline: with the server unreachable, entries persist to disk, a FRESH queue
 ##      reads them back, and the drain converges once the server returns
 ##   l  the status line's four states
+##   m  BL-18: "Start over" on a SYNCED page stays blank -- the picture is deleted
+##      on the server, the page's status cannot climb back to complete, and a
+##      device still holding the old state loses to the reset
+##   n  BL-18: "Erase all progress" survives the next pull -- the queue's
+##      fingerprints and base revisions are reset, the wipe is PUSHED, and a
+##      drain+pull afterwards finds nothing to restore (stickers included)
+##   o  BL-18: a device that was OFFLINE through a dashboard wipe converges on
+##      its next sync instead of resurrecting the shelf out of its own queue
 ##
 ## Exit code is 0 only if every check passes.
 
@@ -146,6 +154,9 @@ func _run() -> void:
 	await _check_picture_toggle()
 	await _check_offline_queue()
 	_check_status_text()
+	await _check_page_reset()
+	await _check_erase_all()
+	await _check_offline_wipe()
 
 	print("\n=== %d/%d checks passed ===" % [_checks - _failures, _checks])
 	print("scratch account: %s" % _email)
@@ -283,6 +294,54 @@ func _check_merge_mirror() -> void:
 	# The two properties the whole protocol rests on, over the same kind of grid
 	# ProgressMergeTest uses: differing page counts, every status, both orders of
 	# current vs furthest, and several states sharing one timestamp.
+	# --- BL-18's erasure clocks, mirrored case for case -------------------------
+
+	# test_a_shelf_erase_empties_every_state_written_before_it
+	var wiped := SyncQueue.merge_states(
+		_state(3, ["complete", "complete"], 3, t0), _state(1, ["in_progress"], 1, t0), t1)
+	_expect(_statuses(wiped) == "" and int(wiped[SyncQueue.STATE_FURTHEST]) == 0
+			and String(wiped[SyncQueue.STATE_UPDATED_AT]) == t1,
+		"a shelf erase empties every state written before it, and stamps the result with itself")
+
+	# test_colouring_done_after_a_shelf_erase_survives_it
+	_expect(_statuses(SyncQueue.merge_states(
+			_state(3, ["complete", "complete"], 3, t0),
+			_state(1, ["in_progress"], 1, "2026-08-09T12:00:01.000Z"), t1)) == "in_progress",
+		"...but colouring done after it survives")
+
+	# test_a_shelf_erase_wins_an_exact_tie
+	_expect(_statuses(SyncQueue.merge_states(
+			_state(2, ["complete"], 2, t1), _state(2, ["complete"], 2, t1), t1)) == "",
+		"...and the erase wins an exact tie")
+
+	# test_a_page_erase_stops_that_page_climbing_back
+	var reset := _state(1, ["complete", "untouched"], 1, t1, ["", t1])
+	var stale := _state(1, ["complete", "complete"], 1, t0)
+	_expect(_statuses(SyncQueue.merge_states(reset, stale)) == "complete,untouched"
+			and _statuses(SyncQueue.merge_states(stale, reset)) == "complete,untouched",
+		"a page erase stops THAT page climbing back, in either argument order")
+
+	# test_a_page_painted_after_its_reset_climbs_again
+	_expect(_statuses(SyncQueue.merge_states(
+			reset, _state(1, ["complete", "complete"], 1, "2026-08-09T12:00:01.000Z")))
+			== "complete,complete",
+		"...and a page coloured again after its reset climbs normally")
+
+	# test_page_erase_clocks_only_ever_move_forward
+	_expect(_erasures(SyncQueue.merge_states(
+			_state(0, ["untouched"], 0, t1, [t0]), _state(0, ["untouched"], 0, t1, [t1])))
+			== t1,
+		"page erase clocks only ever move forward")
+
+	# test_trailing_nulls_never_reach_the_result
+	_expect((SyncQueue.merge_states(
+			_state(0, ["untouched"], 0, t0, ["", "", ""]),
+			_state(0, ["untouched"], 0, t0, [""]))[SyncQueue.STATE_PAGE_ERASED] as Array).is_empty(),
+		"...and trailing blanks never reach the result")
+
+	# The two properties the whole protocol rests on, over the same kind of grid
+	# ProgressMergeTest uses: differing page counts, every status, both orders of
+	# current vs furthest, and several states sharing one timestamp.
 	var states := [
 		_state(0, [], 0, t0),
 		_state(0, ["untouched"], 0, t0),
@@ -291,18 +350,28 @@ func _check_merge_mirror() -> void:
 		_state(3, ["complete", "complete", "complete", "complete"], 3, t1),
 		_state(2, ["untouched", "untouched"], 5, "2026-08-06T12:00:00.500Z"),
 		_state(5, ["complete"], 0, t1),
+		# BL-18: erase clocks on either side of the timestamps above, so the
+		# censor fires in both directions inside the grid.
+		_state(1, ["complete", "complete"], 1, t1, ["2026-08-01T00:00:00.000Z"]),
+		_state(0, ["complete", "untouched"], 1, t0, ["", "2026-08-12T00:00:00.000Z"]),
+		_state(2, ["in_progress", "complete"], 2, t0, [t0, t0]),
 	]
+	# ...and under the shelf clock too: a rule that is commutative without one and
+	# not with one would resurrect a shelf on one device and not another.
+	var clocks := ["", "2026-07-01T00:00:00.000Z", t1, "2026-09-01T00:00:00.000Z"]
 	var commutative := true
 	var idempotent := true
 	for a: Dictionary in states:
 		for b: Dictionary in states:
-			var ab := SyncQueue.merge_states(a, b)
-			if _snapshot(ab) != _snapshot(SyncQueue.merge_states(b, a)):
-				commutative = false
-			if _snapshot(SyncQueue.merge_states(ab, b)) != _snapshot(ab) \
-					or _snapshot(SyncQueue.merge_states(ab, a)) != _snapshot(ab):
-				idempotent = false
-	_expect(commutative, "merge is COMMUTATIVE over a %d x %d grid" % [states.size(), states.size()])
+			for clock: String in clocks:
+				var ab := SyncQueue.merge_states(a, b, clock)
+				if _snapshot(ab) != _snapshot(SyncQueue.merge_states(b, a, clock)):
+					commutative = false
+				if _snapshot(SyncQueue.merge_states(ab, b, clock)) != _snapshot(ab) \
+						or _snapshot(SyncQueue.merge_states(ab, a, clock)) != _snapshot(ab):
+					idempotent = false
+	_expect(commutative, "merge is COMMUTATIVE over a %d x %d grid under %d shelf clocks"
+		% [states.size(), states.size(), clocks.size()])
 	_expect(idempotent, "merge is IDEMPOTENT: re-merging the result with either input changes nothing")
 
 
@@ -706,6 +775,150 @@ func _check_status_text() -> void:
 	# "Sync off" was proved in check c, "Offline" in check k.
 
 
+# ================================== m: "Start over" is a state, not an absence ==
+
+## BL-18, the per-page half. Before it, the reset deleted the local file and put
+## the status back to untouched, and the next pull restored BOTH -- LWW kept the
+## server's picture and the monotonic merge climbed the status back to complete.
+func _check_page_reset() -> void:
+	print("\n-- check m: 'Start over' on a synced page stays blank (BL-18) --")
+	var queue := Backend.get_sync_queue()
+	# Page 2, not page 1: check h deliberately left page 1's server picture
+	# stamped half an hour in the future, and a reset stamped NOW would rightly
+	# lose last-write-wins to it. Page 2 was uploaded in check k at the ordinary
+	# device clock, which is the case this check is about.
+	var path := GameState.get_paint_path(_book, 1)
+	_expect(FileAccess.file_exists(path)
+			and not _row_for_page(await _b_paint_pages(BOOK_UID), 1).is_empty(),
+		"precondition: page 2 is painted here AND on the server")
+	_expect(GameState.get_page_status(BOOK_UID, 1) == GameState.STATUS_COMPLETE,
+		"precondition: page 2 is recorded complete")
+
+	# Exactly what the page's "Start over" button runs (BL-7).
+	_expect(GameState.erase_page_progress(_book, 1), "Start over on page 2")
+	_expect(not FileAccess.file_exists(path), "...deleted the local paint layer")
+	_expect(queue.get_page_erased_at(BOOK_UID, 1) != "",
+		"...and the queue stamped the page's erase clock (%s)"
+		% queue.get_page_erased_at(BOOK_UID, 1))
+	_expect(queue.has_pending_erasure(), "...which is a deletion still owed to the server")
+
+	await _sync_now(true)
+	_expect(not queue.has_pending_erasure(), "the drain pushed it")
+	_expect(_row_for_page(await _b_paint_pages(BOOK_UID), 1).is_empty(),
+		"the server no longer has a picture for page 2")
+	var server := await _b_progress(BOOK_UID)
+	_expect(_server_statuses(server).ends_with("untouched"),
+		"...and its status went back to untouched (%s)" % _server_statuses(server))
+	_expect(_erasure_stamp(server, 1) != "",
+		"...carrying the page's erase clock for the other devices (%s)"
+		% _erasure_stamp(server, 1))
+
+	# The bug, exactly: a pull used to bring both halves straight back.
+	await _sync_now(true)
+	_expect(not FileAccess.file_exists(path), "a pull does NOT restore the picture")
+	_expect(GameState.get_page_status(BOOK_UID, 1) == GameState.STATUS_UNTOUCHED,
+		"...nor the complete badge (%s)" % GameState.get_page_status(BOOK_UID, 1))
+
+	# And a device that has been asleep since before the reset cannot climb it
+	# back either -- the merge censors its statuses against the page's clock.
+	var pushed := await _b_push_progress(BOOK_UID, int(server.get("revision", 0)),
+		["complete", "complete"], "2020-01-01T00:00:00.000Z")
+	_expect(pushed, "device B pushed the stale 'both pages complete' it still holds")
+	server = await _b_progress(BOOK_UID)
+	_expect(_server_statuses(server).ends_with("untouched"),
+		"...and lost to the reset (%s)" % _server_statuses(server))
+	await _sync_now(true)
+	_expect(GameState.get_page_status(BOOK_UID, 1) == GameState.STATUS_UNTOUCHED,
+		"...so this device stays blank too")
+
+
+# ======================================= n: "Erase all progress" that sticks ==
+
+func _check_erase_all() -> void:
+	print("\n-- check n: 'Erase all progress' survives the next pull (BL-18) --")
+	var queue := Backend.get_sync_queue()
+	# BL-36: a page carries stickers as well as paint, and the erase covers them.
+	_expect(GameState.set_page_stickers(_book, 1, [
+		{"set_uid": "starter-2026", "sticker_id": "star", "position": Vector2(100, 100)},
+	]), "a sticker was stuck on page 2")
+	_expect(GameState.get_page_stickers(BOOK_UID, 1).size() == 1, "...and saved")
+	await _sync_now()
+	_expect((await _b_progress(BOOK_UID)).size() > 0, "precondition: the server holds this shelf")
+
+	# Exactly what the settings overlay's "Erase all progress" runs.
+	GameState.erase_all_progress()
+	_expect(GameState.get_book_uids().is_empty(), "the local save is empty")
+	_expect(GameState.get_page_stickers(BOOK_UID, 1).is_empty(), "...stickers included (BL-36)")
+	_expect(queue.get_base_revision(BOOK_UID) == 0,
+		"the queue's base revisions were RESET, so the next drain cannot re-push at one")
+	_expect(queue.get_erased_at() != "",
+		"...and the erase itself was recorded as an instant (%s)" % queue.get_erased_at())
+	_expect(queue.has_pending_erasure(), "...owed to the server")
+
+	await _sync_now(true)
+	_expect(not queue.has_pending_erasure(), "the drain pushed the wipe")
+	_expect((await _b_progress(BOOK_UID)).is_empty(), "the server's shelf is empty")
+	_expect((await _b_paint_pages(BOOK_UID)).is_empty(), "...and so are its pictures")
+
+	# The whole ticket: the pull that used to undo it.
+	await _sync_now(true)
+	_expect(GameState.get_book_uids().is_empty(),
+		"a drain + pull afterwards restores nothing (%s)" % ",".join(GameState.get_book_uids()))
+	_expect(not FileAccess.file_exists(GameState.get_paint_path(_book, 1)),
+		"...no picture came back either")
+
+
+# ======================= o: the device that slept through a dashboard wipe ==
+
+## The other half of BL-18's option 1: the grown-up erases from the parent
+## dashboard while a tablet is switched off. That tablet wakes with a full shelf,
+## a full queue and stale base revisions, and must converge rather than argue.
+##
+## The wipe is made through `DELETE /sync/progress` on device B, which is the
+## same `App\Actions\Sync\EraseShelf` the dashboard button runs -- driving the
+## Inertia page from Godot would prove something about a browser, not about this.
+func _check_offline_wipe() -> void:
+	print("\n-- check o: an offline device converges after a dashboard wipe (BL-18) --")
+	var queue := Backend.get_sync_queue()
+
+	# Something worth erasing, synced.
+	GameState.start_book(_book, 0)
+	GameState.mark_page_status(_book, 0, GameState.STATUS_COMPLETE)
+	var painted := await _paint_stroke(Color(0.2, 0.7, 0.4, 1.0), 60.0)
+	if painted != null:
+		GameState.save_page_paint(_book, 0, painted)
+	await _sync_now(true)
+	_expect((await _b_progress(BOOK_UID)).size() > 0, "precondition: the shelf is on the server again")
+
+	# Off it goes, and colours some more with nothing to talk to.
+	Backend.get_api().set_base_url(DEAD_URL)
+	GameState.mark_page_status(_book, 1, GameState.STATUS_COMPLETE)
+	var offline := await _paint_stroke(Color(0.8, 0.3, 0.6, 1.0), 60.0)
+	if offline != null:
+		GameState.save_page_paint(_book, 1, offline)
+	await _idle()
+	_expect(queue.is_pending(), "the tablet is offline with work queued")
+
+	# The grown-up, meanwhile, on the dashboard.
+	var wiped := await _b_erase_shelf()
+	_expect(wiped != "", "the parent erased the shelf while it was away (%s)" % wiped)
+	_expect((await _b_progress(BOOK_UID)).is_empty(), "...so the server's shelf is empty")
+
+	Backend.get_api().set_base_url(_base_url)
+	await _sync_now(true)
+	_expect(GameState.get_book_uids().is_empty(),
+		"the tablet converged on empty instead of pushing its queue back (%s)"
+		% ",".join(GameState.get_book_uids()))
+	_expect(queue.get_erased_at() == wiped,
+		"...on the parent's instant, not one of its own")
+	_expect(not FileAccess.file_exists(GameState.get_paint_path(_book, 0))
+			and not FileAccess.file_exists(GameState.get_paint_path(_book, 1)),
+		"...and both pictures went with it")
+	_expect(not queue.is_pending(), "nothing is left queued")
+	_expect((await _b_progress(BOOK_UID)).is_empty(),
+		"the server is still empty -- the queue resurrected nothing")
+
+
 # ===================================================== device B, driven raw ==
 
 func _b_progress(uid: String) -> Dictionary:
@@ -725,6 +938,39 @@ func _b_paint_pages(uid: String) -> Array:
 	if not bool(result[ApiClient.KEY_OK]) or typeof(result[ApiClient.KEY_DATA]) != TYPE_DICTIONARY:
 		return []
 	return (result[ApiClient.KEY_DATA] as Dictionary).get("pages", []) as Array
+
+
+## Device B pushing a whole book, the way a second tablet would (BL-18 check m).
+func _b_push_progress(uid: String, base_revision: int, statuses: Array, at: String) -> bool:
+	var result: Dictionary = await _b.request_json(
+		HTTPClient.METHOD_PUT, "/sync/progress",
+		{"books": [{
+			"book_uid": uid,
+			"base_revision": base_revision,
+			"current_page_index": 0,
+			"page_statuses": statuses,
+			"furthest_page_index": maxi(statuses.size() - 1, 0),
+			"client_updated_at": at,
+		}]}
+	)
+	return bool(result[ApiClient.KEY_OK]) and not _conflicted(result)
+
+
+## The parent dashboard's wipe, through the API the dashboard action shares
+## (BL-18 check o). Returns the instant the server settled on, or "".
+func _b_erase_shelf() -> String:
+	var result: Dictionary = await _b.request_json(HTTPClient.METHOD_DELETE, "/sync/progress")
+	if not bool(result[ApiClient.KEY_OK]) or typeof(result[ApiClient.KEY_DATA]) != TYPE_DICTIONARY:
+		return ""
+	return String((result[ApiClient.KEY_DATA] as Dictionary).get("erased_at", ""))
+
+
+## The per-page erase clock the server published for one page, or "".
+static func _erasure_stamp(row: Dictionary, page_index: int) -> String:
+	var clocks: Array = row.get("page_erased_at", [])
+	if page_index >= clocks.size() or clocks[page_index] == null:
+		return ""
+	return String(clocks[page_index])
 
 
 ## Device B's upload, through the same two-step the game uses -- so the 202's
@@ -856,12 +1102,14 @@ static func _row_for_page(pages: Array, page_index: int) -> Dictionary:
 	return {}
 
 
-static func _state(current: int, statuses: Array, furthest: int, at: String) -> Dictionary:
+static func _state(current: int, statuses: Array, furthest: int, at: String,
+		erased: Array = []) -> Dictionary:
 	return {
 		SyncQueue.STATE_CURRENT: current,
 		SyncQueue.STATE_STATUSES: statuses,
 		SyncQueue.STATE_FURTHEST: furthest,
 		SyncQueue.STATE_UPDATED_AT: at,
+		SyncQueue.STATE_PAGE_ERASED: erased,
 	}
 
 
@@ -872,12 +1120,20 @@ static func _statuses(state: Dictionary) -> String:
 	return ",".join(parts)
 
 
+static func _erasures(state: Dictionary) -> String:
+	var parts := PackedStringArray()
+	for clock: Variant in (state.get(SyncQueue.STATE_PAGE_ERASED, []) as Array):
+		parts.append(String(clock))
+	return ",".join(parts)
+
+
 ## A readable, comparable snapshot -- the twin of ProgressMergeTest::snapshot().
 static func _snapshot(state: Dictionary) -> String:
-	return "%d|%s|%d|%.3f" % [
+	return "%d|%s|%d|%.3f|%s" % [
 		int(state[SyncQueue.STATE_CURRENT]), _statuses(state),
 		int(state[SyncQueue.STATE_FURTHEST]),
 		SyncQueue.parse_iso8601(String(state[SyncQueue.STATE_UPDATED_AT])),
+		_erasures(state),
 	]
 
 
