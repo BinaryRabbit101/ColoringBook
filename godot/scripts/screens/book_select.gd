@@ -30,6 +30,15 @@ extends Control
 ## out of the grid after every sort and draws a wooden plank under each ROW, plus
 ## the carcass around them. Nothing here decides how many shelves there are; the
 ## column maths does, exactly as before, and the furniture follows.
+##
+## [b]The grid fills from the TOP LEFT[/b] (BL-40). It used to shrink-centre and sit
+## on the floor, so three books on a wide screen floated in the middle of the room
+## and the first book was never in the same place twice: the count moved it. Now the
+## bookcase hangs from the top left corner of the shelf area and grows right and
+## down as books arrive, which is where a child's eye starts and where the FIRST
+## book therefore has to be. This is pure layout -- four size flags in the scene, no
+## code -- because the boards, the column maths and the cells all read the grid back
+## rather than being told where it is.
 
 ## The player picked a book.
 signal book_chosen(book: BookDef)

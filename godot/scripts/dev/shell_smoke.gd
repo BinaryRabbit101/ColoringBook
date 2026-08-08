@@ -228,6 +228,21 @@ func _check_boot_and_navigation() -> void:
 	_expect(cell != null, "one of them is the test book")
 	if cell == null:
 		return
+
+	# BL-40: the grid fills from the TOP LEFT. Measured against the shelf's own rect
+	# rather than a constant, and against the SECOND cell rather than a column count,
+	# so the check says "the first book is in the corner and the next one is to its
+	# right" without caring how many columns the window happened to fit.
+	await _settle_layout()
+	var first_cell: BookCell = cells[0]
+	var shelf_left := shelf.global_position.x
+	_expect(first_cell.global_position.x - shelf_left < shelf.size.x * 0.5,
+		"the first book sits in the shelf's LEFT half, not centred (%.0f px in of %.0f)"
+		% [first_cell.global_position.x - shelf_left, shelf.size.x])
+	if cells.size() > 1:
+		_expect(cells[1].global_position.x > first_cell.global_position.x
+				and is_equal_approx(cells[1].global_position.y, first_cell.global_position.y),
+			"...and the next one fills to its RIGHT, on the same row")
 	cell.pressed.emit()
 	var reached_page := await _wait_for_screen(Main.SCREEN_COLORING)
 	_expect(reached_page, "picking the book opens the coloring page (%s)" % _main.get_current_screen_id())

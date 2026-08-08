@@ -96,12 +96,11 @@ layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3
 mouse_filter = 2
-alignment = 1
 
 [node name="Bookcase" type="MarginContainer" parent="Margin/Body/Scroll/Row"]
 layout_mode = 2
-size_flags_horizontal = 4
-size_flags_vertical = 8
+size_flags_horizontal = 0
+size_flags_vertical = 0
 mouse_filter = 2
 theme_override_constants/margin_left = 24
 theme_override_constants/margin_top = 18
@@ -115,7 +114,7 @@ script = ExtResource("3_boards")
 
 [node name="Shelf" type="GridContainer" parent="Margin/Body/Scroll/Row/Bookcase"]
 layout_mode = 2
-size_flags_horizontal = 4
+size_flags_horizontal = 0
 size_flags_vertical = 0
 theme_override_constants/h_separation = 24
 theme_override_constants/v_separation = 48
