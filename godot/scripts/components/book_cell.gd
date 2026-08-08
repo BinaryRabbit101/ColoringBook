@@ -222,6 +222,8 @@ var _cover_frame: PanelContainer
 var _title: Label
 var _subtitle: Label
 var _book: BookDef
+## True while the plate is showing an ARTIST's cover rather than page 1 (BL-42).
+var _artist_cover := false
 var _cover_color: Color = COVER_COLORS[0]
 var _tilt_sign := 1.0
 var _tween: Tween
@@ -354,9 +356,15 @@ func set_book(book: BookDef) -> void:
 		_title.text = ""
 		_subtitle.text = ""
 		tooltip_text = ""
+		_set_artist_cover(false)
 		_apply_cover_color(COVER_COLORS[0])
 		return
 	_cover.texture = book.get_cover_texture()
+	# BL-42: an artist's cover was painted to BE the front of the book, so it gets
+	# the front of the book -- edge to edge, no paper plate, no frame. Page 1
+	# standing in for one keeps the plate, because line art on white pinned across a
+	# whole cover reads as a mistake rather than as artwork.
+	_set_artist_cover(book.has_artist_cover())
 	_title.text = book.display_name
 	var count := book.page_count()
 	_subtitle.text = "%d page%s" % [count, "" if count == 1 else "s"]
@@ -383,6 +391,31 @@ func has_cover() -> bool:
 	return _cover.texture != null
 
 
+## True when the picture on this book is an artist's cover rather than page 1
+## standing in for one (BL-42). Public so a harness can assert the difference is
+## actually drawn.
+func has_artist_cover() -> bool:
+	return _artist_cover
+
+
+## Swaps the cover plate between its two presentations. The plate KEEPS its box
+## either way -- the title and the page-count sticker are laid out under it and
+## must not jump when a pack gains a cover.
+func _set_artist_cover(artist: bool) -> void:
+	if _artist_cover == artist:
+		return
+	_artist_cover = artist
+	# Edge to edge for a real cover; letterboxed inside its frame for page 1.
+	_cover.stretch_mode = (
+		TextureRect.STRETCH_KEEP_ASPECT_COVERED if artist
+		else TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	)
+	# A covered stretch overflows its box by design; without this the artwork would
+	# spill over the spine and out past the page lip.
+	_cover_frame.clip_contents = artist
+	_apply_cover_color(_cover_color)
+
+
 ## The cover colour this book ended up with. Public so a harness can assert the
 ## shelf is varied instead of eyeballing a screenshot.
 func get_cover_color() -> Color:
@@ -407,9 +440,11 @@ func _apply_cover_color(color: Color) -> void:
 	var plate := StyleBoxFlat.new()
 	plate.bg_color = BookArt.PAPER
 	plate.border_color = color.lightened(0.42)
-	plate.set_border_width_all(3)
+	# An artist's cover is the picture, not a picture ON something: the paper plate
+	# and its inset go away so nothing frames it (BL-42).
+	plate.set_border_width_all(0 if _artist_cover else 3)
 	plate.set_corner_radius_all(7)
-	plate.set_content_margin_all(5.0)
+	plate.set_content_margin_all(0.0 if _artist_cover else 5.0)
 	plate.shadow_color = Color(0.121569, 0.058824, 0.019608, 0.30)
 	plate.shadow_size = 4
 	plate.shadow_offset = Vector2(0.0, 2.0)

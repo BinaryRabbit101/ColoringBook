@@ -220,8 +220,12 @@ func _seed_packs() -> void:
 		_pack_page(coyote_page, 2, 1, "Coyote (from a pack)"),
 		_pack_page(test_page, 1, 0, "Shape Sampler (from a pack)"),
 	]
+	# BL-42: this one carries an ARTIST-DRAWN cover, named at the manifest level while
+	# its book.json still falls back to page 1 -- which is exactly the shape a pack
+	# published before covers existed has, plus the one field that is new. The dupe
+	# pack below deliberately has none, so both halves are covered by real packs.
 	_write_pack(TEST_DLC_ROOT, PACK_SLUG, PACK_BOOK_UID, "DLC Smoke Book", pages,
-		[test_page, coyote_page], [1, 2])
+		[test_page, coyote_page], [1, 2], true)
 
 	# A pack claiming the built-in coyote book's uid. Its FILES are the test book's
 	# -- what matters is the uid it claims, and using the small page keeps the run
@@ -323,7 +327,8 @@ func _write_pack(
 	title: String,
 	pages: Array,
 	_sources: Array,
-	_numbers: Array
+	_numbers: Array,
+	artist_cover: bool = false
 ) -> void:
 	var pack_root := dlc_root.path_join(pack_slug)
 	var book_dir := pack_root.path_join("books").path_join(book_uid)
@@ -361,14 +366,24 @@ func _write_pack(
 		"pages": json_pages,
 	}
 	_write_text(book_dir.path_join(BookDef.BOOK_JSON_NAME), JSON.stringify(book_json, "\t"))
-	# Written for fidelity only: the client never opens it (see the class doc).
-	_write_text(pack_root.path_join("manifest.json"), JSON.stringify({
+	var manifest := {
 		"manifest_version": 1,
 		"pack_slug": pack_slug,
 		"pack_version": 1,
 		"title": title,
 		"books": [book_json],
-	}, "\t"))
+	}
+	if artist_cover:
+		# BL-42: a pack whose ARTIST drew a cover, at the manifest level, which is
+		# where §7.2 has always allowed one. The book.json still names page 1, exactly
+		# as every pack published before covers existed does -- so this pack is the
+		# case the client has to see through.
+		var art := Image.create(200, 260, false, Image.FORMAT_RGBA8)
+		art.fill(Color(0.180392, 0.482353, 0.729412))
+		art.save_png(pack_root.path_join("cover.png"))
+		manifest["cover"] = "cover.png"
+	# Written for fidelity only, EXCEPT for its cover (see BookDef.PACK_MANIFEST_NAME).
+	_write_text(pack_root.path_join("manifest.json"), JSON.stringify(manifest, "\t"))
 
 
 # =========================================================== a: discovery ==
@@ -482,10 +497,26 @@ func _check_runtime_definitions() -> void:
 	_expect(second.get_mapping_source_path() == second.mask_image_path,
 		"...which is still the page's mapping source, exactly as for a built-in page")
 
-	_expect(_pack_book.get_cover_path() == first.display_image_path,
-		"the authored cover resolves to page 1's art (%s)" % _pack_book.get_cover_path())
+	# BL-42: this pack's ARTIST drew a cover and named it in the manifest, while its
+	# book.json still names page 1 -- so the manifest is where the cover has to come
+	# from, and the client has to see through the book.json's fallback to find it.
+	_expect(_pack_book.get_cover_path() == TEST_DLC_ROOT.path_join(PACK_SLUG).path_join("cover.png"),
+		"a pack cover named in the MANIFEST reaches the book (%s)" % _pack_book.get_cover_path())
+	_expect(_pack_book.has_artist_cover() and _pack_book.get_artist_cover_texture() != null,
+		"...and reads as an ARTIST's cover, not as page 1 standing in for one")
 	_expect(_pack_book.get_cover_texture() != null,
 		"...and the cover texture loads from user:// for the shelf")
+	_expect(_pack_book.validate().is_empty(),
+		"...and the book still validates with it (%s)" % [_pack_book.validate()])
+	# A pack with no cover anywhere falls back to page 1 and says so -- the whole
+	# point of the distinction, and what every pack published so far looks like.
+	var uncovered := _book_with_uid(BookDef.discover_runtime(TEST_DLC_ROOT), COYOTE_UID)
+	_expect(uncovered != null and not uncovered.has_artist_cover()
+			and uncovered.get_artist_cover_texture() == null,
+		"a pack with no cover of its own has NO artist cover...")
+	_expect(uncovered != null
+			and uncovered.get_cover_path() == uncovered.get_page(0).display_image_path,
+		"...and falls back to page 1's display image, exactly as it always did")
 	# ...and a pack that authors no cover falls back to page 1's display image,
 	# exactly as an authored book does.
 	var coverless := BookDef.from_json(
