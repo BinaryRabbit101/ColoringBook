@@ -79,6 +79,12 @@ extends Control
 ## [b]M6 also owns the safe area[/b]: both [code]ScreenHost[/code] and
 ## [code]Overlays[/code] live inside one [SafeArea], so every screen and every
 ## overlay is notch-clear without a single screen knowing about [DisplayServer].
+##
+## [b]BL-48 sized the overlay layer for a phone.[/b] The gameplay layer had its
+## mobile pass in M6/BL-21/BL-33; the overlays kept their desktop numbers, which on
+## a ~390 pt phone is a third of their authored size. Every overlay now takes one
+## shared scale from [OverlayMetrics] -- including the two buttons built HERE, which
+## are the first thing a grown-up has to hit (see [method _apply_overlay_scale]).
 
 ## The visible screen changed. Payload is one of the SCREEN_* ids.
 signal screen_changed(screen_id: String)
@@ -126,6 +132,13 @@ const BOOK_OPEN_SECONDS := 0.34
 ## Shutting is quicker than opening -- going back is not the moment worth savouring.
 const BOOK_SHUT_SECONDS := 0.22
 const BOOK_RETURN_SECONDS := 0.24
+
+## The shelf's "More books" pill, as authored. BL-48 multiplies all three by the
+## overlay scale, which is 1.0 on a desktop -- so these ARE the desktop numbers.
+const MORE_BOOKS_SIZE := Vector2(190.0, 72.0)
+const MORE_BOOKS_FONT_SIZE := 22
+## Distance from the corner for both shell buttons.
+const MORE_BOOKS_INSET := 20.0
 
 
 ## The settings gear, drawn from primitives so the shell ships no icon assets.
@@ -440,6 +453,9 @@ var quit_on_close_request := true:
 			get_tree().auto_accept_quit = not value
 
 var _gear: GearButton
+## BL-48: the pill's rounding has to grow with the pill, or a 187 px tall button
+## with a 36 px radius stops being a pill. Kept so it can be re-rounded on a resize.
+var _more_books_style: StyleBoxFlat
 ## BL-30: the book that opens between the shelf and the page. Built here, on top of
 ## [member _fade], because a transition has to cover the overlays too.
 var _book_transition: BookOpenTransition
@@ -463,6 +479,12 @@ func _ready() -> void:
 	_build_gear()
 	_build_more_books()
 	_build_book_transition()
+	# BL-48: the two shell buttons are part of the overlay layer and take the same
+	# one scale the panels do. They are built in code rather than in a scene, so they
+	# are sized here rather than by an OverlayMetrics walk.
+	_overlays.resized.connect(_apply_overlay_scale)
+	get_viewport().size_changed.connect(_apply_overlay_scale)
+	_apply_overlay_scale()
 	# The shelf re-filters and rescans when the account or the installed packs
 	# change. Nothing here awaits anything (DLC_SERVER.md 8.2) -- these are
 	# notifications that arrive, not requests this node makes.
@@ -768,6 +790,42 @@ func _build_gear() -> void:
 	_overlays.add_child(_gear)
 
 
+## BL-48. The gear and "More books" are the overlay layer's two BUTTONS, and they
+## were the two controls a grown-up had to hit before any of the panels could even
+## be seen: 72 canvas px is 24 pt of glass on a ~390 pt phone, half a finger.
+##
+## Everything here is authored-value times [method OverlayMetrics.content_scale],
+## which is exactly 1.0 on a desktop -- so this recomputes the numbers the scene
+## already had and nothing moves. The floor is applied on top, because a finger does
+## not care what the type is doing (see [OverlayMetrics.min_touch_px]).
+func _apply_overlay_scale() -> void:
+	if not is_instance_valid(_gear) or not is_instance_valid(_more_books):
+		return
+	var scale := OverlayMetrics.content_scale(get_viewport())
+	var floor_px := OverlayMetrics.min_touch_px(get_viewport())
+	var pad := MORE_BOOKS_INSET * scale
+
+	var gear := maxf(GearButton.SIZE.x * scale, floor_px)
+	_gear.custom_minimum_size = Vector2(gear, gear)
+	_gear.offset_left = -(gear + pad)
+	_gear.offset_top = pad
+	_gear.offset_right = -pad
+	_gear.offset_bottom = pad + gear
+
+	var height := maxf(MORE_BOOKS_SIZE.y * scale, floor_px)
+	var width := maxf(MORE_BOOKS_SIZE.x * scale, floor_px)
+	_more_books.custom_minimum_size = Vector2(width, height)
+	_more_books.add_theme_font_size_override(
+		"font_size", int(round(MORE_BOOKS_FONT_SIZE * scale))
+	)
+	if _more_books_style != null:
+		_more_books_style.set_corner_radius_all(int(round(height * 0.5)))
+	_more_books.offset_left = pad
+	_more_books.offset_top = pad
+	_more_books.offset_right = pad + width
+	_more_books.offset_bottom = pad + height
+
+
 ## Shows the settings overlay over whatever screen is up.
 func open_settings() -> SettingsPanel:
 	if is_instance_valid(_settings):
@@ -873,23 +931,24 @@ func _build_more_books() -> void:
 	_more_books.name = "MoreBooksButton"
 	_more_books.visible = false
 	_more_books.focus_mode = Control.FOCUS_NONE
-	# DESIGN.md 3.5's 48 px floor, matched to the gear's 72 px height.
-	_more_books.custom_minimum_size = Vector2(190.0, 72.0)
+	# DESIGN.md 3.5's 48 px floor, matched to the gear's 72 px height. BL-48 scales
+	# both from here -- see _apply_overlay_scale().
+	_more_books.custom_minimum_size = MORE_BOOKS_SIZE
 	_more_books.text = "More books"
-	_more_books.add_theme_font_size_override("font_size", 22)
+	_more_books.add_theme_font_size_override("font_size", MORE_BOOKS_FONT_SIZE)
 	_more_books.add_theme_color_override("font_color", Color(0.972549, 0.94902, 0.905882))
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.156863, 0.141176, 0.129412, 0.92)
-	style.border_color = Color(0.415686, 0.360784, 0.301961)
-	style.set_border_width_all(2)
-	style.set_corner_radius_all(36)
+	_more_books_style = StyleBoxFlat.new()
+	_more_books_style.bg_color = Color(0.156863, 0.141176, 0.129412, 0.92)
+	_more_books_style.border_color = Color(0.415686, 0.360784, 0.301961)
+	_more_books_style.set_border_width_all(2)
+	_more_books_style.set_corner_radius_all(36)
 	for state in ["normal", "hover", "pressed"]:
-		_more_books.add_theme_stylebox_override(state, style)
+		_more_books.add_theme_stylebox_override(state, _more_books_style)
 	_more_books.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	_more_books.offset_left = 20.0
-	_more_books.offset_top = 20.0
-	_more_books.offset_right = 20.0 + 190.0
-	_more_books.offset_bottom = 20.0 + 72.0
+	_more_books.offset_left = MORE_BOOKS_INSET
+	_more_books.offset_top = MORE_BOOKS_INSET
+	_more_books.offset_right = MORE_BOOKS_INSET + MORE_BOOKS_SIZE.x
+	_more_books.offset_bottom = MORE_BOOKS_INSET + MORE_BOOKS_SIZE.y
 	_more_books.pressed.connect(open_pack_shop)
 	_overlays.add_child(_more_books)
 
@@ -989,6 +1048,17 @@ func get_settings_panel() -> SettingsPanel:
 
 func get_gear_button() -> Button:
 	return _gear
+
+
+## BL-48: the one scale the whole overlay layer is drawn at, and the touch floor
+## that goes with it. Harnesses assert against these rather than against numbers of
+## their own, so the assertions cannot drift from the code.
+func get_overlay_scale() -> float:
+	return OverlayMetrics.content_scale(get_viewport())
+
+
+func get_overlay_touch_floor() -> float:
+	return OverlayMetrics.min_touch_px(get_viewport())
 
 
 ## WP10 access, for the harnesses and for anything that needs to know whether the

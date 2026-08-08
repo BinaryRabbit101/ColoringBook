@@ -333,6 +333,10 @@ const FRESH_SPARKS: Array[Color] = [
 @onready var _reset_cancel_button: Button = $ResetConfirm/Center/Panel/Margin/Column/Row/CancelButton
 @onready var _flip: PageFlip = $PageFlip
 
+## BL-48's shared overlay scaler for the Start-over confirm. Held so it is not
+## collected; it parents itself to [code]ResetConfirm[/code].
+var _reset_metrics: OverlayMetrics
+
 var _book: BookDef
 var _palette: Control
 var _coverage: CoverageTracker
@@ -436,6 +440,11 @@ func _ready() -> void:
 	_toast.modulate.a = 0.0
 	_toast.visible = false
 	_reset_confirm.visible = false
+	# BL-48: the Start-over confirm is an overlay like the shell's, shares their
+	# Scrim/Center/Panel shape, and is sized by the same one scaler. Its two buttons
+	# are a plain BoxContainer, so on a phone they stack instead of being 250 px each
+	# of a 390 pt screen.
+	_reset_metrics = OverlayMetrics.attach(_reset_confirm)
 	_back_button.pressed.connect(_on_back_pressed)
 	_prev_button.pressed.connect(_on_prev_pressed)
 	_next_button.pressed.connect(_on_next_pressed)
@@ -1988,6 +1997,16 @@ func get_reset_confirm_button() -> Button:
 
 func get_reset_cancel_button() -> Button:
 	return _reset_cancel_button
+
+
+## The Start-over confirm overlay, and the BL-48 scaler that sizes it. Harnesses
+## measure both; nothing in the game reads them.
+func get_reset_confirm_overlay() -> Control:
+	return _reset_confirm
+
+
+func get_reset_overlay_metrics() -> OverlayMetrics:
+	return _reset_metrics
 
 
 ## True while the toolbar is in its narrow (portrait) form.

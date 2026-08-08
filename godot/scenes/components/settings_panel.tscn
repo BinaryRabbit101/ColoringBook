@@ -84,10 +84,11 @@ layout_mode = 2
 mouse_filter = 2
 theme_override_colors/font_color = Color(0.972549, 0.803922, 0.478431, 1)
 theme_override_font_sizes/font_size = 36
+autowrap_mode = 3
 text = "Settings"
 horizontal_alignment = 1
 
-[node name="PaletteRow" type="HBoxContainer" parent="Center/Panel/Margin/Column"]
+[node name="PaletteRow" type="BoxContainer" parent="Center/Panel/Margin/Column"]
 layout_mode = 2
 theme_override_constants/separation = 14
 
@@ -112,7 +113,7 @@ horizontal_alignment = 2
 [node name="Divider" type="HSeparator" parent="Center/Panel/Margin/Column"]
 layout_mode = 2
 
-[node name="AccountRow" type="HBoxContainer" parent="Center/Panel/Margin/Column"]
+[node name="AccountRow" type="BoxContainer" parent="Center/Panel/Margin/Column"]
 layout_mode = 2
 theme_override_constants/separation = 14
 
@@ -173,7 +174,7 @@ theme_override_font_sizes/font_size = 21
 text = "Erase every book's pages and coloring? This cannot be undone."
 horizontal_alignment = 1
 
-[node name="Row" type="HBoxContainer" parent="Center/Panel/Margin/Column/ConfirmBox"]
+[node name="Row" type="BoxContainer" parent="Center/Panel/Margin/Column/ConfirmBox"]
 layout_mode = 2
 theme_override_constants/separation = 14
 alignment = 1

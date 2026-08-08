@@ -20,6 +20,17 @@ extends Control
 ## "Erase all progress" swaps the button for a confirm row and back again. One
 ## node, no popup windows (which behave badly on mobile), and the destructive
 ## action is never one tap away.
+##
+## [b]BL-48 sized it for a phone[/b] with [OverlayMetrics], which every overlay in
+## the game shares. Two things here are this panel's own business rather than the
+## shared mechanism's:
+## [codeblock]
+## the account row  a plain BoxContainer, so portrait stacks caption / email / button
+## the email        AUTOWRAP_ARBITRARY in portrait, because it has no spaces to break
+## [/codeblock]
+## The clipped "Binaryrabbit101@gmail.c…" next to a small Manage button is the exact
+## complaint BL-48 opened with, and it is fixed by giving the address the whole width
+## of the panel instead of whatever is left over beside a button.
 
 ## The player closed the panel.
 signal closed()
@@ -50,8 +61,16 @@ const ACK_SECONDS := 2.2
 @onready var _version_label: Label = $Center/Panel/Margin/Column/VersionLabel
 @onready var _close_button: Button = $Center/Panel/Margin/Column/CloseButton
 
+## BL-48. Held so it is not collected; it parents itself to this node.
+var _metrics: OverlayMetrics
+
 
 func _ready() -> void:
+	_metrics = OverlayMetrics.attach(self)
+	_metrics.applied.connect(_on_overlay_scaled)
+	# attach() applies once as it enters the tree, which is BEFORE the line above
+	# could hear it -- so ask again rather than start a frame out of step.
+	_metrics.apply()
 	_scrim.pressed.connect(_on_close_pressed)
 	_close_button.pressed.connect(_on_close_pressed)
 	_account_button.pressed.connect(func() -> void: account_requested.emit())
@@ -79,6 +98,20 @@ func refresh() -> void:
 		String(ProjectSettings.get_setting(VERSION_SETTING, "0.0.0")), BUILD_TAG
 	]
 	set_confirming(false)
+
+
+## BL-48: the one thing the shared scaler cannot do for this panel. In portrait the
+## account row has already been stacked by [OverlayMetrics] (it is a plain
+## [BoxContainer]), so the address has the whole panel width to itself and there is
+## no reason left to clip it.
+func _on_overlay_scaled(_scale: float, portrait: bool) -> void:
+	OverlayMetrics.fit_long_text(_account_value, portrait)
+	# The palette value is pushed to the far margin because it is the RIGHT-HAND end
+	# of a row. Stacked, there is no right-hand end, and a right-aligned value above
+	# a left-aligned email looks like two different bugs rather than one layout.
+	_palette_value.horizontal_alignment = (
+		HORIZONTAL_ALIGNMENT_LEFT if portrait else HORIZONTAL_ALIGNMENT_RIGHT
+	)
 
 
 # ==================================================================== confirm ==
@@ -131,6 +164,18 @@ func get_account_button() -> Button:
 
 func get_account_text() -> String:
 	return _account_value.text
+
+
+## The label the account email is written into. BL-48's harness measures it, and it
+## is the one control on this panel whose CONTENT can be too long for its box.
+func get_account_label() -> Label:
+	return _account_value
+
+
+## BL-48's shared scaler, so a harness can read the live scale and touch floor off
+## the same object the panel sized itself from.
+func get_overlay_metrics() -> OverlayMetrics:
+	return _metrics
 
 
 func get_erase_button() -> Button:
