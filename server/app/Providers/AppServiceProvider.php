@@ -41,9 +41,9 @@ class AppServiceProvider extends ServiceProvider
     {
         Date::use(CarbonImmutable::class);
 
-        // API responses are hand-shaped per DLC_SERVER.md §11 — {token, …},
-        // {user, profiles, devices} — so resources must not wrap themselves
-        // in a "data" key.
+        // API responses are hand-shaped per DLC_SERVER.md §11 — {token,
+        // abilities, expires_at, device}, a bare entitlements array — so
+        // resources must not wrap themselves in a "data" key.
         JsonResource::withoutWrapping();
 
         DB::prohibitDestructiveCommands(

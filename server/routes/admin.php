@@ -18,13 +18,13 @@ use Illuminate\Support\Facades\Route;
 | token door, for the dev box's `pack build` script; both stand behind the
 | same `EnsureAdmin` (users.is_admin) and call the same actions.
 |
-| Non-admins get a **404**, not a 403: as far as an ordinary parent is
+| Non-admins get a **404**, not a 403: as far as a signed-in non-operator is
 | concerned this section does not exist, and the sidebar never renders a link
 | to it (see AppSidebar.vue).
 |
-| Not gated on `verified` — same reasoning as the parent dashboard
-| (SERVER_BUILD_PLAN.md Q11): MAIL_MAILER is `log`, and locking the operator
-| out of their own publishing tool behind an unread mail helps nobody.
+| Not gated on `verified`: MAIL_MAILER is `log` (SERVER_BUILD_PLAN.md Q11), and
+| locking the operator out of their own publishing tool behind an unread mail
+| helps nobody. Email verification is not a Fortify feature here at all.
 |
 */
 

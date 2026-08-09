@@ -22,10 +22,10 @@ extends RefCounted
 ## [/codeblock]
 ##
 ## [b]Retries are OPT IN and default to one attempt.[/b] No screen may await a
-## request (8.2), so an interactive call -- sign in, list packs, start a download --
-## fires once and reports whatever happened. The backoff schedule exists for
-## background work (WP11's sync drain, the launch-time entitlement refresh), which
-## nothing is waiting on.
+## request (8.2), so an interactive call -- list packs, start a download -- fires
+## once and reports whatever happened. The backoff schedule exists for background
+## work (the launch-time device registration and entitlement refresh, a receipt
+## verification), which nothing is waiting on.
 ##
 ## [b]Base URL.[/b] Injected by [Backend] from [BackendConfig]; this class never
 ## reads a setting or a file.
@@ -59,15 +59,18 @@ const CODE_HTTP := "HTTP_ERROR"
 const CODE_VALIDATION := "VALIDATION_FAILED"
 
 ## Server codes this client actually branches on (DLC_SERVER.md 9, 11).
+##
+## [constant CODE_UNAUTHENTICATED] is the important one: it is the ONLY signal that
+## this device's token has stopped working, and [Backend] answers it by
+## re-registering the device and retrying rather than by telling anybody.
 const CODE_UNAUTHENTICATED := "UNAUTHENTICATED"
-const CODE_INVALID_CREDENTIALS := "INVALID_CREDENTIALS"
 const CODE_ENTITLEMENT_REQUIRED := "ENTITLEMENT_REQUIRED"
 const CODE_NOT_FOUND := "NOT_FOUND"
 const CODE_PACK_VERSION_NOT_FOUND := "PACK_VERSION_NOT_FOUND"
 const CODE_DOWNLOAD_LINK_EXPIRED := "DOWNLOAD_LINK_EXPIRED"
 const CODE_THROTTLED := "THROTTLED"
 
-## BL-52's codes (DLC_SERVER.md 4.3, 9). Two of the three are refusals that mean
+## The purchase codes (DLC_SERVER.md 9). Two of the three are refusals that mean
 ## OPPOSITE things to a caller, which is the whole reason they are separate codes:
 ## [codeblock]
 ## RECEIPT_INVALID    422  the store said no. STOP -- retrying is pointless
@@ -157,36 +160,12 @@ func request_json(method: int, path: String, body: Variant = null,
 	return result
 
 
-## Fires one request whose BODY IS RAW BYTES rather than JSON, and reads the answer
-## exactly as [method request_json] does.
-##
-## This is the paint upload (DLC_SERVER.md 11: "PUT /sync/paint/{book_uid}/{page},
-## raw PNG body, Content-Digest checked"). It is a separate entry point because
-## [method HTTPRequest.request] takes a [String] and would mangle a PNG on the way
-## through UTF-8; [method HTTPRequest.request_raw] is the only binary-safe form.
-##
-## [param headers] is applied VERBATIM -- for paint they are the ones the server's
-## own [code]202[/code] handed back, including the RFC 9530 [code]Content-Digest[/code],
-## and inventing them locally is exactly the mistake the negotiation exists to
-## prevent. No [code]Content-Type: application/json[/code] is added.
-func request_bytes(method: int, path: String, body: PackedByteArray,
-		options: Dictionary = {}) -> Dictionary:
-	var attempts := maxi(1, int(options.get("attempts", 1)))
-	var result := {}
-	for attempt in attempts:
-		result = await _request_once(method, path, body, options, "")
-		if bool(result[KEY_OK]) or not _is_retryable(result):
-			return result
-		if attempt < attempts - 1:
-			await _sleep(backoff_delay(attempt))
-	return result
-
-
 ## [code]POST /entitlements/verify[/code] -- turns a store receipt into an
-## entitlement on whichever owner this client's bearer names (BL-52,
-## DLC_SERVER.md 9). [b]The seam Phase 6's billing plugin plugs into[/b]: nothing
-## in the game calls it yet, because no store plugin exists to produce a
-## [param purchase_token].
+## entitlement on the device this client's bearer names (DLC_SERVER.md 9).
+## [b]The seam the billing plugin plugs into[/b], and the whole of "restore
+## purchases": the platform store hands back the same receipts on every device
+## signed into the same store account, and each device earns its own entitlement
+## rows by presenting them here.
 ##
 ## [b]There is no [code]pack_slug[/code] in the body, and that is a security
 ## property rather than an omission[/b]: the server resolves the pack from the SKU
@@ -207,6 +186,41 @@ func verify_receipt(platform: String, purchase_token: String, sku: String) -> Di
 		"purchase_token": purchase_token,
 		"sku": sku,
 	}, {"attempts": VERIFY_ATTEMPTS})
+
+
+## Turns any result dictionary into something a grown-up can act on. Branches on
+## the machine-readable [code]code[/code], never on the server's prose
+## (DLC_SERVER.md 11) -- the server's own message is the fallback, not the source.
+##
+## [b]The only place in the game this is ever rendered is the pack shop[/b]
+## (DLC_SERVER.md 8.2: failures are silent to the CHILD and surface, if at all,
+## where a grown-up deliberately went). No kid-facing screen calls it, and neither
+## does the startup registration -- a device that could not reach the server is
+## simply offline, which is a state rather than a message.
+static func describe_error(result: Dictionary) -> String:
+	var code := String(result.get(KEY_CODE, ""))
+	var message := String(result.get(KEY_MESSAGE, ""))
+	match code:
+		CODE_OFFLINE:
+			return "Could not reach the server. The game works fine without it."
+		CODE_TIMEOUT:
+			return "The server took too long to answer. Try again in a moment."
+		CODE_UNAUTHENTICATED:
+			return "This device could not be recognised. Please try again in a moment."
+		CODE_ENTITLEMENT_REQUIRED:
+			return "This device does not own that pack yet."
+		CODE_RECEIPT_INVALID:
+			return "The store did not recognise that purchase."
+		CODE_STORE_UNAVAILABLE:
+			return "The store could not be reached. Please try again later."
+		CODE_THROTTLED:
+			return "Too many tries. Please wait a minute."
+		CODE_VALIDATION:
+			return message if message != "" else "Please check the details and try again."
+		"":
+			return "" if bool(result.get(KEY_OK, false)) \
+				else "This version of the game has no book shop."
+	return message if message != "" else "Something went wrong (%s)." % code
 
 
 ## Whether a failed [method verify_receipt] is worth asking about again. False for
@@ -315,9 +329,6 @@ func _request_once(method: int, path: String, body: Variant, options: Dictionary
 	var error := OK
 	if body == null:
 		error = http.request(url, headers, method)
-	elif typeof(body) == TYPE_PACKED_BYTE_ARRAY:
-		# Binary-safe: request() would round-trip a PNG through a String.
-		error = http.request_raw(url, headers, method, body as PackedByteArray)
 	else:
 		error = http.request(url, headers, method, JSON.stringify(body))
 	if error != OK:
@@ -375,9 +386,7 @@ func _headers(body: Variant, options: Dictionary) -> PackedStringArray:
 		"Accept: application/json",
 		"User-Agent: %s/%s (%s)" % [USER_AGENT_PREFIX, _client_version, OS.get_name()],
 	])
-	# A raw-byte body brings its own Content-Type (paint uploads take the server's
-	# 202 instructions verbatim), so only a JSON body gets one invented for it.
-	if body != null and typeof(body) != TYPE_PACKED_BYTE_ARRAY:
+	if body != null:
 		headers.append("Content-Type: application/json")
 	# A signed download URL carries its own authorisation in the query string and
 	# must NOT get a bearer header (DLC_SERVER.md 7.4).

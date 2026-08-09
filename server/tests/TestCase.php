@@ -2,10 +2,9 @@
 
 namespace Tests;
 
-use App\Actions\Accounts\IssuedDeviceToken;
-use App\Actions\Devices\RegisterAnonymousDevice;
+use App\Actions\Devices\IssuedDeviceToken;
+use App\Actions\Devices\RegisterDevice;
 use App\Models\Device;
-use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 use Laravel\Fortify\Features;
@@ -36,45 +35,59 @@ abstract class TestCase extends BaseTestCase
     }
 
     /**
-     * Sign a device in the way `POST /auth/token` does, without going through
-     * the endpoint: a device row plus a token named after its device_uid.
+     * Put the default guard back to the session one.
      *
-     * Returns the bearer string, for `withToken(...)`.
+     * `auth:sanctum` calls `shouldUse('sanctum')`, which rewrites
+     * `auth.defaults.guard` **for the rest of the process**. In a test the
+     * container survives between calls, so after any API request a bare `auth`
+     * (session) route will happily accept a bearer token and a "a game token
+     * cannot do this" test silently passes for the wrong reason. Call this
+     * between an API call and a dashboard call.
+     */
+    protected function useSessionGuard(): static
+    {
+        $this->app?->make('auth')->shouldUse('web');
+
+        return $this->forgetResolvedGuards();
+    }
+
+    /**
+     * Register a device exactly the way `POST /api/v1/device/register` does.
      *
-     * @param  array<int, string>|null  $abilities  defaults to the full game set
+     * Goes through the real action rather than hand-rolling a token, so a test
+     * that uses it also proves the abilities are the ones the endpoint issues
+     * and the token really is minted on the device row.
+     */
+    protected function registerDevice(
+        string $deviceUid = 'device-uid-primary',
+        ?string $deviceName = null,
+        ?string $platform = null,
+    ): IssuedDeviceToken {
+        return app(RegisterDevice::class)->handle($deviceUid, $deviceName, $platform);
+    }
+
+    /**
+     * A bearer token for a device, without going through the endpoint.
+     *
+     * Omit `$device` for a fresh one — `DeviceFactory` mints a random uid, so
+     * two calls in one test are two devices rather than a unique-index
+     * collision. Pass `$abilities` to build a token that is deliberately
+     * missing one, which is how the `abilities:` gates are tested.
      */
     protected function issueDeviceToken(
-        User $user,
-        string $deviceUid = 'device-uid-primary',
+        ?Device $device = null,
         ?array $abilities = null,
         ?CarbonImmutable $expiresAt = null,
     ): string {
-        Device::factory()->for($user)->create(['device_uid' => $deviceUid]);
+        $device ??= Device::factory()->create();
 
         /** @var array<int, string> $default */
         $default = config('coloringbook.token.abilities');
 
-        return $user->createToken(
-            $deviceUid,
+        return $device->createToken(
+            $device->device_uid,
             $abilities ?? $default,
             $expiresAt ?? CarbonImmutable::now()->addDays((int) config('coloringbook.token.ttl_days')),
         )->plainTextToken;
-    }
-
-    /**
-     * The BL-52 twin: an **anonymous** device token, minted the way
-     * `POST /device/register` mints one — on the device row itself, because
-     * there is no account for it to hang off (§4.3).
-     *
-     * Goes through the real action rather than hand-rolling a token, so a test
-     * that uses it also proves the abilities are the anonymous set and the
-     * device really is `user_id IS NULL`.
-     */
-    protected function registerAnonymousDevice(
-        string $deviceUid = 'anonymous-device-uid',
-        ?string $deviceName = null,
-        ?string $platform = null,
-    ): IssuedDeviceToken {
-        return app(RegisterAnonymousDevice::class)->handle($deviceUid, $deviceName, $platform);
     }
 }

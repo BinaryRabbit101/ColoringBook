@@ -10,24 +10,36 @@ return new class extends Migration
      * Who owns what (DLC_SERVER.md §5 "Entitlements", §9).
      *
      * The server is the entitlement *authority*: the client caches this list
-     * for offline play but never decides what it owns, and every download is
-     * authorised against a row here (§9).
+     * for offline play but never decides what it owns, and every paid download
+     * is authorised against a row here (§9).
      *
-     * One row per (user, pack) — owning a pack is not a quantity. `source`
-     * records how it was acquired; WP3 only ever writes `free` (the implicit
-     * grant on first download of a free pack) and `promo`/`admin` (WP5's
-     * grant-by-email). `purchase` + the `platform*` columns are Phase 6.
+     * **The owner is a device.** There are no accounts: one row per
+     * (device, pack), and owning a pack is not a quantity. `source` records how
+     * it was acquired — `free` (the implicit grant on first download of a free
+     * pack), `purchase` (a verified store receipt), and `promo`/`gift`/`admin`
+     * (the operator's grant desk).
      *
      * `revoked_at` — a refund or an admin take-back — is deliberately *not* a
      * delete: it hides the books from the shelf while the pixels a child
-     * already painted stay on disk (§7.3). A revoked free pack stays revoked;
-     * the auto-grant never resurrects it.
+     * already painted stay on the tablet (§7.3). A revoked free pack stays
+     * revoked; the auto-grant never resurrects it.
+     *
+     * ## Receipt uniqueness is **per device**, on purpose
+     *
+     * `UNIQUE(device_id, platform, platform_txn_id)` rather than a global
+     * `UNIQUE(platform, platform_txn_id)`. Play Billing and StoreKit hand the
+     * same purchase token to every device signed into the same store account,
+     * and each of them legitimately earns its own row — that is the entire
+     * "restore purchases" mechanism, and Google Play *requires* non-consumables
+     * to be restorable. Within one device it is still once-only, so a replayed
+     * receipt cannot mint a second row. SQL treats NULLs as distinct, so rows
+     * with no platform (free/promo grants) are unaffected either way.
      */
     public function up(): void
     {
         Schema::create('entitlements', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('device_id')->constrained()->cascadeOnDelete();
             $table->foreignId('pack_id')->constrained()->cascadeOnDelete();
             $table->string('source'); // purchase|promo|free|gift|admin
             $table->string('platform')->nullable(); // google|apple|stripe|null
@@ -36,11 +48,8 @@ return new class extends Migration
             $table->timestamp('revoked_at')->nullable();
             $table->timestamps();
 
-            $table->unique(['user_id', 'pack_id']);
-            // A store transaction may only ever be redeemed once. SQLite (and
-            // MySQL) treat NULLs as distinct here, so the whole of WP3 — where
-            // both columns are null — is unaffected.
-            $table->unique(['platform', 'platform_txn_id']);
+            $table->unique(['device_id', 'pack_id']);
+            $table->unique(['device_id', 'platform', 'platform_txn_id']);
         });
     }
 

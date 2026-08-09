@@ -1,13 +1,19 @@
 class_name AdultGate
 extends Control
-## The grown-up check that stands in front of every account screen
+## The grown-up check that stands in front of anything to do with money
 ## (DLC_SERVER.md 4.1).
 ##
-## [b]It is a DETERRENT, not security.[/b] The design doc says so in as many words:
-## its job is to keep a five year old out of the sign-in screen, and it is the
-## industry-normal pattern for exactly that. Anyone who can do arithmetic can pass
-## it, which is the point -- the things worth protecting are protected server-side
-## (the game token carries no account-mutating abilities at all, DLC_SERVER.md 4.2).
+## [b]There are no accounts left for it to guard[/b] -- the app signs this device
+## in by itself and there is no login screen -- so what it protects now is the one
+## remaining grown-up decision: "Restore purchases", which talks to the platform
+## store. That is the right shape for a gate: not a secret, but a deliberate act a
+## five year old should not be able to trigger by tapping around.
+##
+## [b]It is a DETERRENT, not security.[/b] The design doc says so in as many words.
+## Anyone who can do arithmetic can pass it, which is the point -- the things worth
+## protecting are protected server-side (this device's token carries
+## [code]entitlements:read[/code] and [code]packs:download[/code] and nothing else,
+## DLC_SERVER.md 4.3).
 ##
 ## [b]Why the question is spelled out in WORDS.[/b] "What is fourteen plus nine?"
 ## rather than "14 + 9". A child who can already read digits and tap a number pad
@@ -17,7 +23,7 @@ extends Control
 ##
 ## [b]An overlay, not a screen[/b] -- same reasoning as [SettingsPanel]: it composes
 ## into [code]main.tscn[/code]'s overlay layer over whatever is showing. It writes
-## nothing, knows nothing about accounts, and only ever reports
+## nothing, knows nothing about what it is guarding, and only ever reports
 ## [signal passed] or [signal cancelled]. Signals up, calls down.
 
 ## The grown-up answered correctly.

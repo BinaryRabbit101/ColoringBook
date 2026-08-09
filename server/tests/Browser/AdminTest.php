@@ -2,6 +2,7 @@
 
 namespace Tests\Browser;
 
+use App\Models\Device;
 use App\Models\Entitlement;
 use App\Models\Pack;
 use App\Models\PackVersion;
@@ -131,48 +132,51 @@ class AdminTest extends DuskTestCase
         $this->assertSame(Pack::STATUS_PUBLISHED, Pack::query()->sole()->status);
     }
 
-    public function test_an_admin_grants_a_promo_entitlement_by_email(): void
+    public function test_an_admin_grants_a_promo_entitlement_by_device_uid(): void
     {
-        $parent = User::factory()->create(['email' => 'parent@example.com']);
+        $player = Device::factory()->create([
+            'device_uid' => 'tablet-uid-0001',
+            'device_name' => null,
+        ]);
         $pack = Pack::factory()->create(['slug' => 'meadow-mates', 'title' => 'Meadow Mates']);
 
         $this->browse(function (Browser $browser): void {
             $browser->loginAs(User::factory()->admin()->create())
                 ->visit('/admin/entitlements')
                 ->waitForText('Nothing granted yet.')
-                ->type('#email', 'parent@example.com')
+                ->type('#device_uid', 'tablet-uid-0001')
                 ->select('#pack_slug', 'meadow-mates')
                 ->select('#source', 'promo')
                 ->clickAtXPath("//button[normalize-space()='Grant']")
                 ->waitForText('Entitlement granted.')
                 ->waitUntilMissingText('Nothing granted yet.')
-                ->assertSee('parent@example.com')
+                ->assertSee('tablet-uid-0001')
                 ->assertSee('live');
         });
 
         $entitlement = Entitlement::query()->sole();
 
-        $this->assertSame($parent->id, $entitlement->user_id);
+        $this->assertSame($player->id, $entitlement->device_id);
         $this->assertSame($pack->id, $entitlement->pack_id);
         $this->assertSame(Entitlement::SOURCE_PROMO, $entitlement->source);
         $this->assertNull($entitlement->revoked_at);
     }
 
-    public function test_granting_to_an_address_with_no_account_is_a_field_error(): void
+    public function test_granting_to_an_unknown_device_is_a_field_error(): void
     {
         Pack::factory()->create(['slug' => 'meadow-mates', 'title' => 'Meadow Mates']);
 
         $this->browse(function (Browser $browser): void {
             $browser->loginAs(User::factory()->admin()->create())
                 ->visit('/admin/entitlements')
-                ->waitFor('#email')
-                ->type('#email', 'nobody@example.com')
+                ->waitFor('#device_uid')
+                ->type('#device_uid', 'nobody-at-all')
                 ->select('#pack_slug', 'meadow-mates')
                 ->clickAtXPath("//button[normalize-space()='Grant']")
                 // Beside the field the operator mistyped, not a red banner
                 // across the top: they got one of two inputs wrong and the
                 // form should say which.
-                ->waitForText('No account has that email address.')
+                ->waitForText('No device has that id.')
                 ->assertSee('Nothing granted yet.');
         });
 

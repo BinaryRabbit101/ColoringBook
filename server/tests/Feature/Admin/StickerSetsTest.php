@@ -10,7 +10,6 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\Concerns\AdminsPacks;
 use Tests\Concerns\AuthorsStickerSets;
-use Tests\Concerns\PaintsPages;
 use Tests\Concerns\PublishesPacks;
 use Tests\TestCase;
 
@@ -25,10 +24,10 @@ use Tests\TestCase;
  */
 class StickerSetsTest extends TestCase
 {
-    // PaintsPages is here for `useSessionGuard()` alone: `auth:sanctum`
+    // `useSessionGuard()` (TestCase) is why this dance exists: `auth:sanctum`
     // rewrites the default guard for the rest of the process, so a test that
     // hits the API and then the dashboard has to put it back.
-    use AdminsPacks, AuthorsStickerSets, PaintsPages, PublishesPacks, RefreshDatabase;
+    use AdminsPacks, AuthorsStickerSets, PublishesPacks, RefreshDatabase;
 
     protected function setUp(): void
     {

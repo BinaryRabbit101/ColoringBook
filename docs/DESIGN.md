@@ -106,8 +106,8 @@ The crayon row grows three features (designed 2026-08-07):
     wiggle and grow a corner peel badge; tapping the badge takes it off. The peel
     is its own history *kind* on BL-17's one timeline (undo re-sticks it beneath
     whatever was placed after it), and the save's placement list is rewritten the
-    instant it changes — placements are never on the sync wire, so no merge can
-    resurrect a peeled sticker.
+    instant it changes — the file on disk is the only record of it, so a peeled
+    sticker is peeled for good.
   - **A sticker may be animated (BL-41).** Its image is then a sprite-sheet PNG
     and its manifest entry carries `anim {hframes, vframes, frames, fps}` —
     played by `Sprite2D` frame-stepping on the page and `draw_texture_rect_region`
@@ -146,7 +146,10 @@ download in the hidden tab keeps its progress and its BL-31 wax stroke.
 There is **no separate completion screen** — neither for a page nor for the
 book (BL-11). Completion is celebrated on the coloring page itself (§2.2).
 
-Progress (which pages are colored, per book) persists to `user://` via a save system.
+Progress (which pages are colored, per book), the paint layers and the sticker placements all
+persist to `user://` via the save system, and that is the **only** copy: there are no
+accounts and nothing a player makes is ever uploaded (DLC_SERVER.md §6). Books, by contrast,
+come *down* from the server — a release build ships none (BL-25).
 
 ### 2.1 Free play, completion & the coloring lock (BL-10)
 
@@ -313,7 +316,7 @@ One autoload: `GameState`. Screens communicate upward via signals; `main.tscn` s
 - Textures: page art up to 2048×2048; keep ID maps lossless (VRAM-uncompressed) — they are correctness-critical. `rendering/textures/vram_compression/import_etc2_astc=true` gives ETC2/ASTC for everything else.
 - Touch targets ≥ 48 px logical (the crayon palette's controls use 64+, the settings gear 72); UI uses anchors/containers for portrait/landscape, and `scripts/components/safe_area.gd` wraps the shell in notch-safe margins.
 - Window stretch mode `canvas_items`, aspect `expand`. **Consequence worth knowing**: with the 1152×648 base viewport, a portrait window never narrows the logical canvas below 1152 — it grows the *height* instead (a 720×1280 window becomes a 1152×2048 canvas). Portrait layouts therefore key off **aspect ratio**, not width.
-- **The overlay layer takes one shared scale** (BL-48) — `scripts/components/overlay_metrics.gd`, `OverlayMetrics`. The same stretch that never narrows the canvas also means 1152 logical pixels are painted across ~390 pt of a phone, so an authored 600 px panel is a third of its intended physical size there. Every overlay (settings, adult gate, account/sign-in, pack shop, the coloring page's Start-over confirm, and the two shell buttons `main.gd` builds) is sized from three numbers: the measured **squeeze** (logical canvas px per point, exactly 1.0 on any desktop, so desktop layouts are unchanged by construction), a **content scale** capped at 2.4×, and a **touch floor** of 44 pt × the *uncapped* squeeze. In portrait a panel takes 94 % of the canvas width and any plain `BoxContainer` inside it stacks — an `HBoxContainer` is how a scene says "this row never stacks".
+- **The overlay layer takes one shared scale** (BL-48) — `scripts/components/overlay_metrics.gd`, `OverlayMetrics`. The same stretch that never narrows the canvas also means 1152 logical pixels are painted across ~390 pt of a phone, so an authored 600 px panel is a third of its intended physical size there. Every overlay (settings, adult gate, pack shop, the coloring page's Start-over confirm, and the two shell buttons `main.gd` builds) is sized from three numbers: the measured **squeeze** (logical canvas px per point, exactly 1.0 on any desktop, so desktop layouts are unchanged by construction), a **content scale** capped at 2.4×, and a **touch floor** of 44 pt × the *uncapped* squeeze. In portrait a panel takes 94 % of the canvas width and any plain `BoxContainer` inside it stacks — an `HBoxContainer` is how a scene says "this row never stacks".
 - Orientation: `display/window/handheld/orientation=6` (SENSOR) — portrait and landscape both allowed.
 - Android export: `godot/export_presets.cfg`, preset `Android`. See [ANDROID.md](ANDROID.md).
 

@@ -7,17 +7,17 @@ use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 /**
- * `POST /admin/entitlements` — a promo or gift claim, by parent email.
+ * `POST /admin/entitlements` — a promo or gift claim, by `device_uid`.
  *
- * `email` is deliberately not validated with `exists:users`: whether an
- * address belongs to an account is the action's answer (`USER_NOT_FOUND`),
- * and folding it into a 422 field bag would make "no such account" look like
- * a typo in the form.
+ * `device_uid` is deliberately not validated with `exists:devices`: whether a
+ * uid belongs to a registered device is the action's answer
+ * (`DEVICE_NOT_FOUND`), and folding it into a 422 field bag would make "no such
+ * device" look like a typo in the form.
  *
  * `purchase` and `free` are not offered. A purchase is written by the store
- * verification path (Phase 6) and a free claim writes itself on first
- * download; letting an operator forge either would make the `source` column
- * stop meaning anything.
+ * verification path and a free claim writes itself on first download; letting
+ * an operator forge either would make the `source` column stop meaning
+ * anything.
  */
 class GrantEntitlementRequest extends FormRequest
 {
@@ -27,7 +27,7 @@ class GrantEntitlementRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'email' => ['required', 'string', 'email', 'max:255'],
+            'device_uid' => ['required', 'string', 'max:64'],
             'pack_slug' => ['required', 'string', 'max:64'],
             'source' => ['sometimes', 'string', Rule::in([
                 Entitlement::SOURCE_PROMO,

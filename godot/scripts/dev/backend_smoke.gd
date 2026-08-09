@@ -1,6 +1,15 @@
 extends Node
-## Automated verification for WP10 -- the Godot backend client: adult gate, account,
-## entitlements and the real pack download/install (DLC_SERVER.md 4, 7, 8, 9, 11).
+## Automated verification for WP10 -- the Godot backend client: the automatic
+## device sign-in, entitlements, purchases and the real pack download/install
+## (DLC_SERVER.md 4.3, 7, 8, 9, 11).
+##
+## [b]There are no accounts to test.[/b] The app has no sign-in screen, no
+## registration, no linking and no sign-out: [method Backend.sign_in_device] posts
+## this installation's [code]device_uid[/code] to [code]/device/register[/code] at
+## launch and that is the whole of authentication. What replaces the old account
+## checks is (c) -- registration is silent, idempotent and carries exactly two
+## abilities -- and (h) -- a token the server rejects is REPLACED and the request
+## replayed, with nothing on screen ever hearing about it.
 ##
 ## [b]Run it HEADLESS, against a live local server[/b] -- unlike the other smokes it
 ## paints nothing, so there is nothing for a rasteriser to do:
@@ -11,7 +20,7 @@ extends Node
 ## Extra user args (after a bare `--`):
 ##   --base-url <url>   API root (default: whatever BackendConfig resolves,
 ##                      normally http://127.0.0.1:8123/api/v1)
-##   --stay             leave the scratch account, pack and stores in place
+##   --stay             leave the scratch device, pack and stores in place
 ##
 ## [b]What the server has to be holding[/b] before check (n) can run (BL-52). Two
 ## of these three the delta check already needed; the third is new:
@@ -37,25 +46,20 @@ extends Node
 ## and both Backend stores, via [method Backend.use_test_stores] (the mirror of
 ## [method GameState.set_save_root], and for the same reason). The player's real
 ## [code]user://auth.json[/code], [code]user://dlc/[/code] and save are never
-## opened. The scratch ACCOUNT it registers lives on the server; its email is
-## printed and written to [constant EMAIL_FILE] so a cleanup step can find it.
+## opened, and [member Backend.autostart_enabled] is cleared before the autoload's
+## launch session can register the DEVELOPER's real device.
 ##
 ## Checks, in order:
 ##   a  BackendConfig + ApiClient as pure logic: base URL, version comparison
 ##      (equal satisfies), the backoff schedule and its cap, header parsing
-##   b  with no account every Backend method is a NO-OP, and the shelf is exactly
-##      what BookDef.discover() returns -- EXCEPT the shop window (BL-25): the
-##      catalogue lists signed out, a FREE pack downloads with NO Authorization
-##      header at all and writes no entitlement row (BL-52), and only a PAID row's
-##      Get asks for a sign-in
-##   n  BL-52's anonymous device tier: lazy registration, a token carrying
-##      entitlements:read + packs:download and NEVER save:sync, GET /entitlements
-##      answering for a device, the receipt seam granting a PAID pack that then
-##      downloads -- all with nobody signed in and sync still off
-##   c  register -> token: auth.json written, ULID device uid, expiry parsed, a
-##      wrong password is INVALID_CREDENTIALS and does not disturb the stored
-##      token -- and BL-52's ADOPTION: what the device bought anonymously is the
-##      account's afterwards, and the anonymous token is gone
+##   b  with no token at all the shelf is exactly what BookDef.discover() returns,
+##      and the shop window still works (BL-25): the catalogue lists, a FREE pack
+##      downloads with NO Authorization header and writes no entitlement row, and
+##      a PAID one is refused by the SERVER rather than guessed at here
+##   c  the automatic device sign-in: POST /device/register with no auth, a token
+##      carrying exactly entitlements:read + packs:download, the SAME device_uid
+##      every time, idempotent re-registration, and GET /entitlements answering
+##      for a device
 ##   d  GET /packs lists coyote-book with the server's flags; GET /entitlements
 ##      caches, and is the update check
 ##   e  the install: manifest, signed URL, 950 KB downloaded with real progress,
@@ -68,23 +72,28 @@ extends Node
 ##      nevertheless SHELF-INVISIBLE because the built-in coyote wins de-duplication
 ##   g  the entitlement filter: a revoked pack is hidden but its FILES STAY, and an
 ##      offline refresh keeps the last known good list rather than emptying it
-##   h  an expired token means offline, silently -- and the DLC book stays visible
+##   h  [b]the 401 recovery[/b]: a token the server rejects is dropped, the device
+##      re-registers under the same uid and the request is REPLAYED -- silently,
+##      with the same entitlements on the other side, and the DLC book never
+##      leaves the shelf
 ##   i  the checksum gate and the zip-slip guard, as pure functions
 ##   j  the adult gate and the pack-shop row state machine, headless
-##   l  the real wiring in main.tscn: gear -> Settings -> Account -> GATE -> account
-##      panel, and the shelf's "More books" button, which is there whenever the
+##   l  the real wiring in main.tscn: gear -> Settings -> Restore -> GATE -> the
+##      restore, and the shelf's "More books" button, which is there whenever the
 ##      build has a server at all (BL-25)
-##   k  sign out: server told, auth.json cleared, cache dropped, PACK LEFT ON DISK
+##   k  purchases: a bad receipt is final, a good one grants, re-verifying is
+##      another 200 rather than a conflict, and restore_purchases() turns a list
+##      of receipts into the packs this device owns
 ##
 ## Exit code is 0 only if every check passes.
 
 const COYOTE_UID := "coyote-2026"
 const TEST_BOOK_UID := "test-book-2026"
-## The pack the dev server publishes (WP9). FREE, which since BL-52 means its
-## bytes are public: no token, no account, no identifier of any kind.
+## The pack the dev server publishes (WP9). FREE, which means its bytes are
+## public: no token, no identifier of any kind.
 const PACK_SLUG := "coyote-book"
-## A PAID pack, and the Play SKU it is sold under (BL-52). See the header for the
-## two commands that put it on the dev server; check (n) is the only user.
+## A PAID pack, and the Play SKU it is sold under. See the header for the two
+## commands that put it on the dev server; check (k) is the main user.
 const PAID_SLUG := "starter-stickers"
 const PAID_SKU := "coloringbook.starter_stickers"
 ## The platform the fake verifier is wired to in .env, and a purchase token it
@@ -103,17 +112,8 @@ const TEST_ROOT := "user://backend_smoke"
 const TEST_DLC_ROOT := "user://backend_smoke/dlc"
 const TEST_AUTH_PATH := "user://backend_smoke/auth.json"
 const TEST_ENTITLEMENTS_PATH := "user://backend_smoke/dlc/entitlements.json"
-## Where the scratch account's email is left for the cleanup step.
-const EMAIL_FILE := "user://backend_smoke/scratch_account.txt"
-## Scratch save root. Needed since WP11: signing in drains the sync queue, and a
-## harness must never push the DEVELOPER's real colouring to a scratch account.
-const TEST_SAVE_ROOT := "user://backend_smoke/state"
 
-## Password for the scratch account. Mixed case and a digit on purpose: a
-## production-config server applies Laravel's [code]Password::defaults()[/code],
-## which a long but all-lowercase passphrase does not satisfy.
-const SCRATCH_PASSWORD := "Wp10-Smoke-Passphrase-7"
-## Seconds to wait out the server's `throttle:6,1` on the auth routes, plus slack.
+## Seconds to wait out the server's `throttle:6,1` on /device/register, plus slack.
 const THROTTLE_WINDOW_SECONDS := 62.0
 
 const ADULT_GATE_SCENE: PackedScene = preload("res://scenes/components/adult_gate.tscn")
@@ -122,7 +122,6 @@ const PACK_SHOP_SCENE: PackedScene = preload("res://scenes/components/pack_shop.
 var _checks := 0
 var _failures := 0
 
-var _email := ""
 var _auth: AuthStore
 var _entitlements: EntitlementsStore
 var _base_url := ""
@@ -132,6 +131,9 @@ var _installed_bytes := 0
 
 
 func _ready() -> void:
+	# BEFORE the first frame: Backend's launch session waits one frame precisely so a
+	# harness can say "not with the developer's real device, you don't".
+	Backend.autostart_enabled = false
 	await get_tree().process_frame
 	await _run()
 
@@ -149,22 +151,21 @@ func _run() -> void:
 	TitleScreen.autostart_enabled = false
 
 	_check_pure_logic()
-	await _check_inert_without_account()
-	await _check_anonymous_device()
-	await _check_auth()
+	await _check_without_token()
+	await _check_device_registration()
 	await _check_catalog()
 	await _check_install()
 	await _check_delta_update()
 	_check_discovery()
 	await _check_entitlement_filter()
-	_check_expired_token()
+	await _check_token_recovery()
 	_check_verification_gates()
 	await _check_ui()
 	await _check_main_flow()
-	await _check_sign_out()
+	await _check_purchases()
 
 	print("\n=== %d/%d checks passed ===" % [_checks - _failures, _checks])
-	print("scratch account: %s" % (_email if _email != "" else "(none registered)"))
+	print("scratch device: %s" % Backend.get_device_uid())
 	if "--stay" in OS.get_cmdline_user_args():
 		print("[dev] --stay given; %s was kept."
 			% ProjectSettings.globalize_path(TEST_ROOT))
@@ -178,7 +179,6 @@ func _isolate() -> void:
 	_delete_recursive(TEST_ROOT)
 	DirAccess.make_dir_recursive_absolute(TEST_DLC_ROOT)
 	_base_url = _arg_value("--base-url", BackendConfig.get_base_url())
-	GameState.set_save_root(TEST_SAVE_ROOT)
 	_auth = AuthStore.new(TEST_AUTH_PATH)
 	_entitlements = EntitlementsStore.new(TEST_ENTITLEMENTS_PATH)
 	Backend.use_test_stores(_auth, _entitlements, TEST_DLC_ROOT, _base_url)
@@ -187,13 +187,12 @@ func _isolate() -> void:
 func _cleanup() -> void:
 	Backend.get_installer().uninstall(PACK_SLUG)
 	Backend.get_installer().uninstall(PAID_SLUG)
-	GameState.set_save_root("")
 	_delete_recursive(TEST_ROOT)
 	# Hand the real stores back so a --stay-less run leaves the autoload as it found
 	# it (this process is about to exit, but a harness that lies about that is a
 	# harness nobody trusts).
 	Backend.use_test_stores(AuthStore.new(), EntitlementsStore.new(),
-		BookDef.DLC_ROOT, BackendConfig.get_base_url(), SyncQueue.QUEUE_PATH)
+		BookDef.DLC_ROOT, BackendConfig.get_base_url())
 	print("   cleaned up %s" % ProjectSettings.globalize_path(TEST_ROOT))
 
 
@@ -283,20 +282,15 @@ func _check_pure_logic() -> void:
 	_expect(AuthStore.new_ulid() != ulid, "...and two of them differ")
 
 
-# ======================== b: no account configured means every method no-ops ==
+# ============================= b: a device that has never reached the server ==
 
-func _check_inert_without_account() -> void:
-	print("\n-- check b: with no account, Backend is inert --")
+func _check_without_token() -> void:
+	print("\n-- check b: with no token at all, the game is whole --")
 
-	_expect(not Backend.has_account(), "a fresh device has no account")
-	_expect(not Backend.is_signed_in(), "...and is not signed in")
+	_expect(not _auth.has_token(), "a fresh installation holds no token")
+	_expect(not Backend.is_signed_in(), "...so Backend reports it is not signed in")
 	_expect(not FileAccess.file_exists(TEST_AUTH_PATH),
 		"...and nothing has been written to auth.json yet")
-	_expect(Backend.get_account_email() == "", "there is no account email to show")
-	# WP11: with no account at all there is nothing to sync and nothing to explain,
-	# so the line is "Sync off" rather than a "last synced" that never was.
-	_expect(Backend.get_sync_status_text() == Backend.SYNC_OFF_TEXT,
-		"the account panel's sync line reads '%s'" % Backend.get_sync_status_text())
 	_expect(Backend.get_entitlements().is_empty(), "the entitlement cache is empty")
 	_expect(Backend.packs_needing_update().is_empty(), "nothing needs updating")
 	_expect(Backend.installed_packs().is_empty(), "no packs are installed")
@@ -309,96 +303,55 @@ func _check_inert_without_account() -> void:
 	_expect(Backend.filter_books(discovered).size() == discovered.size(),
 		"...the entitlement filter never touches a built-in book")
 
-	# --- the one thing that is NOT inert without an account (BL-25) -----------
-	# A shipped build has no books baked in, so a signed-out first launch has
-	# nothing but the shop window. GET /packs is optional-auth for exactly that.
-	var window: Dictionary = await Backend.fetch_packs()
+	# --- the shop window (BL-25) ---------------------------------------------
+	# A shipped build has no books baked in, so a first launch has nothing but the
+	# shop window. GET /packs is optional-auth for exactly that.
+	#
+	# fetch_packs() goes through Backend._authed(), which registers the device when
+	# it has no token -- so this is asserted through the RAW client, which is the
+	# only way to see the genuinely tokenless answer the route promises.
+	var window: Dictionary = await Backend.get_api().request_json(
+		HTTPClient.METHOD_GET, "/packs", null,
+		{"query": {"client_version": BackendConfig.get_client_version()}}
+	)
+	if bool(window[ApiClient.KEY_OK]) and typeof(window[ApiClient.KEY_DATA]) == TYPE_DICTIONARY:
+		window = window.duplicate()
+		window[ApiClient.KEY_DATA] = (window[ApiClient.KEY_DATA] as Dictionary).get("packs", [])
 	_expect(bool(window[Backend.KEY_OK]),
-		"GET /packs answers with NO account at all (%s)" % window[Backend.KEY_CODE])
+		"GET /packs answers with NO token at all (%s)" % window[Backend.KEY_CODE])
 	var offered: Array = window[Backend.KEY_DATA] as Array \
 		if typeof(window[Backend.KEY_DATA]) == TYPE_ARRAY else []
 	_expect(not offered.is_empty(),
-		"...and lists the catalogue signed out (%d pack(s))" % offered.size())
-	var owned_signed_out := false
+		"...and lists the catalogue tokenless (%d pack(s))" % offered.size())
+	var owned_tokenless := false
 	for raw: Variant in offered:
 		if typeof(raw) == TYPE_DICTIONARY and bool((raw as Dictionary).get("owned", false)):
-			owned_signed_out = true
-	_expect(not owned_signed_out, "...with nothing marked owned, because nobody is signed in")
+			owned_tokenless = true
+	_expect(not owned_tokenless,
+		"...with nothing marked owned, because the bearer names nobody")
 
-	var window_shop := PACK_SHOP_SCENE.instantiate() as PackShop
-	add_child(window_shop)
-	if not await _wait_for(func() -> bool: return not window_shop.get_rows().is_empty()):
-		_expect(false, "the pack shop renders the catalogue while signed out")
-	_expect(not window_shop.get_rows().is_empty(),
-		"the pack shop renders the catalogue while signed out (%d row(s))"
-		% window_shop.get_rows().size())
-
-	# --- BL-52: which rows the gate is actually for ---------------------------
-	# The hint used to greet every signed-out shopper. It now speaks only when
-	# something on the list really is behind the gate, because a free book no
-	# longer is.
-	var free_row := window_shop.get_row(PACK_SLUG)
-	var paid_row := window_shop.get_row(PAID_SLUG)
-	_expect(free_row != null and not free_row.needs_account(),
-		"a FREE row needs no account (is_free %s, owned %s)"
-		% [free_row.is_free() if free_row else "?", free_row.is_owned() if free_row else "?"])
-	_expect(paid_row != null and paid_row.needs_account(),
-		"...while a PAID one nobody owns still does -- see the header for its seed")
-	_expect(window_shop.gated_rows().size() == 1
-			and window_shop.get_status_text() == PackShop.SIGNED_OUT_HINT,
-		"...so the shop says what is still missing, for %d row(s) ('%s')"
-		% [window_shop.gated_rows().size(), window_shop.get_status_text()])
-
-	var asked_to_sign_in := [0]
-	window_shop.sign_in_requested.connect(func() -> void: asked_to_sign_in[0] += 1)
-	if paid_row != null:
-		paid_row.press_action()
-		paid_row.press_action()
-		await get_tree().process_frame
-		_expect(asked_to_sign_in[0] == 1 and not window_shop.is_installing(),
-			"a PAID Get asks for a SIGN-IN rather than failing silently (%d)"
-			% asked_to_sign_in[0])
-		_expect(paid_row.get_state() == PackShop.PackRow.STATE_CONFIRM,
-			"...leaving the row's 'Yes, download' where the grown-up left it (%s)"
-			% paid_row.get_state())
-	if free_row != null:
-		# The shop's own handler is taken off first: what is asserted here is the
-		# DECISION -- that a free Get goes to the download instead of to the gate --
-		# and the real tokenless install is done below, awaited, so it cannot still
-		# be in flight underneath the checks that follow.
-		for connection: Dictionary in free_row.download_requested.get_connections():
-			free_row.download_requested.disconnect(connection["callable"])
-		var wanted := [0]
-		free_row.download_requested.connect(func() -> void: wanted[0] += 1)
-		free_row.press_action()
-		free_row.press_action()
-		await get_tree().process_frame
-		_expect(wanted[0] == 1 and asked_to_sign_in[0] == 1,
-			"a FREE Get goes straight to the download, signed out (%d download(s), %d gate(s))"
-			% [wanted[0], asked_to_sign_in[0]])
-	else:
-		_expect(false, "the signed-out catalogue includes '%s'" % PACK_SLUG)
-	remove_child(window_shop)
-	window_shop.queue_free()
-
-	# --- BL-52: and the bytes really do arrive without a token ----------------
+	# --- and the bytes really do arrive without a token -----------------------
 	# DLC_SERVER.md 7.4: a free pack's manifest, archive and files are PUBLIC. This
-	# is the whole "free app content available to download without needing to create
-	# an account" requirement, proved against a real server.
-	_expect(_auth.get_entitlement_token() == "",
-		"there is no token of ANY kind on this device -- account or anonymous")
-	var public_install: Dictionary = await Backend.install_pack(PACK_SLUG)
+	# is the whole "free content downloads without an identifier" requirement,
+	# proved against a real server.
+	#
+	# Driven through the INSTALLER rather than through Backend.install_pack(), which
+	# would register the device first (and rightly: the game wants a token whenever
+	# it can have one). What is under test here is the SERVER's promise, so the
+	# request has to be made with the header genuinely absent.
+	_expect(_auth.get_live_token() == "",
+		"there is no token on this device, so none goes on the wire")
+	var public_install: Dictionary = await Backend.get_installer().install(PACK_SLUG)
 	_expect(bool(public_install[PackInstaller.KEY_OK]),
-		"install_pack('%s') succeeds with NO Authorization header (%s %s)"
-		% [PACK_SLUG, public_install[PackInstaller.KEY_CODE],
-			public_install[PackInstaller.KEY_MESSAGE]])
+		"a FREE pack installs with NO Authorization header (%s %s)"
+		% [public_install[PackInstaller.KEY_CODE], public_install[PackInstaller.KEY_MESSAGE]])
 	_expect(Backend.is_pack_installed(PACK_SLUG),
 		"...and the pack is on disk, downloaded by a device the server cannot name")
 	_expect(not _entitlements.has_data() and Backend.get_entitlements().is_empty(),
 		"...having written no entitlement anywhere: a public fetch grants nothing")
 	# A paid pack asks the same question and is refused, by the server, in the
 	# words the shop already knows how to read.
-	var refused: Dictionary = await Backend.install_pack(PAID_SLUG)
+	var refused: Dictionary = await Backend.get_installer().install(PAID_SLUG)
 	_expect(not bool(refused[PackInstaller.KEY_OK])
 			and String(refused[PackInstaller.KEY_CODE]) == ApiClient.CODE_UNAUTHENTICATED,
 		"...while a PAID pack is %s to the same tokenless request (%s)"
@@ -409,228 +362,75 @@ func _check_inert_without_account() -> void:
 		"the public install is removed again, so check (e) still starts from nothing")
 
 
-# ========================================= n: the anonymous device tier (BL-52) ==
-# DLC_SERVER.md 4.3 and 9. The claim under test: a household that bought a pack can
-# have it on a second tablet without an email address, a password or an account --
-# because the store already knows what it bought, and the server only has to verify
-# the receipt whichever device presents it.
+# ============================ c: the automatic device sign-in (DLC_SERVER 4.3) ==
+# The claim under test: the app authenticates itself. No screen, no email address,
+# no password, no linking -- one POST with a uid this installation generated for
+# itself, and a token that can do exactly two things.
 #
-# Everything below happens with NOBODY SIGNED IN. That is the point.
+# Everything below happens with nobody having typed anything. That is the point.
 
-func _check_anonymous_device() -> void:
-	print("\n-- check n: registering a device, and restoring a purchase onto it --")
+func _check_device_registration() -> void:
+	print("\n-- check c: the device signs itself in --")
 
-	_expect(not Backend.is_device_registered() and not _auth.has_anonymous_token(),
-		"nothing has registered yet -- the tier is LAZY, and free play never triggers it")
+	# The uid exists BEFORE any request: it is generated on first read and persisted
+	# straight away, so the very first registration already carries the identity
+	# every later one will.
 	var uid_before := Backend.get_device_uid()
+	_expect(uid_before.length() == 26,
+		"a device uid was generated before any request (%s)" % uid_before)
+	_expect(FileAccess.file_exists(TEST_AUTH_PATH),
+		"...and persisted immediately, so a crash cannot cost this device its purchases")
 
-	var registered: Dictionary = await Backend.ensure_device_registered()
+	var registered: Dictionary = await Backend.sign_in_device()
 	if String(registered[Backend.KEY_CODE]) == ApiClient.CODE_THROTTLED:
 		# `throttle:6,1`, and Laravel keys that limiter on (domain, ip) rather than on
-		# the route -- so the catalogue traffic check (b) just made shares the bucket
-		# with this route and with /auth/*. Being rate-limited is the server working;
-		# wait the window out rather than report a red run, exactly as check (c) does.
+		# the route -- so the catalogue traffic check (b) just made shares the bucket.
+		# Being rate-limited is the server working; wait the window out rather than
+		# report a red run.
 		print("   the 6-a-minute limiter is full; waiting %d s for the window."
 			% THROTTLE_WINDOW_SECONDS)
 		await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
-		registered = await Backend.ensure_device_registered()
+		registered = await Backend.sign_in_device()
 	_expect(bool(registered[Backend.KEY_OK]),
 		"POST /device/register answered with no auth at all (%s %s)"
 		% [registered[Backend.KEY_CODE], registered[Backend.KEY_MESSAGE]])
-	if not Backend.is_device_registered():
-		_expect(false, "the rest of check (n) needs a device token")
+	if not Backend.is_signed_in():
+		_expect(false, "the rest of the run needs a device token")
 		return
 
-	# --- the two identities, and the one ability that separates them ---------
+	# --- the identity, and the two things it may do --------------------------
 	_expect(Backend.get_device_uid() == uid_before,
-		"...for the SAME device_uid sign-in will send, so adoption can find this row")
-	_expect(not Backend.has_account() and not Backend.is_signed_in(),
-		"...without creating an account (has_account %s)" % Backend.has_account())
-	_expect(_auth.get_live_token() == "",
-		"...and get_live_token() -- the ACCOUNT accessor -- is still empty")
-	_expect(_auth.get_entitlement_token() == _auth.get_live_anonymous_token()
-			and _auth.get_entitlement_token() != "",
-		"...while get_entitlement_token() is now the anonymous one")
-	var abilities := _auth.get_anonymous_abilities()
-	_expect(Array(abilities).has("entitlements:read") and Array(abilities).has("packs:download"),
-		"the device token carries the two ownership abilities (%s)" % [abilities])
-	_expect(not Array(abilities).has("save:sync"),
-		"...and NEVER save:sync -- an anonymous device can own packs, never upload a picture")
+		"...for the SAME device_uid, which is what makes a re-registration find this row")
+	_expect(_auth.get_live_token() != "", "there is a live token on this device now")
+	var stored: Variant = JSON.parse_string(FileAccess.get_file_as_string(TEST_AUTH_PATH))
+	_expect(typeof(stored) == TYPE_DICTIONARY
+			and String((stored as Dictionary).get("token", "")) != "",
+		"auth.json holds the bearer token (%s)" % TEST_AUTH_PATH.get_file())
+	_expect(typeof(stored) == TYPE_DICTIONARY
+			and int((stored as Dictionary).get("expires_at", 0))
+				> int(Time.get_unix_time_from_system()),
+		"...and a future expiry parsed out of the ISO-8601 the server sent")
+	_expect(typeof(stored) == TYPE_DICTIONARY
+			and not (stored as Dictionary).has("email"),
+		"...and NOTHING that identifies a person: no email, no name, no password")
+	var abilities := _auth.get_abilities()
+	_expect(Array(abilities) == Array(Backend.DEVICE_ABILITIES),
+		"the token carries exactly %s (%s)" % [Backend.DEVICE_ABILITIES, abilities])
+	_expect(not _auth.is_expired(), "the token is live")
 
-	# The BL-52 non-negotiable, from the client's side: an anonymous token must not
-	# turn save-sync on. It keys off the account accessor, which is still "".
-	var queue := Backend.get_sync_queue()
-	_expect(queue != null and not queue.is_active(),
-		"the sync queue is STILL inert -- an anonymous token does not switch sync on")
-	_expect(Backend.get_sync_status_text() == Backend.SYNC_OFF_TEXT,
-		"...and the account panel still reads '%s'" % Backend.get_sync_status_text())
-	_expect(not Backend.has_pending_sync(), "...with nothing queued to go up")
+	# --- idempotence, which is the whole reason 401 recovery is safe ---------
+	var again: Dictionary = await Backend.sign_in_device()
+	_expect(bool(again[Backend.KEY_OK]) and again[Backend.KEY_DATA] == null,
+		"calling sign_in_device() again with a live token makes NO request")
+	_expect(Backend.get_device_uid() == uid_before,
+		"...and certainly no second identity (%s)" % Backend.get_device_uid())
 
-	# --- GET /entitlements answers for a device, not just for a user ---------
+	# --- GET /entitlements answers for a device ------------------------------
 	var listed: Dictionary = await Backend.refresh_entitlements()
 	_expect(bool(listed[Backend.KEY_OK]),
 		"GET /entitlements works on a device token (%s)" % listed[Backend.KEY_CODE])
 	_expect(_entitlements.has_data() and not Backend.owns_pack(PAID_SLUG),
 		"...and this device owns nothing yet, because nothing has been verified")
-
-	# --- the receipt seam ----------------------------------------------------
-	var rejected: Dictionary = await Backend.verify_purchase(
-		STORE_PLATFORM, BAD_RECEIPT, PAID_SKU)
-	_expect(not bool(rejected[Backend.KEY_OK])
-			and String(rejected[Backend.KEY_CODE]) == ApiClient.CODE_RECEIPT_INVALID,
-		"a receipt the store refuses is %s -- final, not worth retrying (%s)"
-		% [ApiClient.CODE_RECEIPT_INVALID, rejected[Backend.KEY_CODE]])
-	_expect(not ApiClient.is_verify_retryable(rejected),
-		"...and the client can tell that from the code alone")
-
-	var unknown: Dictionary = await Backend.verify_purchase(
-		STORE_PLATFORM, GOOD_RECEIPT, "coloringbook.no.such.product")
-	_expect(not bool(unknown[Backend.KEY_OK])
-			and String(unknown[Backend.KEY_CODE]) == ApiClient.CODE_NOT_FOUND,
-		"a SKU nobody sells is the house %s, so verify is not a price-list enumerator (%s)"
-		% [ApiClient.CODE_NOT_FOUND, unknown[Backend.KEY_CODE]])
-
-	var granted: Dictionary = await Backend.verify_purchase(
-		STORE_PLATFORM, GOOD_RECEIPT, PAID_SKU)
-	_expect(bool(granted[Backend.KEY_OK]),
-		"a good receipt grants the pack (%s %s)"
-		% [granted[Backend.KEY_CODE], granted[Backend.KEY_MESSAGE]])
-	var row: Variant = granted[Backend.KEY_DATA]
-	_expect(typeof(row) == TYPE_DICTIONARY
-			and String((row as Dictionary).get("pack_slug", "")) == PAID_SLUG,
-		"...answering ONE entitlement row, for the pack the SKU named (%s)"
-		% (String((row as Dictionary).get("pack_slug", "?")) if typeof(row) == TYPE_DICTIONARY
-			else "not a row"))
-	_expect(typeof(row) == TYPE_DICTIONARY
-			and String((row as Dictionary).get("source", "")) == "purchase",
-		"...recorded as a purchase rather than a free claim")
-
-	var again: Dictionary = await Backend.verify_purchase(
-		STORE_PLATFORM, GOOD_RECEIPT, PAID_SKU)
-	_expect(bool(again[Backend.KEY_OK]),
-		"re-verifying the SAME receipt is another 200, not a conflict (%s)"
-		% again[Backend.KEY_CODE])
-	_expect(Backend.get_entitlements().size() == 1,
-		"...and it is still ONE row: every launch may ask (%d)"
-		% Backend.get_entitlements().size())
-
-	# --- what the device owns, everywhere it is asked ------------------------
-	_expect(Backend.owns_pack(PAID_SLUG), "the cache says this device owns '%s'" % PAID_SLUG)
-	var painted: Dictionary = await Backend.fetch_packs()
-	var paid := _row_with_slug(painted[Backend.KEY_DATA], PAID_SLUG)
-	_expect(bool(paid.get("owned", false)),
-		"...and GET /packs paints owned:true for a DEVICE token too (BL-52)")
-
-	var bought: Dictionary = await Backend.install_pack(PAID_SLUG)
-	_expect(bool(bought[PackInstaller.KEY_OK]),
-		"a PAID pack downloads onto a device nobody has signed in on (%s %s)"
-		% [bought[PackInstaller.KEY_CODE], bought[PackInstaller.KEY_MESSAGE]])
-	_expect(Backend.is_pack_installed(PAID_SLUG),
-		"...which is 'bought once, owned everywhere' with no email address in it")
-	# Off the shelf again: every later check counts what is installed.
-	Backend.uninstall_pack(PAID_SLUG)
-
-
-# ======================================================== c: register + token ==
-
-func _check_auth() -> void:
-	print("\n-- check c: register, sign in, and what lands in auth.json --")
-
-	_email = "wp10-smoke-%d-%d@example.test" % [
-		int(Time.get_unix_time_from_system()), randi() % 100000
-	]
-	_write_text(EMAIL_FILE, _email)
-	print("   scratch account: %s" % _email)
-
-	var device_uid := Backend.get_device_uid()
-	_expect(device_uid.length() == 26,
-		"a device uid was generated before any request (%s)" % device_uid)
-
-	var registered: Dictionary = await Backend.register(_email, SCRATCH_PASSWORD, true)
-	if String(registered[Backend.KEY_CODE]) == ApiClient.CODE_THROTTLED:
-		# The auth routes are throttle:6,1 (DLC_SERVER.md 4.2). Two runs of this
-		# smoke inside a minute hit it, which is a property of the SERVER working,
-		# not a failure -- so wait the window out rather than reporting a red run.
-		print("   auth routes are rate-limited; waiting %d s for the window."
-			% THROTTLE_WINDOW_SECONDS)
-		await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
-		registered = await Backend.register(_email, SCRATCH_PASSWORD, true)
-	_expect(bool(registered[Backend.KEY_OK]),
-		"register + sign in succeeded (%s %s)"
-		% [registered[Backend.KEY_CODE], registered[Backend.KEY_MESSAGE]])
-	if not Backend.is_signed_in():
-		_expect(false, "the run cannot continue without a token")
-		return
-
-	_expect(Backend.is_signed_in(), "the device is signed in")
-	_expect(Backend.get_account_email() == _email,
-		"...as the account we registered (%s)" % Backend.get_account_email())
-	_expect(Backend.get_device_uid() == device_uid,
-		"...still the SAME device uid -- one installation is one dashboard row")
-	_expect(FileAccess.file_exists(TEST_AUTH_PATH),
-		"auth.json was written (%s)" % TEST_AUTH_PATH.get_file())
-
-	var stored: Variant = JSON.parse_string(FileAccess.get_file_as_string(TEST_AUTH_PATH))
-	_expect(typeof(stored) == TYPE_DICTIONARY
-			and String((stored as Dictionary).get("token", "")) != "",
-		"...with a bearer token in it")
-	_expect(typeof(stored) == TYPE_DICTIONARY
-			and int((stored as Dictionary).get("expires_at", 0))
-				> int(Time.get_unix_time_from_system()),
-		"...and a future expiry parsed out of the ISO-8601 the server sent")
-	_expect(_auth.has_ability("packs:download") and _auth.has_ability("entitlements:read")
-			and _auth.has_ability("save:sync"),
-		"the token carries exactly the three game abilities (%s)" % [_auth.get_abilities()])
-	_expect(not _auth.is_expired(), "the token is live")
-
-	# --- BL-52: adoption, which is what makes linking OPTIONAL ---------------
-	# The sign-in carried the same device_uid check (n) registered under, so the
-	# server moved that device's entitlements onto the account and revoked its
-	# tokens, inside the transaction that minted this one.
-	_expect(not _auth.has_anonymous_token(),
-		"the anonymous token is gone -- the server revoked it, so we do not keep the string")
-	_expect(_auth.get_entitlement_token() == _auth.get_live_token(),
-		"...and the entitlement accessor is the ACCOUNT token again")
-	# sign_in() refreshes the list without anybody awaiting it (8.2), so the shelf
-	# catches up on its own; this only has to see it land. Waiting on the ACCOUNT
-	# STAMP rather than on the pack matters: the anonymous cache is deliberately
-	# carried over rather than cleared (an empty list would blink every DLC book off
-	# the shelf for a frame), so "we own it" was already true and would have proved
-	# nothing about adoption.
-	if not await _wait_for(func() -> bool: return _entitlements.get_account() == _email):
-		await Backend.refresh_entitlements()
-	_expect(_entitlements.get_account() == _email,
-		"the cache now belongs to the grown-up who signed in (%s)"
-		% _entitlements.get_account())
-	_expect(Backend.owns_pack(PAID_SLUG),
-		"...and what the DEVICE bought anonymously is the ACCOUNT's ('%s' adopted)"
-		% PAID_SLUG)
-
-	var me: Dictionary = await Backend.fetch_me()
-	_expect(bool(me[Backend.KEY_OK]), "GET /me works with the stored bearer")
-	var me_data: Variant = me[Backend.KEY_DATA]
-	_expect(typeof(me_data) == TYPE_DICTIONARY
-			and String(((me_data as Dictionary).get("user", {}) as Dictionary).get("email", ""))
-				== _email,
-		"...and the server agrees which account this is")
-
-	# A wrong password must not disturb the token we already have.
-	var bad: Dictionary = await Backend.sign_in(_email, "not-the-password")
-	if String(bad[Backend.KEY_CODE]) == ApiClient.CODE_THROTTLED:
-		# Same `throttle:6,1` the register above already waits out (DLC_SERVER.md
-		# 4.2): register + token + this one is three of the six, and a second run of
-		# this smoke inside the window spends the rest. Being rate-limited is the
-		# server working, so wait rather than report a red run.
-		print("   auth routes are rate-limited again; waiting %d s for the window."
-			% THROTTLE_WINDOW_SECONDS)
-		await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
-		bad = await Backend.sign_in(_email, "not-the-password")
-	_expect(not bool(bad[Backend.KEY_OK])
-			and String(bad[Backend.KEY_CODE]) == ApiClient.CODE_INVALID_CREDENTIALS,
-		"a wrong password is %s, branchable without reading prose (%s)"
-		% [ApiClient.CODE_INVALID_CREDENTIALS, bad[Backend.KEY_CODE]])
-	_expect(Backend.is_signed_in() and Backend.get_account_email() == _email,
-		"...and the device is still signed in with the good token")
 
 
 # ============================================== d: the catalogue and the cache ==
@@ -1001,7 +801,7 @@ func _check_entitlement_filter() -> void:
 
 	# A successful fetch that OMITS the pack is the server revoking it -- the only
 	# thing that may ever hide a book (DLC_SERVER.md 9).
-	_entitlements.store([], Backend.get_account_email())
+	_entitlements.store([])
 	_expect(_entitlements.should_hide_book(PACK_SLUG),
 		"a successful fetch that omits the pack means revoked")
 	_expect(not Backend.is_book_visible(book), "...so its book leaves the shelf")
@@ -1036,52 +836,66 @@ func _check_entitlement_filter() -> void:
 	_expect(Backend.is_book_visible(book), "...and the book is still on the shelf")
 
 
-# ====================================== h: an expired token means offline, quietly ==
+# ======================================= h: a rejected token fixes itself, quietly ==
+# The single most important behaviour in the file, because it is what replaced the
+# refresh route AND the sign-in screen: there is nothing a player could do about a
+# dead token, so the client must simply get another one.
+#
+# Two failure shapes, deliberately separated:
+#   an EXPIRED token   the client knows it is dead and never sends it. The next
+#                      authed call registers first, so the request goes out
+#                      authorised on its FIRST attempt
+#   a REJECTED token   the client believes it is good, sends it, and gets a 401.
+#                      _authed() drops it, re-registers under the same uid and
+#                      REPLAYS the request -- which is only safe because the
+#                      re-registration is find-or-create on that uid
 
-func _check_expired_token() -> void:
-	print("\n-- check h: an expired token is silent offline mode --")
-
-	var live := _auth.get_token()
-	_auth.store_token(live, _auth.get_email(), _auth.get_abilities(),
-		int(Time.get_unix_time_from_system()) - 10)
-	# Re-inject the store so the facade re-reads it: expiry is a CLIENT-side belief,
-	# and the point of the check is that the belief stops the bearer header leaving.
-	# Without this the ApiClient would still be holding the (server-side perfectly
-	# good) token, and the two "tokenless" requests below would be authorised ones.
-	Backend.use_test_stores(_auth, _entitlements, TEST_DLC_ROOT, _base_url)
-	_expect(_auth.has_account() and _auth.is_expired(),
-		"the stored token is now expired")
-	_expect(not Backend.is_signed_in(), "...so the device is not signed in")
-	_expect(Backend.is_token_expired(),
-		"...and the account panel can tell 'expired' from 'never signed in'")
-	_expect(_auth.get_live_token() == "",
-		"...no dead bearer is ever sent (get_live_token is empty)")
+func _check_token_recovery() -> void:
+	print("\n-- check h: a token the server refuses is replaced, not reported --")
 
 	var runtime := BookDef.discover_runtime(TEST_DLC_ROOT)
-	_expect(not runtime.is_empty() and Backend.is_book_visible(runtime[0]),
-		"the DLC book is STILL on the shelf -- an expired token never takes a book away")
+	var owned_before := Backend.get_entitlements().size()
+	var uid := Backend.get_device_uid()
 
-	# BL-52 split this in two, and the split IS the entry. A lapsed token sends no
-	# bearer header, so both of these are tokenless requests to the same server --
-	# and the pack decides the answer, not the player.
-	var blocked: Dictionary = await Backend.install_pack(PAID_SLUG)
-	_expect(not bool(blocked[Backend.KEY_OK])
-			and String(blocked[Backend.KEY_CODE]) == ApiClient.CODE_UNAUTHENTICATED,
-		"a PAID pack is refused while the token is expired (%s)" % blocked[Backend.KEY_CODE])
-	_expect(not Backend.is_pack_installed(PAID_SLUG),
-		"...and did not land on disk")
-	var still_free: Dictionary = await Backend.install_pack(PACK_SLUG)
-	_expect(bool(still_free[PackInstaller.KEY_OK]),
-		"...while the FREE one still installs, because its bytes never needed the token (%s)"
-		% still_free[PackInstaller.KEY_CODE])
-	_expect(Backend.installed_pack_version(PACK_SLUG) >= 1,
-		"...leaving the pack installed either way")
-
-	# Put the live token back for the sign-out check.
-	var future := int(Time.get_unix_time_from_system()) + 86400
-	_auth.store_token(live, _auth.get_email(), _auth.get_abilities(), future)
+	# --- the client-side belief: an expired token is never put on the wire ----
+	_auth.store_token(_auth.get_token(), _auth.get_abilities(),
+		int(Time.get_unix_time_from_system()) - 10)
 	Backend.use_test_stores(_auth, _entitlements, TEST_DLC_ROOT, _base_url)
-	_expect(Backend.is_signed_in(), "restoring the expiry signs the device back in")
+	_expect(_auth.has_token() and _auth.is_expired(), "the stored token is now expired")
+	_expect(not Backend.is_signed_in(), "...so the facade reports it is not signed in")
+	_expect(_auth.get_live_token() == "", "...and no dead bearer can be sent")
+	_expect(not runtime.is_empty() and Backend.is_book_visible(runtime[0]),
+		"the DLC book is STILL on the shelf -- a lapsed token never takes a book away")
+
+	var recovered: Dictionary = await Backend.fetch_packs()
+	_expect(bool(recovered[Backend.KEY_OK]),
+		"an authed call on an expired token registers first and succeeds (%s)"
+		% recovered[Backend.KEY_CODE])
+	_expect(Backend.is_signed_in() and Backend.get_device_uid() == uid,
+		"...leaving a live token on the SAME device (%s)" % Backend.get_device_uid())
+
+	# --- the server-side refusal: a 401 the client did not see coming --------
+	# A token that is garbage on the wire but perfectly live as far as this device
+	# is concerned. That is exactly the shape of a revoked or rotated credential,
+	# and the only shape _authed()'s retry exists for.
+	var future := int(Time.get_unix_time_from_system()) + 86400
+	_auth.store_token("not-a-real-token-at-all", Backend.DEVICE_ABILITIES, future)
+	Backend.use_test_stores(_auth, _entitlements, TEST_DLC_ROOT, _base_url)
+	_expect(Backend.is_signed_in(), "the device believes it holds a live token")
+
+	var replayed: Dictionary = await Backend.refresh_entitlements()
+	_expect(bool(replayed[Backend.KEY_OK]),
+		"a 401 is answered by re-registering and REPLAYING the call (%s %s)"
+		% [replayed[Backend.KEY_CODE], replayed[Backend.KEY_MESSAGE]])
+	_expect(_auth.get_live_token() != "not-a-real-token-at-all" and Backend.is_signed_in(),
+		"...so the dead string is gone and a fresh token is on disk")
+	_expect(Backend.get_device_uid() == uid,
+		"...under the SAME device_uid, which is why the row is the same row (%s)" % uid)
+	_expect(Backend.get_entitlements().size() == owned_before,
+		"...and the device owns exactly what it owned before (%d)"
+		% Backend.get_entitlements().size())
+	_expect(not runtime.is_empty() and Backend.is_book_visible(runtime[0]),
+		"...with nothing having left the shelf while any of that happened")
 
 
 # ================================== i: the checksum gate and the zip-slip guard ==
@@ -1142,7 +956,7 @@ func _check_ui() -> void:
 	_expect(gate.get_question_text().begins_with("What is"),
 		"the gate asks an arithmetic question ('%s')" % gate.get_question_text())
 	gate.set_answer_text(str(gate.get_expected_answer() + 1))
-	_expect(not gate.submit() and not passed[0], "a wrong answer does not open the account screen")
+	_expect(not gate.submit() and not passed[0], "a wrong answer runs nothing behind the gate")
 	_expect(gate.get_hint_text() != "", "...it says so ('%s')" % gate.get_hint_text())
 	gate.set_answer_text(str(gate.get_expected_answer()))
 	_expect(gate.submit() and passed[0], "the right answer passes the gate")
@@ -1163,8 +977,29 @@ func _check_ui() -> void:
 		{"slug": "new-pack", "title": "New Friends", "is_free": true, "owned": false,
 			"bytes": 2500000, "latest_version": 1, "min_client_version": "0.1.0",
 			"page_count": 12},
+		{"slug": "paid-pack", "title": "Paid Friends", "is_free": false, "owned": false,
+			"bytes": 2500000, "latest_version": 1, "min_client_version": "0.1.0",
+			"page_count": 12},
 	])
-	_expect(shop.get_rows().size() == 3, "the shop listed %d packs" % shop.get_rows().size())
+	_expect(shop.get_rows().size() == 4, "the shop listed %d packs" % shop.get_rows().size())
+
+	# --- the pack decides, never the player -----------------------------------
+	# There is nobody to sign in, so the only question a row asks is whether the
+	# SERVER's two flags say this device may simply take the pack.
+	var paid_row := shop.get_row("paid-pack")
+	_expect(paid_row != null and paid_row.needs_purchase(),
+		"a row that is neither free nor owned has to be BOUGHT (is_free %s, owned %s)"
+		% [paid_row.is_free() if paid_row else "?", paid_row.is_owned() if paid_row else "?"])
+	_expect(paid_row != null and paid_row.get_state() == PackShop.PackRow.STATE_PURCHASE
+			and paid_row.get_action_button().disabled,
+		"...so it rests in '%s' and cannot start a download the server would refuse"
+		% (paid_row.get_state() if paid_row else "?"))
+	_expect(shop.purchasable_rows().size() == 1,
+		"...and it is the ONE row the shop counts as needing buying (%d)"
+		% shop.purchasable_rows().size())
+	var free_row := shop.get_row("new-pack")
+	_expect(free_row != null and not free_row.needs_purchase(),
+		"a FREE row needs nothing from anybody -- its bytes are public")
 
 	var installed_row := shop.get_row(PACK_SLUG)
 	_expect(installed_row != null
@@ -1251,22 +1086,23 @@ func _check_ui() -> void:
 	shop.queue_free()
 
 	# Error prose is derived from the machine-readable code, never the other way.
-	_expect(AccountPanel.describe_error({Backend.KEY_CODE: ApiClient.CODE_OFFLINE})
+	_expect(ApiClient.describe_error({Backend.KEY_CODE: ApiClient.CODE_OFFLINE})
 			.contains("works fine without it"),
-		"an offline sign-in reassures rather than alarms")
-	_expect(AccountPanel.describe_error({Backend.KEY_CODE: ApiClient.CODE_INVALID_CREDENTIALS})
-			!= "",
-		"...and a bad password says so")
+		"an offline shop reassures rather than alarms")
+	_expect(PackShop.describe_install_error(
+			{PackInstaller.KEY_CODE: ApiClient.CODE_ENTITLEMENT_REQUIRED})
+			== PackShop.PURCHASE_HINT,
+		"...and a pack this device is not entitled to points at the restore path")
 
 
 # ========================================= l: the wiring inside main.tscn ==
 # The overlays are trivial on their own; what is worth proving is that the ORDER
 # main.gd imposes is real -- there is no route from the settings panel to the
-# account panel that does not go through the gate (DLC_SERVER.md 4.1) -- and that
-# no kid-facing screen sprouts network state (8.2).
+# restore that does not go through the gate (DLC_SERVER.md 4.1) -- and that no
+# kid-facing screen sprouts network state (8.2).
 
 func _check_main_flow() -> void:
-	print("\n-- check l: the account route through main.tscn --")
+	print("\n-- check l: the restore route through main.tscn --")
 
 	var main := (load("res://scenes/main.tscn") as PackedScene).instantiate() as Main
 	main.quit_on_close_request = false
@@ -1289,45 +1125,44 @@ func _check_main_flow() -> void:
 	_expect(main.get_more_books_button().visible,
 		"...and 'More books' is there too, because this build has a server (BL-25)")
 
-	# --- settings -> account, via the gate ------------------------------------
+	# --- settings -> restore, via the gate ------------------------------------
+	# [b]There is no sign-in anywhere on this route.[/b] The panel names no person,
+	# offers no login, and the only thing behind the gate is a call to the store.
 	var settings := main.open_settings()
-	_expect(settings.get_account_text() == Backend.get_account_email(),
-		"settings shows the signed-in account ('%s')" % settings.get_account_text())
-	settings.get_account_button().pressed.emit()
+	_expect(settings.get_purchases_text() != ""
+			and not settings.get_purchases_text().contains("@"),
+		"settings shows what this DEVICE owns and names nobody ('%s')"
+		% settings.get_purchases_text())
+	settings.get_restore_button().pressed.emit()
 	await get_tree().process_frame
-	_expect(main.get_settings_panel() == null, "tapping Account closes settings")
+	_expect(main.get_settings_panel() != null,
+		"the panel stays open behind the gate -- the answer is reported into it")
 	_expect(main.get_adult_gate() != null,
-		"...and puts the ADULT GATE up (DLC_SERVER.md 4.1)")
-	_expect(main.get_account_panel() == null,
-		"...with no account screen behind it yet -- the gate is not decoration")
+		"...and tapping Restore puts the ADULT GATE up (DLC_SERVER.md 4.1)")
 
+	var owned_before := Backend.get_entitlements().size()
 	var gate := main.get_adult_gate()
 	gate.set_answer_text(str(gate.get_expected_answer() + 3))
 	gate.get_submit_button().pressed.emit()
 	await get_tree().process_frame
-	_expect(main.get_adult_gate() != null and main.get_account_panel() == null,
-		"a wrong answer gets no further")
+	_expect(main.get_adult_gate() != null,
+		"a wrong answer gets no further -- the gate is not decoration")
 
 	gate.set_answer_text(str(gate.get_expected_answer()))
 	gate.get_submit_button().pressed.emit()
 	await get_tree().process_frame
 	_expect(main.get_adult_gate() == null, "the right answer dismisses the gate")
-	var panel := main.get_account_panel()
-	_expect(panel != null, "...and opens the account panel")
-	if panel != null:
-		_expect(panel.get_state() == AccountPanel.STATE_SIGNED_IN,
-			"...in its signed-in state (%s)" % panel.get_state())
-		# WP11: signed in, so the line is a real "last synced" (the sign-in itself
-		# drains the queue). Its exact wording is sync_smoke's business; here it only
-		# has to be the signed-in shape rather than "Sync off" or "Offline".
-		_expect(panel.get_sync_text().begins_with("Last synced: "),
-			"...showing a real sync line ('%s')" % panel.get_sync_text())
-		_expect(panel.get_pictures_check() != null
-				and panel.get_pictures_check().button_pressed == Backend.is_picture_sync_enabled(),
-			"...and the 'Sync pictures' toggle (DLC_SERVER.md 6.2's metered-connection policy)")
-		panel.get_close_button().pressed.emit()
-		await get_tree().process_frame
-		_expect(main.get_account_panel() == null, "and Done closes it")
+	# The restore is a real round trip. With no billing plugin there are no receipts
+	# to present, so what it must do is re-read what the server already knows -- and
+	# above all NOT lose anything.
+	if not await _wait_for(func() -> bool:
+			return not main.get_settings_panel().get_restore_button().disabled):
+		_expect(false, "the restore finished and gave the button back")
+	_expect(Backend.get_entitlements().size() == owned_before,
+		"...and this device still owns exactly what it owned (%d)"
+		% Backend.get_entitlements().size())
+	main.close_settings()
+	await get_tree().process_frame
 
 	# --- the shelf's own affordance -------------------------------------------
 	main.get_more_books_button().pressed.emit()
@@ -1356,52 +1191,91 @@ func _wait_for(condition: Callable, seconds: float = 8.0) -> bool:
 	return false
 
 
-# ============================================================== k: signing out ==
+# ============================================================== k: purchases ==
+# DLC_SERVER.md 9. The claim under test, and the whole of what replaced account
+# linking: a device earns a paid pack by presenting a store receipt, and it can do
+# that on a tablet nobody has ever typed anything into.
 
-func _check_sign_out() -> void:
-	print("\n-- check k: signing out --")
+func _check_purchases() -> void:
+	print("\n-- check k: buying a pack, and restoring it onto this device --")
 	if not Backend.is_signed_in():
-		_expect(false, "signed in, so signing out means something")
+		_expect(false, "the device holds a token, so a purchase has an owner")
 		return
 
-	# Kept only long enough to prove the server really revoked it.
-	var revoked := _auth.get_token()
-	var result: Dictionary = await Backend.sign_out()
-	# [b]Deliberately not asserted on `ok`.[/b] Signing out is unconditional
-	# locally, and it has to be: DELETE /auth/token answers 204 No Content, and
-	# under `php artisan serve` the socket closes before Godot's HTTPClient reads
-	# the status line, so a sign-out that DID revoke the token reports a transport
-	# error. What matters is the two lines below and the 401 further down -- the
-	# state, not the courier.
-	print("   sign-out reported: status=%s code=%s"
-		% [result[ApiClient.KEY_STATUS], result[Backend.KEY_CODE]])
-	_expect(not Backend.is_signed_in() and not Backend.has_account(),
-		"the device is signed out whatever the server's answer looked like")
-	_expect(_auth.get_token() == "" and _auth.get_email() == "",
-		"...auth.json no longer holds a token or an email")
-	_expect(_auth.get_device_uid().length() == 26,
-		"...but the device uid is KEPT, so signing back in is the same dashboard row")
-	_expect(not _entitlements.has_data(),
-		"...the entitlement cache is dropped with the account it belonged to")
+	_expect(not Backend.owns_pack(PAID_SLUG),
+		"this device does not own '%s' yet" % PAID_SLUG)
 
-	# The rule this whole section exists for (DLC_SERVER.md 7.3).
+	# --- the refusals, which mean OPPOSITE things and so are separate codes ---
+	var rejected: Dictionary = await Backend.verify_purchase(
+		STORE_PLATFORM, BAD_RECEIPT, PAID_SKU)
+	_expect(not bool(rejected[Backend.KEY_OK])
+			and String(rejected[Backend.KEY_CODE]) == ApiClient.CODE_RECEIPT_INVALID,
+		"a receipt the store refuses is %s -- final, not worth retrying (%s)"
+		% [ApiClient.CODE_RECEIPT_INVALID, rejected[Backend.KEY_CODE]])
+	_expect(not ApiClient.is_verify_retryable(rejected),
+		"...and the client can tell that from the code alone")
+
+	var unknown: Dictionary = await Backend.verify_purchase(
+		STORE_PLATFORM, GOOD_RECEIPT, "coloringbook.no.such.product")
+	_expect(not bool(unknown[Backend.KEY_OK])
+			and String(unknown[Backend.KEY_CODE]) == ApiClient.CODE_NOT_FOUND,
+		"a SKU nobody sells is the house %s, so verify is not a price-list enumerator (%s)"
+		% [ApiClient.CODE_NOT_FOUND, unknown[Backend.KEY_CODE]])
+
+	# --- the grant ------------------------------------------------------------
+	var granted: Dictionary = await Backend.verify_purchase(
+		STORE_PLATFORM, GOOD_RECEIPT, PAID_SKU)
+	_expect(bool(granted[Backend.KEY_OK]),
+		"a good receipt grants the pack (%s %s)"
+		% [granted[Backend.KEY_CODE], granted[Backend.KEY_MESSAGE]])
+	var row: Variant = granted[Backend.KEY_DATA]
+	_expect(typeof(row) == TYPE_DICTIONARY
+			and String((row as Dictionary).get("pack_slug", "")) == PAID_SLUG,
+		"...answering ONE entitlement row, for the pack the SKU named (%s)"
+		% (String((row as Dictionary).get("pack_slug", "?")) if typeof(row) == TYPE_DICTIONARY
+			else "not a row"))
+	_expect(typeof(row) == TYPE_DICTIONARY
+			and String((row as Dictionary).get("source", "")) == "purchase",
+		"...recorded as a purchase rather than a free claim")
+	_expect(Backend.owns_pack(PAID_SLUG),
+		"...and the cache says this device owns '%s'" % PAID_SLUG)
+
+	# --- restore: the same receipt, again, as many times as it likes ---------
+	# This is the whole "own once, everywhere" story now. The platform store hands
+	# back the same purchase token on a second device; restore_purchases() presents
+	# it and the device earns its own entitlement row.
+	var restored: Dictionary = await Backend.restore_purchases([
+		{"platform": STORE_PLATFORM, "purchase_token": GOOD_RECEIPT, "sku": PAID_SKU},
+	])
+	_expect(bool(restored[Backend.KEY_OK])
+			and int(restored[Backend.KEY_RESTORED]) == 1,
+		"restore_purchases() re-verified %d receipt(s) without a conflict (%s)"
+		% [int(restored.get(Backend.KEY_RESTORED, -1)), restored[Backend.KEY_CODE]])
+	_expect(Backend.get_entitlements().size() == 1,
+		"...and it is still ONE row: every launch may ask (%d)"
+		% Backend.get_entitlements().size())
+	var empty: Dictionary = await Backend.restore_purchases([])
+	_expect(bool(empty[Backend.KEY_OK]) and int(empty[Backend.KEY_RESTORED]) == 0,
+		"...while a restore with no receipts to present is a plain re-read, not an error")
+
+	# --- and what ownership actually buys -------------------------------------
+	var painted: Dictionary = await Backend.fetch_packs()
+	var paid := _row_with_slug(painted[Backend.KEY_DATA], PAID_SLUG)
+	_expect(bool(paid.get("owned", false)),
+		"GET /packs paints owned:true for this device's token")
+
+	var bought: Dictionary = await Backend.install_pack(PAID_SLUG)
+	_expect(bool(bought[PackInstaller.KEY_OK]),
+		"a PAID pack downloads onto a device nobody has signed in on (%s %s)"
+		% [bought[PackInstaller.KEY_CODE], bought[PackInstaller.KEY_MESSAGE]])
+	_expect(Backend.is_pack_installed(PAID_SLUG),
+		"...which is 'bought once, owned everywhere' with no email address in it")
+
+	# The rule the whole delivery layer exists to keep (DLC_SERVER.md 7.3).
 	_expect(Backend.is_pack_installed(PACK_SLUG),
-		"...and the downloaded pack is STILL ON DISK")
-	var runtime := BookDef.discover_runtime(TEST_DLC_ROOT)
-	_expect(runtime.size() == 1 and Backend.is_book_visible(runtime[0]),
-		"...and its book is still discoverable and still visible")
-
-	# The token really is dead server-side -- driven through the raw client, because
-	# the facade correctly refuses to use a token it no longer has.
-	Backend.get_api().set_token(revoked)
-	var after: Dictionary = await Backend.get_api().request_json(HTTPClient.METHOD_GET, "/me")
-	Backend.get_api().set_token("")
-	_expect(not bool(after[ApiClient.KEY_OK])
-			and int(after[ApiClient.KEY_STATUS]) == 401,
-		"the revoked token is rejected by the server (%d %s)"
-		% [int(after[ApiClient.KEY_STATUS]), after[ApiClient.KEY_CODE]])
-
+		"the free pack from check (e) is STILL ON DISK through all of that")
 	_expect(Backend.uninstall_pack(PACK_SLUG), "uninstall_pack() removes it on request")
+	Backend.uninstall_pack(PAID_SLUG)
 	_expect(BookDef.discover_runtime(TEST_DLC_ROOT).is_empty(),
 		"...and the shelf drops it on the next scan")
 
@@ -1446,15 +1320,6 @@ func _arg_value(flag: String, fallback: String) -> String:
 		if args[i] == flag:
 			return args[i + 1]
 	return fallback
-
-
-static func _write_text(path: String, text: String) -> void:
-	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
-		return
-	file.store_string(text)
-	file.close()
 
 
 static func _delete_recursive(path: String) -> void:

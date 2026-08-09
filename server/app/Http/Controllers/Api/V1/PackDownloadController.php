@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers\Api\V1;
 
-use App\Concerns\ResolvesEntitlementOwner;
+use App\Concerns\ResolvesDevice;
 use App\Exceptions\ApiException;
 use App\Http\Controllers\Controller;
 use App\Models\Pack;
@@ -29,7 +29,7 @@ use Symfony\Component\HttpFoundation\Response;
  *   `HTTPRequest.download_file` stream an 8 MB pack straight into
  *   `user://dlc/<slug>.incoming/` without minding auth headers.
  *
- * ## Free packs are public (BL-52, §7.4)
+ * ## Free packs are public (§7.4)
  *
  * The first half used to be flatly `auth:sanctum` + `abilities:packs:download`
  * + entitlement. It is now **optional auth**, and the gate depends on the pack:
@@ -48,7 +48,7 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class PackDownloadController extends Controller
 {
-    use ResolvesEntitlementOwner;
+    use ResolvesDevice;
 
     public function __construct(
         private readonly PackCatalog $catalog,
@@ -136,21 +136,21 @@ class PackDownloadController extends Controller
     private function authorised(Request $request, string $slug): array
     {
         $pack = $this->catalog->findDownloadable($slug);
-        $owner = $this->owner($request);
+        $device = $this->device($request);
 
         if ($pack->is_free) {
-            // Public (BL-52). A token is welcome but not required; when one is
-            // here the pack claims itself, exactly as it did before, so the
-            // shop's `owned` flag and `GET /entitlements` stay honest for
-            // signed-in households. A **revoked** row is left revoked — the
+            // Public. A token is welcome but not required; when one is here
+            // the pack claims itself, so the shop's `owned` flag and
+            // `GET /entitlements` stay an honest inventory for a registered
+            // device. A **revoked** row is left revoked — the
             // claim only ever fires when there is no row at all — and it does
             // not block the download, because revocation governs the row, not
             // whether a free pack is public.
-            if ($owner !== null) {
-                $this->entitlements->claimFree($owner, $pack);
+            if ($device !== null) {
+                $this->entitlements->claimFree($device, $pack);
             }
         } else {
-            abort_if($owner === null, Response::HTTP_UNAUTHORIZED);
+            abort_if($device === null, Response::HTTP_UNAUTHORIZED);
 
             // The ability gate used to be route middleware. Optional auth moved
             // it in here, where it can apply to paid packs only; the failure is
@@ -160,7 +160,7 @@ class PackDownloadController extends Controller
                 throw new MissingAbilityException(['packs:download']);
             }
 
-            $this->entitlements->authorise($owner, $pack);
+            $this->entitlements->authorise($device, $pack);
         }
 
         return [$pack, $this->catalog->versionOrLatest($pack, $this->requestedVersion($request))];

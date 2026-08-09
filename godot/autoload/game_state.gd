@@ -11,29 +11,24 @@ extends Node
 ## "player progress/settings -> user://, written by GameState only"). Screens hand
 ## it an [Image] or a status; they never open a file.
 ##
-## [b]The one exception, and its exact edges (WP10, WP11).[/b] The
-## [code]Backend[/code] autoload owns three paths under [code]user://[/code] and
-## nothing else:
+## [b]The one exception, and its exact edges (WP10).[/b] The [code]Backend[/code]
+## autoload owns two paths under [code]user://[/code] and nothing else:
 ## [codeblock]
-## user://auth.json        the device's account token   (AuthStore)
-## user://dlc/             installed DLC packs, and     (PackInstaller,
-##                         the entitlement cache         EntitlementsStore)
-## user://sync_queue.json  pending pushes, per-book      (SyncQueue, WP11)
-##                         base revisions and the
-##                         pull cursor
+## user://auth.json        this device's identity and  (AuthStore)
+##                         its bearer token
+## user://dlc/             installed DLC packs, and    (PackInstaller,
+##                         the entitlement cache        EntitlementsStore)
 ## [/codeblock]
-## None of the three is player progress: one is a credential for the device, one is
-## CONTENT that arrived after the build, and the third is BOOKKEEPING ABOUT a sync
-## -- what the server was last known to hold, never what the player did. This class
-## never opens any of them, and Backend never opens the save file, the paint layers
-## or anything else in here -- so there is still exactly one writer per file, which
-## is the property the rule was protecting.
+## Neither is player progress: one is a credential for the device, the other is
+## CONTENT that arrived after the build. This class never opens either of them, and
+## Backend never opens the save file, the paint layers or anything else in here --
+## so there is exactly one writer per file, which is the property the rule was
+## protecting.
 ##
-## [b]Sync writes go THROUGH this class[/b] (DLC_SERVER.md 8.2: "sync writes into
-## GameState through its existing API ... so there is still exactly one writer of
-## user://"). The three entry points WP11 uses are [method mark_page_status],
-## [method set_saved_page_index] and [method install_page_paint]; the paint-write
-## hook it listens to is [signal page_paint_written].
+## [b]Nothing outside this class ever writes a drawing.[/b] There is no cloud save
+## and no sync: what the child paints is written under [code]user://[/code] by the
+## methods below and lives nowhere else. [code]Backend[/code] downloads CONTENT
+## (books and stickers to colour in); it never uploads or downloads a picture.
 ## [method BookDef.discover] READS [code]user://dlc/[/code], and
 ## [method book_key] keys a DLC book's progress by the same
 ## [member BookDef.book_uid] as a built-in one, so a book delivered both ways has
@@ -72,27 +67,12 @@ signal autosave_due()
 ## Emitted after [method erase_page_progress] has reset ONE page.
 signal page_progress_erased(book: BookDef, page_index: int)
 ## Emitted after ONE page's paint layer has actually reached disk -- the paint
-## half of [signal save_written], and the hook DLC_SERVER.md 6.2 asks the sync
-## layer to use ("the sync layer hooks GameState.save_written and the paint-write
-## path; it never triggers an extra get_paint_image() readback of its own").
+## half of [signal save_written]. Dev/testing hook; the game itself never listens.
 ##
-## [b]It fires AFTER the write[/b], always, so a listener can hash or upload the
-## file it names without racing the save it is reacting to -- and so the local save
-## is never delayed by anything a listener does.
+## [b]It fires AFTER the write[/b], always, so a listener can read the file it
+## names without racing the save it is reacting to -- and so the local save is
+## never delayed by anything a listener does.
 signal page_paint_written(book: BookDef, page_index: int, path: String)
-## ONE page's paint layer arrived from somewhere that is NOT this device's canvas
-## -- in practice the copy [SyncQueue] pulled off the account's server (BL-50).
-## Emitted by [method install_page_paint] only, in ADDITION to
-## [signal page_paint_written].
-##
-## [b]Why it is a second signal rather than a flag on the first.[/b] Every
-## listener of [signal page_paint_written] is reacting to a file it (or the player)
-## just caused; this one says "a picture you did not draw is now on disk", which is
-## the only case where a screen already showing that page has something to do --
-## adopt it, so a grown-up who signs in mid-session sees the drawing another device
-## saved without closing the book (BL-50). Sync ignores it: it is the one that
-## wrote the file.
-signal page_paint_installed(book: BookDef, page_index: int, path: String)
 ## Emitted after [method set_page_locked] actually changed a page's coloring lock
 ## (BL-10). Nothing in the game listens today -- the screen that flipped the lock
 ## already knows -- but the shelf will want it the day a locked page is badged.
@@ -373,9 +353,9 @@ func clear_book() -> void:
 # -- an AUTOSAVE_INTERVAL_SECONDS tick that finds unsaved strokes.
 #
 # The save is keyed by BookDef.book_uid (schema v2, WP7): the only identity a book
-# keeps whether it is built in, installed from a DLC pack or synced from the
-# server. Display names are localisable, page counts change, and paths are
-# build-time facts -- none of the three can key progress.
+# keeps whether it is built in or installed from a DLC pack. Display names are
+# localisable, page counts change, and paths are build-time facts -- none of the
+# three can key progress.
 
 ## Root of everything this class writes. Ends with "/" or is a bare scheme.
 func get_save_root() -> String:
@@ -498,8 +478,8 @@ func get_paint_path_for_key(key: String, page_index: int) -> String:
 ## book whose paint directory is deleted loses both.
 ##
 ## [b]Why a second file and not a second channel of the first.[/b] The paint PNG is
-## the picture: it is what a coverage restore reads, what WP11 syncs, and what a
-## human would open to see what the child drew. Widening it would mean every reader
+## the picture: it is what a coverage restore reads, and what a human would open to
+## see what the child drew. Widening it would mean every reader
 ## of it had to know about animation. A page with no animated wax on it simply has
 ## no such file, which is also what makes "the four bakeable boxes cost exactly what
 ## they cost before" true on disk as well as in memory.
@@ -599,18 +579,6 @@ func has_book_progress(book_uid: String) -> bool:
 	return _books.has(book_uid)
 
 
-## Every book uid the save currently holds an entry for, sorted so two devices
-## build the same payload in the same order. Read-only: the sync layer needs to
-## enumerate the shelf without being handed the live dictionary.
-func get_book_uids() -> PackedStringArray:
-	var uids := Array(_books.keys())
-	uids.sort()
-	var out := PackedStringArray()
-	for uid: Variant in uids:
-		out.append(String(uid))
-	return out
-
-
 ## Status of one page: one of the STATUS_* constants. Unknown pages are untouched.
 func get_page_status(book_uid: String, page_index: int) -> String:
 	if not _books.has(book_uid):
@@ -694,33 +662,6 @@ func get_resume_index(book: BookDef) -> int:
 		return 0
 	var saved := int((_books[key] as Dictionary)["current_page_index"])
 	return clampi(saved, 0, book.page_count() - 1)
-
-
-## Moves the SAVED resume cursor of a book the player is not currently in, and
-## saves. Returns false when nothing was written.
-##
-## [b]This exists for the sync merge and for nothing else[/b] (DLC_SERVER.md 6.3:
-## "current_page_index = the one from whichever side has the newer
-## client_updated_at"). Every other cursor move comes from the player, through
-## [method start_book] / [method advance_page] / [method set_page_index].
-##
-## [b]The open book is refused, deliberately.[/b] A tablet reporting that the
-## grown-up's phone is on page 5 must never turn the page under a child who is
-## colouring page 2 -- 8.2's "no screen ever awaits a request" has a twin, which is
-## that no response ever yanks a screen. The book being read right now keeps its
-## local cursor; the merge reconciles it at the next save point, when the child's
-## own [code]client_updated_at[/code] is the newer one anyway.
-func set_saved_page_index(book: BookDef, page_index: int) -> bool:
-	if book == null or page_index < 0 or not book.has_page(page_index):
-		return false
-	if book == current_book:
-		return false
-	var entry := _entry_for(book, true)
-	if int(entry["current_page_index"]) == page_index:
-		return false
-	entry["current_page_index"] = page_index
-	save_now()
-	return true
 
 
 ## True when every page of [param book] is recorded complete.
@@ -825,54 +766,6 @@ func save_page_paint(book: BookDef, page_index: int, image: Image) -> bool:
 		push_error("GameState: could not write paint layer '%s' (error %d)." % [path, error])
 		return false
 	page_paint_written.emit(book, page_index, path)
-	return true
-
-
-## Puts a paint layer that came from SOMEWHERE ELSE on disk byte for byte -- in
-## practice the copy WP11 pulled off the server after losing a last-write-wins race
-## (DLC_SERVER.md 6.3). Returns false, without writing, if the bytes are not a
-## loadable image.
-##
-## [b]Why raw bytes and not an [Image].[/b] Round-tripping through
-## [method Image.save_png] would re-encode the picture: same pixels, different file,
-## different sha256. The whole paint protocol is sha-first -- "does the server
-## already have this picture?" -- so a re-encode would make the local file
-## permanently disagree with the digest the server just handed us, and the next save
-## point would upload a "new" picture that is really the server's own, overwriting
-## the very thing we just pulled. Writing the bytes we were given keeps the two ends
-## byte-identical and the negotiation honest.
-##
-## The bytes are still DECODED first, and only written if that works: a truncated or
-## hostile download must not be able to replace a child's picture with something the
-## page loader will later refuse.
-##
-## [b]This is still GameState writing the file[/b] -- Backend hands over bytes and
-## never touches [code]user://paint/[/code] itself.
-func install_page_paint(book: BookDef, page_index: int, png: PackedByteArray) -> bool:
-	if book == null or page_index < 0 or png.is_empty():
-		return false
-	var probe := Image.new()
-	if probe.load_png_from_buffer(png) != OK:
-		push_warning("GameState: refused a paint layer for page %d that did not decode as a PNG."
-			% [page_index + 1])
-		return false
-	var path := get_paint_path(book, page_index)
-	if path == "":
-		return false
-	_ensure_dir(path.get_base_dir())
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
-		push_error("GameState: could not write paint layer '%s' (error %d)."
-			% [path, FileAccess.get_open_error()])
-		return false
-	file.store_buffer(png)
-	file.close()
-	page_paint_written.emit(book, page_index, path)
-	# BL-50: and the half that is NOT true of a save -- somebody else drew this. A
-	# [ColoringPage] already open on this page restores it in response; without
-	# that the picture sits on disk under a blank canvas until the book is closed
-	# and reopened, and the blank canvas overwrites it at the next save point.
-	page_paint_installed.emit(book, page_index, path)
 	return true
 
 

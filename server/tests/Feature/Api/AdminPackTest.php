@@ -34,10 +34,8 @@ class AdminPackTest extends TestCase
 
     public function test_a_game_token_cannot_reach_the_admin_api(): void
     {
-        $user = User::factory()->admin()->create();
-
         // The full game ability set — and none of it is `admin`.
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken())
             ->getJson('/api/v1/admin/packs')
             ->assertForbidden()
             ->assertJsonPath('error.code', 'MISSING_ABILITY');

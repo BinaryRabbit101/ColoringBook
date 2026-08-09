@@ -3,7 +3,6 @@
 namespace Tests\Unit;
 
 use App\Models\Device;
-use App\Models\User;
 use App\Services\DeviceTokens;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -25,20 +24,20 @@ class DeviceTokensTest extends TestCase
 
     private function tokenExpiring(CarbonImmutable $at): PersonalAccessToken
     {
-        $user = User::factory()->create();
+        $device = Device::factory()->create(['device_uid' => 'device-uid']);
 
-        $user->createToken('device-uid', $this->tokens()->abilities(), $at);
+        $device->createToken('device-uid', $this->tokens()->abilities(), $at);
 
         /** @var PersonalAccessToken $token */
-        $token = $user->tokens()->firstOrFail();
+        $token = $device->tokens()->firstOrFail();
 
         return $token;
     }
 
-    public function test_the_abilities_are_exactly_the_three_the_game_needs(): void
+    public function test_the_abilities_are_exactly_the_two_the_game_needs(): void
     {
         $this->assertSame(
-            ['save:sync', 'entitlements:read', 'packs:download'],
+            ['entitlements:read', 'packs:download'],
             $this->tokens()->abilities(),
         );
     }
@@ -95,11 +94,11 @@ class DeviceTokensTest extends TestCase
 
     public function test_a_token_without_an_expiry_is_left_alone(): void
     {
-        $user = User::factory()->create();
-        $user->createToken('device-uid', $this->tokens()->abilities());
+        $device = Device::factory()->create();
+        $device->createToken('device-uid', $this->tokens()->abilities());
 
         /** @var PersonalAccessToken $token */
-        $token = $user->tokens()->firstOrFail();
+        $token = $device->tokens()->firstOrFail();
 
         $this->assertFalse($this->tokens()->shouldSlide($token));
     }
@@ -114,7 +113,7 @@ class DeviceTokensTest extends TestCase
         $this->tokens()->touchDevice($device);
         $this->assertTrue($device->fresh()->last_seen_at->equalTo($seenAt));
 
-        // Forced, e.g. by a sign-in or an explicit refresh.
+        // Forced, e.g. by a fresh registration.
         $this->tokens()->touchDevice($device, force: true);
         $this->assertTrue($device->fresh()->last_seen_at->equalTo(CarbonImmutable::now()));
     }
@@ -130,34 +129,20 @@ class DeviceTokensTest extends TestCase
         $this->assertTrue($device->fresh()->last_seen_at->equalTo(CarbonImmutable::now()));
     }
 
-    public function test_a_token_is_matched_to_its_device_by_name(): void
+    /**
+     * A device token is minted on the device row, so the tokenable *is* the
+     * identity — there is nothing to look up. An admin token hangs off a
+     * `User` and has no device at all.
+     */
+    public function test_the_device_behind_an_identity_is_the_tokenable_itself(): void
     {
-        $user = User::factory()->create();
-        Device::factory()->for($user)->create(['device_uid' => 'device-uid-tablet']);
-        $user->createToken('device-uid-tablet', $this->tokens()->abilities(), CarbonImmutable::now()->addDay());
+        $device = Device::factory()->create(['device_uid' => 'device-uid-tablet']);
 
-        /** @var PersonalAccessToken $token */
-        $token = $user->tokens()->firstOrFail();
+        $this->assertSame(
+            'device-uid-tablet',
+            $this->tokens()->deviceForIdentity($device)?->device_uid,
+        );
 
-        $this->assertSame('device-uid-tablet', $this->tokens()->deviceFor($user, $token)?->device_uid);
-    }
-
-    public function test_devices_are_flagged_with_whether_a_live_token_exists(): void
-    {
-        $user = User::factory()->create();
-        Device::factory()->for($user)->create(['device_uid' => 'live']);
-        Device::factory()->for($user)->create(['device_uid' => 'revoked']);
-        Device::factory()->for($user)->create(['device_uid' => 'stale']);
-
-        $user->createToken('live', ['save:sync'], CarbonImmutable::now()->addDay());
-        $user->createToken('stale', ['save:sync'], CarbonImmutable::now()->subDay());
-
-        $flags = $this->tokens()->devicesFor($user)
-            ->mapWithKeys(fn (Device $device) => [$device->device_uid => $device->is_signed_in])
-            ->all();
-
-        $this->assertTrue($flags['live']);
-        $this->assertFalse($flags['revoked']);
-        $this->assertFalse($flags['stale']);
+        $this->assertNull($this->tokens()->deviceForIdentity(null));
     }
 }

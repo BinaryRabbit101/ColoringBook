@@ -3,7 +3,6 @@
 namespace Database\Factories;
 
 use App\Models\Device;
-use App\Models\User;
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Support\Str;
 
@@ -18,7 +17,6 @@ class DeviceFactory extends Factory
     public function definition(): array
     {
         return [
-            'user_id' => User::factory(),
             // The client mints a ULID and keeps it in user:// forever.
             'device_uid' => (string) Str::ulid(),
             'device_name' => fake()->firstName()."'s tablet",

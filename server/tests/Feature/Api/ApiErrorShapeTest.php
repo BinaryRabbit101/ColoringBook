@@ -35,7 +35,7 @@ class ApiErrorShapeTest extends TestCase
 
     public function test_a_missing_token_is_unauthenticated(): void
     {
-        $this->getJson('/api/v1/me')
+        $this->getJson('/api/v1/entitlements')
             ->assertUnauthorized()
             ->assertJsonPath('error.code', 'UNAUTHENTICATED')
             ->assertJsonMissingPath('error.details');
@@ -43,23 +43,23 @@ class ApiErrorShapeTest extends TestCase
 
     public function test_a_bad_method_is_method_not_allowed(): void
     {
-        $this->putJson('/api/v1/auth/register')
+        $this->putJson('/api/v1/device/register')
             ->assertStatus(405)
             ->assertJsonPath('error.code', 'METHOD_NOT_ALLOWED');
     }
 
     public function test_validation_failures_carry_a_details_map(): void
     {
-        $response = $this->postJson('/api/v1/auth/register', [
-            'email' => 'not-an-email',
+        $response = $this->postJson('/api/v1/device/register', [
+            'device_uid' => 'short',
         ]);
 
         $response->assertStatus(422)
             ->assertJsonPath('error.code', 'VALIDATION_FAILED')
-            ->assertJsonPath('error.details.email.0', 'The email field must be a valid email address.');
-
-        $this->assertArrayHasKey('password', $response->json('error.details'));
-        $this->assertArrayHasKey('is_guardian', $response->json('error.details'));
+            ->assertJsonPath(
+                'error.details.device_uid.0',
+                'The device uid field must be at least 8 characters.',
+            );
 
         // The Laravel default shape must not leak through alongside ours.
         $response->assertJsonMissingPath('errors')
@@ -68,10 +68,7 @@ class ApiErrorShapeTest extends TestCase
 
     public function test_a_model_that_does_not_exist_is_not_found(): void
     {
-        $user = User::factory()->create();
-
-        $this->withToken($this->issueDeviceToken($user))
-            ->patchJson('/api/v1/profiles/01JNOTAREALULID0000000000', ['nickname' => 'Bo'])
+        $this->getJson('/api/v1/packs/no-such-pack')
             ->assertNotFound()
             ->assertJsonPath('error.code', 'NOT_FOUND');
     }
@@ -119,10 +116,10 @@ class ApiErrorShapeTest extends TestCase
     public function test_throttled_requests_report_a_throttled_code_with_retry_after(): void
     {
         for ($i = 0; $i < 6; $i++) {
-            $this->postJson('/api/v1/auth/register', []);
+            $this->postJson('/api/v1/device/register', []);
         }
 
-        $this->postJson('/api/v1/auth/register', [])
+        $this->postJson('/api/v1/device/register', [])
             ->assertStatus(429)
             ->assertJsonPath('error.code', 'THROTTLED')
             ->assertHeader('Retry-After');
@@ -134,10 +131,8 @@ class ApiErrorShapeTest extends TestCase
 
         // The same "no such row" that would be NOT_FOUND under /api, on a
         // dashboard route: the renderer must not touch it.
-        $response = $this->actingAs($user)
-            ->patch(route('child-profiles.update', '01JNOTAREALULID0000000000'), [
-                'nickname' => 'Ivy',
-            ]);
+        $response = $this->actingAs($user->fill(['is_admin' => true]))
+            ->get('/admin/packs/no-such-pack');
 
         $response->assertNotFound();
 

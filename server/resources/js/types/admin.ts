@@ -160,7 +160,8 @@ export type AuthoredStickerSet = {
 };
 
 export type AdminEntitlement = {
-    email: string;
+    device_uid: string;
+    device_name: string | null;
     pack_slug: string;
     source: string;
     granted_at: string;

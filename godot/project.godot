@@ -25,7 +25,7 @@ Backend="*res://autoload/backend.gd"
 
 [coloringbook]
 
-; WP10 (docs/DLC_SERVER.md §8.1). The DLC/sync API root, INCLUDING the /v1 prefix.
+; WP10 (docs/DLC_SERVER.md §8.1). The DLC API root, INCLUDING the /v1 prefix.
 ; This is a build fact, not player data, so it lives here rather than in user://;
 ; user://backend.json overrides it for a dev run against another machine
 ; (see scripts/backend/backend_config.gd).

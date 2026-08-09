@@ -2,10 +2,10 @@
 
 namespace Tests\Feature\Api;
 
+use App\Models\Device;
 use App\Models\Entitlement;
 use App\Models\Pack;
 use App\Models\PackVersion;
-use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\Concerns\PublishesPacks;
 use Tests\TestCase;
@@ -23,12 +23,12 @@ class EntitlementIndexTest extends TestCase
         $this->fakePackStorage();
         $pack = $this->publishFixturePack()->pack;
 
-        $user = User::factory()->create();
-        Entitlement::factory()->for($user)->for($pack)
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)
             ->source(Entitlement::SOURCE_PROMO)
             ->create(['granted_at' => now()->subDay()]);
 
-        $response = $this->withToken($this->issueDeviceToken($user))
+        $response = $this->withToken($this->issueDeviceToken($device))
             ->getJson('/api/v1/entitlements');
 
         // A bare array, exactly as §11 writes it.
@@ -49,9 +49,9 @@ class EntitlementIndexTest extends TestCase
         $this->fakePackStorage();
         $pack = $this->publishFixturePack()->pack;
 
-        $user = User::factory()->create();
-        Entitlement::factory()->for($user)->for($pack)->create();
-        $bearer = $this->issueDeviceToken($user);
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)->create();
+        $bearer = $this->issueDeviceToken($device);
 
         $this->withToken($bearer)->getJson('/api/v1/entitlements')
             ->assertJsonPath('0.latest_version', 1);
@@ -70,10 +70,10 @@ class EntitlementIndexTest extends TestCase
         PackVersion::factory()->for($pack, 'pack')->version(1)->requiresClient('0.7.0')->create();
         PackVersion::factory()->for($pack, 'pack')->version(2)->requiresClient('0.9.0')->create();
 
-        $user = User::factory()->create();
-        Entitlement::factory()->for($user)->for($pack)->create();
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)->create();
 
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->getJson('/api/v1/entitlements?client_version=0.7.5')
             ->assertOk()
             ->assertJsonPath('0.latest_version', 1);
@@ -84,10 +84,10 @@ class EntitlementIndexTest extends TestCase
         $this->fakePackStorage();
         $pack = $this->publishFixturePack()->pack;
 
-        $user = User::factory()->create();
-        Entitlement::factory()->for($user)->for($pack)->revoked()->create();
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)->revoked()->create();
 
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->getJson('/api/v1/entitlements')
             ->assertOk()
             ->assertJsonCount(0);
@@ -98,9 +98,9 @@ class EntitlementIndexTest extends TestCase
         $this->fakePackStorage();
         $pack = $this->publishFixturePack()->pack;
 
-        Entitlement::factory()->for(User::factory())->for($pack)->create();
+        Entitlement::factory()->for(Device::factory())->for($pack)->create();
 
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->getJson('/api/v1/entitlements')
             ->assertOk()
             ->assertJsonCount(0);
@@ -112,9 +112,9 @@ class EntitlementIndexTest extends TestCase
             ->assertUnauthorized()
             ->assertJsonPath('error.code', 'UNAUTHENTICATED');
 
-        $user = User::factory()->create();
+        $device = Device::factory()->create();
 
-        $this->withToken($this->issueDeviceToken($user, 'tablet', ['save:sync']))
+        $this->withToken($this->issueDeviceToken($device, ['packs:download']))
             ->getJson('/api/v1/entitlements')
             ->assertForbidden()
             ->assertJsonPath('error.code', 'MISSING_ABILITY');
@@ -125,8 +125,8 @@ class EntitlementIndexTest extends TestCase
         $this->fakePackStorage();
         $this->publishFixturePack(free: true);
 
-        $user = User::factory()->create();
-        $bearer = $this->issueDeviceToken($user);
+        $device = Device::factory()->create();
+        $bearer = $this->issueDeviceToken($device);
 
         // Free is not the same as owned: the list is what the device should
         // have installed, not the catalog in disguise.

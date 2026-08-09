@@ -2,10 +2,10 @@
 
 namespace Tests\Feature\Api;
 
+use App\Models\Device;
 use App\Models\Entitlement;
 use App\Models\Pack;
 use App\Models\PackVersion;
-use App\Models\User;
 use App\Services\PrivateDownloads;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
@@ -41,8 +41,8 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $this->publishFixturePack();
 
-        $user = User::factory()->create();
-        $bearer = $this->issueDeviceToken($user, 'tablet', ['save:sync']);
+        $device = Device::factory()->create();
+        $bearer = $this->issueDeviceToken($device, ['entitlements:read']);
 
         $this->withToken($bearer)
             ->getJson('/api/v1/packs/forest-friends/download')
@@ -55,9 +55,9 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $this->publishFixturePack();
 
-        $user = User::factory()->create();
+        $device = Device::factory()->create();
 
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->getJson('/api/v1/packs/forest-friends/download')
             ->assertForbidden()
             ->assertJsonPath('error.code', 'ENTITLEMENT_REQUIRED');
@@ -70,14 +70,14 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $pack = $this->publishFixturePack(free: true)->pack;
 
-        $user = User::factory()->create();
+        $device = Device::factory()->create();
 
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->get('/api/v1/packs/forest-friends/download')
             ->assertRedirect();
 
         $this->assertDatabaseHas('entitlements', [
-            'user_id' => $user->id,
+            'device_id' => $device->id,
             'pack_id' => $pack->id,
             'source' => Entitlement::SOURCE_FREE,
             'revoked_at' => null,
@@ -99,10 +99,10 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $pack = $this->publishFixturePack(free: true)->pack;
 
-        $user = User::factory()->create();
-        Entitlement::factory()->for($user)->for($pack)->source(Entitlement::SOURCE_FREE)->revoked()->create();
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)->source(Entitlement::SOURCE_FREE)->revoked()->create();
 
-        $bearer = $this->issueDeviceToken($user);
+        $bearer = $this->issueDeviceToken($device);
 
         $this->withToken($bearer)
             ->get('/api/v1/packs/forest-friends/download')
@@ -126,14 +126,14 @@ class PackDownloadTest extends TestCase
         $pack = $this->publishFixturePack()->pack;
         $pack->update(['status' => Pack::STATUS_RETIRED]);
 
-        $user = User::factory()->create();
-        Entitlement::factory()->for($user)->for($pack)->create();
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)->create();
 
         // Delisted from the shop...
         $this->getJson('/api/v1/packs/forest-friends')->assertNotFound();
 
         // ...but never taken away from a household that owns it (§7.3).
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->get('/api/v1/packs/forest-friends/download')
             ->assertRedirect();
     }
@@ -144,10 +144,10 @@ class PackDownloadTest extends TestCase
         $pack = $this->publishFixturePack()->pack;
         $pack->update(['status' => Pack::STATUS_DRAFT]);
 
-        $user = User::factory()->create();
-        Entitlement::factory()->for($user)->for($pack)->create();
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)->create();
 
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->getJson('/api/v1/packs/forest-friends/download')
             ->assertNotFound();
     }
@@ -157,7 +157,7 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $version = $this->publishFixturePack(free: true);
 
-        $manifest = $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $manifest = $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->getJson('/api/v1/packs/forest-friends/manifest')
             ->assertOk()
             ->json();
@@ -180,7 +180,7 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $version = $this->publishFixturePack(free: true);
 
-        $redirect = $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $redirect = $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->get('/api/v1/packs/forest-friends/download');
 
         $redirect->assertStatus(302);
@@ -211,7 +211,7 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $this->publishFixturePack(free: true);
 
-        $location = (string) $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $location = (string) $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->get('/api/v1/packs/forest-friends/download')
             ->headers->get('Location');
 
@@ -231,7 +231,7 @@ class PackDownloadTest extends TestCase
         $this->publishFixturePack(free: true);
         $this->publishFixturePack(free: true); // v2 exists
 
-        $location = (string) $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $location = (string) $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->get('/api/v1/packs/forest-friends/download?version=1')
             ->headers->get('Location');
 
@@ -249,7 +249,7 @@ class PackDownloadTest extends TestCase
         $path = 'books/coyote-2026/page_01_idmap.png';
         $expected = $version->files()[$path];
 
-        $redirect = $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $redirect = $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->get('/api/v1/packs/forest-friends/files/'.$path);
 
         $redirect->assertStatus(302);
@@ -271,7 +271,7 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $this->publishFixturePack(free: true);
 
-        $bearer = $this->issueDeviceToken(User::factory()->create());
+        $bearer = $this->issueDeviceToken(Device::factory()->create());
 
         $this->withToken($bearer)
             ->getJson('/api/v1/packs/forest-friends/files/books/coyote-2026/page_99.png')
@@ -284,7 +284,7 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $this->publishFixturePack(free: true);
 
-        $bearer = $this->issueDeviceToken(User::factory()->create());
+        $bearer = $this->issueDeviceToken(Device::factory()->create());
 
         foreach ([
             '../../../.env',
@@ -317,7 +317,7 @@ class PackDownloadTest extends TestCase
         $this->fakePackStorage();
         $this->publishFixturePack(free: true);
 
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->getJson('/api/v1/packs/forest-friends/download?version=7')
             ->assertNotFound()
             ->assertJsonPath('error.code', 'PACK_VERSION_NOT_FOUND');
@@ -332,7 +332,7 @@ class PackDownloadTest extends TestCase
         $this->assertSame(1, $first->version);
         $this->assertSame(2, $second->version);
 
-        $bearer = $this->issueDeviceToken(User::factory()->create());
+        $bearer = $this->issueDeviceToken(Device::factory()->create());
 
         $location = (string) $this->withToken($bearer)
             ->get('/api/v1/packs/forest-friends/download?version=1')
@@ -358,7 +358,7 @@ class PackDownloadTest extends TestCase
 
         config(['coloringbook.accel_redirect' => true]);
 
-        $location = (string) $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $location = (string) $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->get('/api/v1/packs/forest-friends/download')
             ->headers->get('Location');
 
@@ -384,7 +384,7 @@ class PackDownloadTest extends TestCase
         Storage::disk((string) config('coloringbook.storage.packs_disk'))
             ->delete($version->archive_path);
 
-        $location = (string) $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $location = (string) $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->get('/api/v1/packs/forest-friends/download')
             ->headers->get('Location');
 

@@ -2,10 +2,10 @@
 
 namespace Tests\Feature\Api;
 
+use App\Models\Device;
 use App\Models\Entitlement;
 use App\Models\Pack;
 use App\Models\PackVersion;
-use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\Concerns\PublishesPacks;
 use Tests\TestCase;
@@ -122,18 +122,18 @@ class PackCatalogTest extends TestCase
         $version = $this->publishFixturePack();
         $pack = $version->pack;
 
-        $owner = User::factory()->create();
-        Entitlement::factory()->for($owner)->for($pack)->create();
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)->create();
 
-        $stranger = User::factory()->create();
+        $other = Device::factory()->create();
 
-        $this->withToken($this->issueDeviceToken($owner))
+        $this->withToken($this->issueDeviceToken($device))
             ->getJson('/api/v1/packs')
             ->assertOk()
             ->assertJsonPath('packs.0.owned', true);
 
         $this->forgetResolvedGuards()
-            ->withToken($this->issueDeviceToken($stranger, 'stranger-device'))
+            ->withToken($this->issueDeviceToken($other))
             ->getJson('/api/v1/packs')
             ->assertOk()
             ->assertJsonPath('packs.0.owned', false);
@@ -144,10 +144,10 @@ class PackCatalogTest extends TestCase
         $this->fakePackStorage();
         $pack = $this->publishFixturePack()->pack;
 
-        $user = User::factory()->create();
-        Entitlement::factory()->for($user)->for($pack)->revoked()->create();
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)->revoked()->create();
 
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->getJson('/api/v1/packs')
             ->assertOk()
             ->assertJsonPath('packs.0.owned', false);
@@ -158,9 +158,9 @@ class PackCatalogTest extends TestCase
         $this->fakePackStorage();
         $this->publishFixturePack(free: true);
 
-        $user = User::factory()->create();
+        $device = Device::factory()->create();
 
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->getJson('/api/v1/packs')
             ->assertOk()
             ->assertJsonPath('packs.0.is_free', true)

@@ -158,8 +158,8 @@ class AuthoredPage extends Model
 
     /**
      * `page_01` for index 0. The API speaks 0-based indices everywhere and the
-     * *files* are 1-based, exactly as in the paint layout — one conversion, in
-     * one place (see `PaintStorage` for the same rule on the sync side).
+     * *files* are 1-based, matching what the client writes under
+     * `user://paint/<slug>/` — one conversion, in one place.
      */
     public function fileStem(): string
     {

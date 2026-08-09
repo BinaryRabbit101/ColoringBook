@@ -29,7 +29,7 @@ const selectClass =
     <div class="flex h-full flex-1 flex-col gap-6 p-4">
         <Heading
             title="Entitlements"
-            description="Grant a pack by parent email. Granting a revoked claim brings it back."
+            description="Grant a pack by device id. Granting a revoked claim brings it back."
         />
 
         <div class="rounded-lg border p-4">
@@ -40,14 +40,13 @@ const selectClass =
                 v-slot="{ errors, processing }"
             >
                 <div class="grid gap-2">
-                    <Label for="email">Parent email</Label>
+                    <Label for="device_uid">Device id</Label>
                     <Input
-                        id="email"
-                        name="email"
-                        type="email"
-                        placeholder="parent@example.com"
+                        id="device_uid"
+                        name="device_uid"
+                        placeholder="01JD…"
                     />
-                    <InputError :message="errors.email" />
+                    <InputError :message="errors.device_uid" />
                 </div>
 
                 <div class="grid gap-2">
@@ -108,7 +107,9 @@ const selectClass =
                     :key="i"
                     class="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"
                 >
-                    <span>{{ entitlement.email }}</span>
+                    <span>{{
+                        entitlement.device_name ?? entitlement.device_uid
+                    }}</span>
                     <span class="text-muted-foreground">{{
                         entitlement.pack_slug
                     }}</span>

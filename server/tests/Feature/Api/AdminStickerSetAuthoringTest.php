@@ -8,7 +8,6 @@ use App\Models\Pack;
 use App\Models\PackVersion;
 use App\Models\Sticker;
 use App\Models\StickerSet;
-use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\Concerns\AdminsPacks;
 use Tests\Concerns\AuthorsStickerSets;
@@ -42,9 +41,7 @@ class AdminStickerSetAuthoringTest extends TestCase
 
     public function test_a_game_token_cannot_author_sticker_sets(): void
     {
-        $user = User::factory()->admin()->create();
-
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken())
             ->getJson('/api/v1/admin/sticker-sets')
             ->assertForbidden()
             ->assertJsonPath('error.code', 'MISSING_ABILITY');

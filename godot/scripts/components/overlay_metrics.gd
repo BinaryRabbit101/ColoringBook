@@ -1,8 +1,7 @@
 class_name OverlayMetrics
 extends Node
 ## ONE scale for the whole overlay layer (BL-48) -- the settings panel, the adult
-## gate, the account/sign-in form, the pack shop and the coloring page's Start-over
-## confirm.
+## gate, the pack shop and the coloring page's Start-over confirm.
 ##
 ## [b]The problem it exists for.[/b] The game stretches [code]canvas_items[/code]
 ## with aspect [code]expand[/code] from a 1152x648 base, so the logical canvas

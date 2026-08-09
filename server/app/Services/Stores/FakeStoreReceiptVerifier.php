@@ -5,7 +5,7 @@ namespace App\Services\Stores;
 use App\Contracts\StoreReceiptVerifier;
 
 /**
- * The dev/test stand-in for a real store (BL-52, DLC_SERVER.md §9).
+ * The dev/test stand-in for a real store (DLC_SERVER.md §9).
  *
  * It exists so the whole receipt → entitlement → download path can be built and
  * tested before Play/App Store credentials exist, and so Phase 6 is a *binding*

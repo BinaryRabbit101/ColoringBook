@@ -3,10 +3,7 @@
 namespace App\Services;
 
 use App\Models\Device;
-use App\Models\User;
 use Carbon\CarbonImmutable;
-use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Database\Eloquent\Collection;
 use Laravel\Sanctum\PersonalAccessToken;
 
 /**
@@ -17,13 +14,19 @@ use Laravel\Sanctum\PersonalAccessToken;
  * be a write per API call, so the window only slides once it is
  * `slide_after_days` old — the player-visible behaviour is identical and the
  * database stays quiet. All of it is config-driven via `coloringbook.token`.
+ *
+ * There is exactly one kind of game token now: minted on a `Device` row by
+ * `POST /api/v1/device/register`, named after the client's `device_uid`, and
+ * carrying `entitlements:read` + `packs:download`. A client that gets a 401
+ * simply registers again — the endpoint is find-or-create, so re-auth is
+ * idempotent and there is no refresh route to keep alive.
  */
 class DeviceTokens
 {
     /**
-     * The abilities every game token is issued with. Nothing here can mutate
-     * the account: deleting it, changing the password or revoking another
-     * device is web-dashboard-only, behind a password re-confirmation.
+     * The abilities every device token is issued with. Nothing here can publish
+     * a pack (`admin` is minted only by `php artisan admin:token`) and nothing
+     * here can reach a route that isn't the catalog or the entitlement list.
      *
      * @return array<int, string>
      */
@@ -31,24 +34,6 @@ class DeviceTokens
     {
         /** @var array<int, string> $abilities */
         $abilities = config('coloringbook.token.abilities');
-
-        return $abilities;
-    }
-
-    /**
-     * What an **anonymous** device token carries (BL-52, §4.3): the set above
-     * minus `save:sync`, and that omission is the whole compliance story. An
-     * anonymous device may own packs and download them; it can never upload a
-     * child's artwork, so the only identifier the server ever holds without an
-     * account behind it is used solely to authenticate content the device
-     * already bought.
-     *
-     * @return array<int, string>
-     */
-    public function anonymousAbilities(): array
-    {
-        /** @var array<int, string> $abilities */
-        $abilities = config('coloringbook.token.anonymous_abilities');
 
         return $abilities;
     }
@@ -96,57 +81,15 @@ class DeviceTokens
     }
 
     /**
-     * The device a token belongs to. Tokens are *named* after the device_uid,
-     * which is the only link between Sanctum's table and ours.
-     */
-    public function deviceFor(User $user, PersonalAccessToken $token): ?Device
-    {
-        return Device::query()
-            ->where('user_id', $user->id)
-            ->where('device_uid', $token->name)
-            ->first();
-    }
-
-    /**
-     * The device behind a resolved identity, whichever kind it is (BL-52).
+     * The device behind a resolved `auth:sanctum` identity, or null.
      *
-     * An **anonymous** device token is minted on the device itself, so the
-     * tokenable *is* the device and there is nothing to look up. A linked
-     * device's token hangs off the user, and the name → `device_uid` link is
-     * the only thing that ties Sanctum's table to ours.
+     * A device token is minted on the device row itself, so the tokenable *is*
+     * the device and there is nothing to look up. An **admin** token hangs off a
+     * `User` and has no device at all, which is what the null covers.
      */
-    public function deviceForIdentity(mixed $identity, PersonalAccessToken $token): ?Device
+    public function deviceForIdentity(mixed $identity): ?Device
     {
-        if ($identity instanceof Device) {
-            return $identity;
-        }
-
-        return $identity instanceof User ? $this->deviceFor($identity, $token) : null;
-    }
-
-    /**
-     * The account's devices, each flagged with whether a live (unexpired)
-     * token still exists for it. That flag is what the dashboard's "sign this
-     * device out" button switches off.
-     *
-     * @return Collection<int, Device>
-     */
-    public function devicesFor(User $user): Collection
-    {
-        $active = $user->tokens()
-            ->where(function (Builder $query): void {
-                $query->whereNull('expires_at')
-                    ->orWhere('expires_at', '>', CarbonImmutable::now());
-            })
-            ->pluck('name')
-            ->all();
-
-        /** @var Collection<int, Device> $devices */
-        $devices = $user->devices()->get();
-
-        return $devices->each(function (Device $device) use ($active): void {
-            $device->setAttribute('is_signed_in', in_array($device->device_uid, $active, true));
-        });
+        return $identity instanceof Device ? $identity : null;
     }
 
     /**

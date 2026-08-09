@@ -18,10 +18,10 @@ class SlidingExpiryTest extends TestCase
 {
     use RefreshDatabase;
 
-    private function tokenFor(User $user): PersonalAccessToken
+    private function tokenFor(Device $device): PersonalAccessToken
     {
         /** @var PersonalAccessToken $token */
-        $token = $user->tokens()->firstOrFail();
+        $token = $device->tokens()->firstOrFail();
 
         return $token;
     }
@@ -30,16 +30,16 @@ class SlidingExpiryTest extends TestCase
     {
         $this->travelTo(CarbonImmutable::parse('2026-08-06 12:00:00'));
 
-        $user = User::factory()->create();
-        $bearer = $this->issueDeviceToken($user);
+        $device = Device::factory()->create();
+        $bearer = $this->issueDeviceToken($device);
 
         $this->travelTo(CarbonImmutable::parse('2026-08-09 12:00:00'));
 
-        $this->withToken($bearer)->getJson('/api/v1/me')->assertOk();
+        $this->withToken($bearer)->getJson('/api/v1/entitlements')->assertOk();
 
         $this->assertSame(
             CarbonImmutable::now()->addDays(90)->toIso8601String(),
-            CarbonImmutable::createFromInterface($this->tokenFor($user)->expires_at)->toIso8601String(),
+            CarbonImmutable::createFromInterface($this->tokenFor($device)->expires_at)->toIso8601String(),
         );
     }
 
@@ -47,19 +47,19 @@ class SlidingExpiryTest extends TestCase
     {
         $this->travelTo(CarbonImmutable::parse('2026-08-06 12:00:00'));
 
-        $user = User::factory()->create();
-        $bearer = $this->issueDeviceToken($user);
+        $device = Device::factory()->create();
+        $bearer = $this->issueDeviceToken($device);
 
-        $before = $this->tokenFor($user)->expires_at;
+        $before = $this->tokenFor($device)->expires_at;
 
         // Well inside the one-day slide threshold: no write.
         $this->travelTo(CarbonImmutable::parse('2026-08-06 20:00:00'));
 
-        $this->withToken($bearer)->getJson('/api/v1/me')->assertOk();
+        $this->withToken($bearer)->getJson('/api/v1/entitlements')->assertOk();
 
         $this->assertSame(
             CarbonImmutable::createFromInterface($before)->toIso8601String(),
-            CarbonImmutable::createFromInterface($this->tokenFor($user)->expires_at)->toIso8601String(),
+            CarbonImmutable::createFromInterface($this->tokenFor($device)->expires_at)->toIso8601String(),
         );
     }
 
@@ -69,25 +69,25 @@ class SlidingExpiryTest extends TestCase
 
         $this->travelTo(CarbonImmutable::parse('2026-08-06 12:00:00'));
 
-        $user = User::factory()->create();
-        $bearer = $this->issueDeviceToken($user);
+        $device = Device::factory()->create();
+        $bearer = $this->issueDeviceToken($device);
 
-        $before = $this->tokenFor($user)->expires_at;
+        $before = $this->tokenFor($device)->expires_at;
 
         $this->travelTo(CarbonImmutable::parse('2026-08-12 12:00:00'));
-        $this->withToken($bearer)->getJson('/api/v1/me')->assertOk();
+        $this->withToken($bearer)->getJson('/api/v1/entitlements')->assertOk();
 
         $this->assertSame(
             CarbonImmutable::createFromInterface($before)->toIso8601String(),
-            CarbonImmutable::createFromInterface($this->tokenFor($user)->expires_at)->toIso8601String(),
+            CarbonImmutable::createFromInterface($this->tokenFor($device)->expires_at)->toIso8601String(),
         );
 
         $this->travelTo(CarbonImmutable::parse('2026-08-20 12:00:00'));
-        $this->withToken($bearer)->getJson('/api/v1/me')->assertOk();
+        $this->withToken($bearer)->getJson('/api/v1/entitlements')->assertOk();
 
         $this->assertSame(
             CarbonImmutable::now()->addDays(90)->toIso8601String(),
-            CarbonImmutable::createFromInterface($this->tokenFor($user)->expires_at)->toIso8601String(),
+            CarbonImmutable::createFromInterface($this->tokenFor($device)->expires_at)->toIso8601String(),
         );
     }
 
@@ -95,20 +95,20 @@ class SlidingExpiryTest extends TestCase
     {
         $this->travelTo(CarbonImmutable::parse('2026-08-06 12:00:00'));
 
-        $user = User::factory()->create();
+        $device = Device::factory()->create();
 
-        // A token that authenticates but can't reach /me.
-        $bearer = $this->issueDeviceToken($user, abilities: ['packs:download']);
+        // A token that authenticates but can't reach /entitlements.
+        $bearer = $this->issueDeviceToken($device, abilities: ['packs:download']);
 
-        $before = $this->tokenFor($user)->expires_at;
+        $before = $this->tokenFor($device)->expires_at;
 
         $this->travelTo(CarbonImmutable::parse('2026-08-09 12:00:00'));
 
-        $this->withToken($bearer)->getJson('/api/v1/me')->assertForbidden();
+        $this->withToken($bearer)->getJson('/api/v1/entitlements')->assertForbidden();
 
         $this->assertSame(
             CarbonImmutable::createFromInterface($before)->toIso8601String(),
-            CarbonImmutable::createFromInterface($this->tokenFor($user)->expires_at)->toIso8601String(),
+            CarbonImmutable::createFromInterface($this->tokenFor($device)->expires_at)->toIso8601String(),
         );
     }
 
@@ -116,14 +116,14 @@ class SlidingExpiryTest extends TestCase
     {
         $this->travelTo(CarbonImmutable::parse('2026-08-06 12:00:00'));
 
-        $user = User::factory()->create();
-        $bearer = $this->issueDeviceToken($user, 'device-uid-tablet');
+        $device = Device::factory()->create();
+        $bearer = $this->issueDeviceToken($device);
 
         Device::query()->update(['last_seen_at' => CarbonImmutable::parse('2026-08-01 12:00:00')]);
 
         $this->travelTo(CarbonImmutable::parse('2026-08-09 12:00:00'));
 
-        $this->withToken($bearer)->getJson('/api/v1/me')->assertOk();
+        $this->withToken($bearer)->getJson('/api/v1/entitlements')->assertOk();
 
         $this->assertTrue(
             Device::query()->sole()->last_seen_at->equalTo(CarbonImmutable::now()),
@@ -134,24 +134,22 @@ class SlidingExpiryTest extends TestCase
     {
         $this->travelTo(CarbonImmutable::parse('2026-08-06 12:00:00'));
 
-        $user = User::factory()->create();
-        $bearer = $this->issueDeviceToken($user, 'device-uid-tablet');
+        $device = Device::factory()->create();
+        $bearer = $this->issueDeviceToken($device);
 
         $seenAt = CarbonImmutable::parse('2026-08-06 11:58:00');
         Device::query()->update(['last_seen_at' => $seenAt]);
 
-        $this->withToken($bearer)->getJson('/api/v1/me')->assertOk();
+        $this->withToken($bearer)->getJson('/api/v1/entitlements')->assertOk();
 
         $this->assertTrue(Device::query()->sole()->last_seen_at->equalTo($seenAt));
     }
 
     public function test_a_dashboard_session_has_no_token_to_slide(): void
     {
-        $user = User::factory()->create();
-
         // A session-backed request carries a TransientToken; the middleware
         // must simply step over it rather than exploding.
-        $this->actingAs($user)->get(route('profile.edit'))->assertOk();
+        $this->actingAs(User::factory()->create())->get(route('profile.edit'))->assertOk();
 
         $this->assertDatabaseCount('personal_access_tokens', 0);
     }

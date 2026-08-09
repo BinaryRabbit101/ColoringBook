@@ -40,7 +40,7 @@ class ScaffoldTest extends TestCase
 
     public function test_the_private_content_disks_are_rooted_per_design_section_five(): void
     {
-        foreach (['packs', 'assets', 'paint'] as $disk) {
+        foreach (['packs', 'assets'] as $disk) {
             $this->assertSame(
                 storage_path('app/private/'.$disk),
                 config("filesystems.disks.{$disk}.root"),
@@ -61,7 +61,7 @@ class ScaffoldTest extends TestCase
      */
     public function test_the_private_disks_write_group_readable_files_and_directories(): void
     {
-        foreach (['packs', 'assets', 'paint'] as $disk) {
+        foreach (['packs', 'assets'] as $disk) {
             $this->assertSame(
                 0640,
                 config("filesystems.disks.{$disk}.permissions.file.private"),

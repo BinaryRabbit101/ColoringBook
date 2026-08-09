@@ -76,13 +76,22 @@ signing material is ever checked in.
 | `package/name` | `Coloring Book` | launcher label |
 | `version/code` / `version/name` | `1` / `0.6.0` | tracks `application/config/version` |
 | `architectures` | `arm64-v8a` + `armeabi-v7a` | 64-bit is required by Play; 32-bit keeps older mid-range devices working |
-| `gradle_build/use_gradle_build` | `false` | no plugins, no custom Android source — the prebuilt template is enough and keeps the build a single command |
+| `gradle_build/use_gradle_build` | `false` | no plugins, no custom Android source — the prebuilt template is enough and keeps the build a single command. **This is the one preset option Phase 6 will have to change**: a Play Billing plugin is an Android library, so shipping in-app purchases (and therefore `Backend.get_store_receipts()`, which answers an empty array today) means flipping this to `true` and taking on the Gradle toolchain |
 | `screen/support_*` | all `true` | phones and tablets |
 | `screen/immersive_mode` | `true` | the page is the app; system bars would steal touches near the palette |
-| permissions | **none** | the game only writes `user://`; `custom_permissions` is empty and every named permission is left at its `false` default |
-| `user_data_backup/allow` | `false` | progress is local and cheap to recreate |
+| permissions | **none named** | the game only writes `user://` and asks the device for nothing; `custom_permissions` is empty and every named permission is left at its `false` default |
+| `user_data_backup/allow` | `false` | there is no cloud save (DLC_SERVER.md §6), so `user://` is the only copy of a child's colouring — and Android's auto-backup is a silent, quota-bound, restore-on-a-new-device mechanism nobody in this app is asking for. Worth revisiting as the *deliberate* answer to "my drawing is only on one tablet"; today it is off and the honest consequence is that uninstalling loses the artwork |
 | `launcher_icons/*` | empty | falls back to `application/config/icon` (`res://icon.svg`) — M6 deliberately ships no bespoke Android icon yet |
 | `exclude_filter` | `assets/books/*/source/*` | the artist's full-resolution originals are dev files; they are `.gdignore`d for the editor and excluded from the package too |
+
+> **Open item — `permissions/internet` on a RELEASE build.** The preset names no permissions
+> at all, and a debug export gets `android.permission.INTERNET` for free (Godot adds it so the
+> remote debugger can connect). A **release** export does not: it takes the preset's own flag.
+> That was harmless while the game shipped its books inside the APK; since BL-25 a release
+> build ships **no** books and fetches every one of them from the server (DLC_SERVER.md §7.4),
+> so a release APK without INTERNET would install to a permanently empty shelf. **Verify on
+> the first `--export-release` run and set `permissions/internet=true` in the preset if the
+> manifest does not carry it.** Nothing else about the app needs a permission.
 
 Orientation is a **project** setting, not a preset one: `display/window/handheld/orientation=6`
 (`SENSOR`) in `project.godot` allows portrait *and* landscape, which is what the M6 layout pass was

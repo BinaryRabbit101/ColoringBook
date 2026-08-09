@@ -8,21 +8,22 @@ extends Control
 ## settings gear -- which is what keeps [code]book_select.tscn[/code] frozen while
 ## the shelf grows a new affordance.
 ##
-## [b]It lists signed out[/b] (BL-25). Since a shipped build contains no coloring
-## books at all, this overlay is the only way a shelf ever gets one, so it must not
-## require an account merely to be looked at: [code]GET /packs[/code] is
+## [b]It lists with no token at all[/b] (BL-25). Since a shipped build contains no
+## coloring books, this overlay is the only way a shelf ever gets one, so it must
+## render on a device that has never reached the server: [code]GET /packs[/code] is
 ## optional-auth for exactly that reason.
 ##
-## [b]And since BL-52 a FREE pack downloads signed out too.[/b] Free packs are
-## public (DLC_SERVER.md 7.4) -- manifest, archive and files, with no Authorization
-## header at all -- so "free app content available to download without needing to
-## create an account" is the shop's behaviour rather than a promise. The question
-## the Get button asks is therefore about the PACK, not about the player:
+## [b]The Get button asks about the PACK, never about the player[/b] -- there is no
+## player to ask about, since the app signs the device in by itself and has no
+## accounts at all (DLC_SERVER.md 4.3):
 ## [codeblock]
-## is_free or owned  ->  download it (signed in or not)
-## anything else     ->  sign_in_requested, and the grown-up meets the adult gate
+## is_free or owned  ->  download it. A free pack's bytes are PUBLIC (7.4), so
+##                       this works on a device the server has never met
+## anything else     ->  it has to be bought from the platform store, which the
+##                       game has no plugin for yet: the row says so and does not
+##                       start a request it knows will be refused
 ## [/codeblock]
-## [method PackRow.needs_account] is that one line, and it is the only place this
+## [method PackRow.needs_purchase] is that one line, and it is the only place this
 ## overlay decides anything about entitlement -- both flags in it are the server's
 ## word, rendered verbatim.
 ##
@@ -57,9 +58,6 @@ extends Control
 signal closed()
 ## A pack finished installing, so the shelf behind should rescan.
 signal pack_installed(slug: String)
-## A download was asked for with nobody signed in. [code]main.gd[/code] answers with
-## the adult gate; this overlay never opens an account screen itself (BL-25).
-signal sign_in_requested()
 
 ## Response keys of the server's [code]PackResource[/code] (DLC_SERVER.md 11).
 const KEY_SLUG := "slug"
@@ -92,13 +90,14 @@ const TAB_EMPTY := {
 	KIND_STICKER_SET: "No sticker sets yet. Check back soon!",
 }
 
-## Shown when the catalogue lists something this device cannot have without an
-## account, and again if a Get is pressed on one (BL-25). One string, so the shop
-## says the same thing twice rather than two things once.
+## Shown when the catalogue lists something this device does not own and cannot
+## simply take -- a paid pack. One string, so the shop says the same thing wherever
+## the player meets it, and a shop offering nothing but free books never shows it.
 ##
-## BL-52 narrowed WHEN it appears rather than what it says: a shop offering nothing
-## but free books never shows it, because there is nothing left to sign in for.
-const SIGNED_OUT_HINT := "A grown-up needs to sign in to add a book."
+## It points at the restore path deliberately: a household that already bought the
+## pack on another device gets it back from Settings, and that is the ONLY thing
+## that replaced account linking.
+const PURCHASE_HINT := "Already bought this? A grown-up can restore it in Settings."
 
 ## The crayon that draws a download (BL-31). Preloaded into a constant rather than
 ## reached through a [code]class_name[/code]: the type then resolves without the
@@ -152,16 +151,15 @@ func refresh() -> void:
 		return
 	if not bool(result.get(Backend.KEY_OK, false)):
 		# Grown-up-facing, and only ever inside this overlay (DLC_SERVER.md 8.2).
-		_set_status(AccountPanel.describe_error(result))
+		_set_status(ApiClient.describe_error(result))
 		return
 	var packs: Variant = result.get(Backend.KEY_DATA, [])
 	set_packs(packs as Array if typeof(packs) == TYPE_ARRAY else [])
-	if not Backend.is_signed_in() and not gated_rows().is_empty():
-		# The catalogue lists fine signed out (BL-25) and its free books download that
-		# way too (BL-52) -- so this only speaks up when something on the list really
-		# is behind the gate, rather than telling a child to fetch a grown-up for a
-		# book they could have had.
-		_set_status(SIGNED_OUT_HINT)
+	if not purchasable_rows().is_empty():
+		# Only when something on the list really does cost money. A shop of free books
+		# says nothing, rather than telling a child to fetch a grown-up for a book they
+		# could have had.
+		_set_status(PURCHASE_HINT)
 
 
 ## Fills the list from an explicit array of pack rows -- dependency injection for
@@ -201,12 +199,12 @@ func get_rows() -> Array[PackRow]:
 	return _rows.duplicate()
 
 
-## The rows a Get would bounce to the adult gate: neither free nor owned (BL-52).
-## Both tabs, because the hint is about the shop rather than about the tab.
-func gated_rows() -> Array[PackRow]:
+## The rows that have to be bought: neither free nor owned. Both tabs, because the
+## hint is about the shop rather than about the tab.
+func purchasable_rows() -> Array[PackRow]:
 	var out: Array[PackRow] = []
 	for row in _rows:
-		if row.needs_account():
+		if row.needs_purchase():
 			out.append(row)
 	return out
 
@@ -266,9 +264,9 @@ func _build_tabs() -> void:
 
 ## Hides the rows of the other tab and says something useful when this one is bare.
 ##
-## The status line is shared with the network and the signed-out hint, so an EMPTY
-## tab only claims it when there is nothing more important to say -- otherwise
-## switching tabs would silently wipe "A grown-up needs to sign in".
+## The status line is shared with the network error and the purchase hint, so an
+## EMPTY tab only claims it when there is nothing more important to say -- otherwise
+## switching tabs would silently wipe whatever was being explained.
 func _apply_tab() -> void:
 	var shown := 0
 	for row in _rows:
@@ -346,18 +344,12 @@ func _show_installed_only() -> void:
 func _on_download_requested(row: PackRow) -> void:
 	if _installing != "":
 		return
-	if row.needs_account() and not Backend.is_signed_in():
-		# A pack that is neither free nor already owned needs an identity to be
-		# entitled to it (DLC_SERVER.md 9). Route the grown-up to the gate instead of
-		# letting the install fail with a code nobody asked to see. The row is left in
-		# its confirm state on purpose -- come back from the gate and "Yes, download"
-		# is still there, and a refresh after a successful sign-in rebuilds it anyway.
-		#
-		# BL-52: a FREE pack no longer comes through here, because its bytes are
-		# public and asking a child to fetch a grown-up for them was a gate with
-		# nothing behind it.
-		_set_status(SIGNED_OUT_HINT)
-		sign_in_requested.emit()
+	if row.needs_purchase():
+		# Neither free nor owned: the server would refuse this download, and firing it
+		# anyway would only turn a plain explanation into an error code. The row keeps
+		# its state; a restore that lands makes `owned` true and the next refresh
+		# rebuilds it as an ordinary Get.
+		_set_status(PURCHASE_HINT)
 		return
 	_installing = row.get_slug()
 	row.set_downloading(0, row.get_bytes())
@@ -393,9 +385,11 @@ static func describe_install_error(result: Dictionary) -> String:
 			return "This book pack needs a newer version of the app."
 		PackInstaller.CODE_WRITE_FAILED, PackInstaller.CODE_SWAP_FAILED:
 			return "There was not enough room to install that pack."
-		ApiClient.CODE_ENTITLEMENT_REQUIRED:
-			return "This account does not own that pack yet."
-	return AccountPanel.describe_error(result)
+		ApiClient.CODE_ENTITLEMENT_REQUIRED, ApiClient.CODE_UNAUTHENTICATED:
+			# The device is not entitled to it. Not a failure to explain twice -- point
+			# at the one thing that can fix it (see PURCHASE_HINT).
+			return PURCHASE_HINT
+	return ApiClient.describe_error(result)
 
 
 # ===================================================================== display ==
@@ -453,6 +447,10 @@ class PackRow extends PanelContainer:
 	const STATE_UPDATE := "update"
 	const STATE_BLOCKED := "blocked"
 	const STATE_FAILED := "failed"
+	## Neither free nor owned: it costs money, and this build has no billing plugin
+	## to spend it with. A state of its own rather than a disabled STATE_AVAILABLE,
+	## so the row can SAY why instead of just being dead.
+	const STATE_PURCHASE := "purchase"
 
 	var _data: Dictionary
 	var _state := STATE_AVAILABLE
@@ -531,6 +529,11 @@ class PackRow extends PanelContainer:
 			var latest := int(_data.get(KEY_LATEST_VERSION, 0))
 			var installed := Backend.installed_pack_version(get_slug())
 			return STATE_UPDATE if latest > 0 and latest > installed else STATE_INSTALLED
+		# Checked LAST of the three, and after "installed": a pack already on the
+		# shelf is the player's whatever the catalogue currently says about it, and a
+		# revocation hides books rather than putting a price back on them (7.3).
+		if needs_purchase():
+			return STATE_PURCHASE
 		return STATE_AVAILABLE
 
 	func get_slug() -> String:
@@ -543,16 +546,16 @@ class PackRow extends PanelContainer:
 	func is_free() -> bool:
 		return bool(_data.get(KEY_IS_FREE, false))
 
-	## The server's [code]owned[/code], verbatim -- painted for an account token OR
-	## an anonymous device token since BL-52.
+	## The server's [code]owned[/code], verbatim -- painted for whichever DEVICE the
+	## bearer names, or false when this device has no token yet.
 	func is_owned() -> bool:
 		return bool(_data.get(KEY_OWNED, false))
 
-	## Whether getting this pack needs somebody to sign in (BL-52). Free packs are
-	## public and an owned pack is already ours, so the answer is "no" far more often
-	## than it used to be — and it is still the SERVER's two flags deciding, never
-	## this file (DLC_SERVER.md 9).
-	func needs_account() -> bool:
+	## Whether this pack has to be bought before it can be had. A free pack's bytes
+	## are public and an owned pack is already this device's, so everything else
+	## costs money -- and it is still the SERVER's two flags deciding, never this
+	## file (DLC_SERVER.md 9).
+	func needs_purchase() -> bool:
 		return not is_free() and not is_owned()
 
 	func get_state() -> String:
@@ -609,7 +612,9 @@ class PackRow extends PanelContainer:
 		_state = state
 		_update_strip(previous, state)
 		_cancel.visible = state == STATE_CONFIRM
-		_action.disabled = state in [STATE_INSTALLED, STATE_DOWNLOADING, STATE_BLOCKED]
+		_action.disabled = state in [
+			STATE_INSTALLED, STATE_DOWNLOADING, STATE_BLOCKED, STATE_PURCHASE
+		]
 		match state:
 			STATE_CONFIRM:
 				# The size is the point of the question (DLC_SERVER.md 8.2).
@@ -627,10 +632,13 @@ class PackRow extends PanelContainer:
 				_action.text = "Needs an update"
 				_detail.text = "This pack needs app version %s or newer." \
 					% String(_data.get(KEY_MIN_CLIENT_VERSION, "?"))
+			STATE_PURCHASE:
+				_action.text = "In the store"
+				_detail.text = _describe()
 			STATE_FAILED:
 				_action.text = "Try again"
 			_:
-				_action.text = "Get" if bool(_data.get(KEY_IS_FREE, false)) else "Get"
+				_action.text = "Get"
 				_detail.text = _describe()
 
 	## The animation, hung off the state machine rather than woven into it (BL-31).

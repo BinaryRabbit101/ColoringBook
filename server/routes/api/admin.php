@@ -57,13 +57,14 @@ use Illuminate\Support\Facades\Route;
 | This is the **token** door — a Sanctum token carrying the `admin` ability,
 | which the dev box's `pack build` script POSTs with. It is minted by hand
 | (`php artisan admin:token you@example.com`) and never by the game: a device
-| token holds exactly `save:sync`, `entitlements:read`, `packs:download` and
-| can no more publish a pack than delete an account.
+| token holds exactly `entitlements:read` + `packs:download` and can no more
+| publish a pack than sell one.
 |
 | The **session** door is `routes/admin.php`, the Inertia UI, where a signed-in
-| parent with `is_admin` gets the same actions through forms. `EnsureAdmin` is
-| the single `users.is_admin` check behind both; it 403s here and 404s there,
-| because an ordinary parent should never learn the admin section exists.
+| operator with `is_admin` gets the same actions through forms. `EnsureAdmin`
+| is the single `users.is_admin` check behind both; it 403s here and 404s
+| there. `users` holds operators only — there is no player account to hide it
+| from any more — but the 404 costs nothing and stays.
 |
 | Deliberately absent: any notion of roles or an approval chain. §10.2 says
 | single operator, and one boolean column is the whole model.

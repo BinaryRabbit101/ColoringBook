@@ -38,15 +38,17 @@ extends Control
 ## node shows while the shelf is the current screen. The settings panel is an
 ## overlay for the same reason.
 ##
-## [b]WP10 added three more overlays and one more shelf button[/b], on exactly that
+## [b]WP10 added two more overlays and one more shelf button[/b], on exactly that
 ## pattern, so [code]book_select.tscn[/code] is STILL frozen:
 ## [codeblock]
-## Settings -> "Account" -> AdultGate -> AccountPanel   sign in / register / out
-## shelf    -> "More books"           -> PackShop       the DLC catalogue
+## Settings -> "Restore" -> AdultGate -> Backend.restore_purchases()
+## shelf    -> "More books"          -> PackShop   the DLC catalogue
 ## [/codeblock]
 ## The "More books" button appears while the shelf is up and this build has a
-## server (BL-25 -- see [method _refresh_more_books] for why it no longer waits for
-## a sign-in); the gate stands in front of every account screen (DLC_SERVER.md 4.1).
+## server (BL-25). [b]There is no sign-in anywhere in the flow[/b]: [Backend]
+## registers the device by itself at launch and nothing on screen waits for it or
+## reports it. The gate now guards the one grown-up decision left -- the restore,
+## which talks to the platform store.
 ## [b]No kid-facing screen shows network state at all[/b] (DLC_SERVER.md 8.2) --
 ## the shelf is built from local discovery every time and merely re-filtered when
 ## an entitlement answer lands.
@@ -105,10 +107,9 @@ const TITLE_SCENE: PackedScene = preload("res://scenes/screens/title_screen.tscn
 const BOOK_SELECT_SCENE: PackedScene = preload("res://scenes/screens/book_select.tscn")
 const COLORING_PAGE_SCENE: PackedScene = preload("res://scenes/screens/coloring_page.tscn")
 const SETTINGS_PANEL_SCENE: PackedScene = preload("res://scenes/components/settings_panel.tscn")
-## WP10 overlays. All three are grown-up territory and all three live here for the
-## same reason the gear does -- see the class doc's "Overlays" note.
+## WP10 overlays. Both are grown-up territory and both live here for the same
+## reason the gear does -- see the class doc's "Overlays" note.
 const ADULT_GATE_SCENE: PackedScene = preload("res://scenes/components/adult_gate.tscn")
-const ACCOUNT_PANEL_SCENE: PackedScene = preload("res://scenes/components/account_panel.tscn")
 const PACK_SHOP_SCENE: PackedScene = preload("res://scenes/components/pack_shop.tscn")
 
 ## Screen transition: fade the old screen out, swap, fade the new one in. Short
@@ -466,13 +467,12 @@ var _more_books_style: StyleBoxFlat
 ## [member _fade], because a transition has to cover the overlays too.
 var _book_transition: BookOpenTransition
 ## WP10: the shelf's DLC entry point. An overlay button, not part of the shelf
-## scene, and visible only when the shelf is up AND somebody is signed in.
+## scene, and visible only when the shelf is up and this build has a server.
 var _more_books: Button
 var _current_screen: Control
 var _current_id := ""
 var _settings: SettingsPanel
 var _adult_gate: AdultGate
-var _account_panel: AccountPanel
 var _pack_shop: PackShop
 var _transitioning := false
 ## Guards against a second close request arriving while the first is draining.
@@ -491,10 +491,11 @@ func _ready() -> void:
 	_overlays.resized.connect(_apply_overlay_scale)
 	get_viewport().size_changed.connect(_apply_overlay_scale)
 	_apply_overlay_scale()
-	# The shelf re-filters and rescans when the account or the installed packs
-	# change. Nothing here awaits anything (DLC_SERVER.md 8.2) -- these are
-	# notifications that arrive, not requests this node makes.
-	Backend.auth_changed.connect(_on_backend_auth_changed)
+	# The shelf re-filters and rescans when the entitlement list or the installed
+	# packs change. Nothing here awaits anything (DLC_SERVER.md 8.2) -- these are
+	# notifications that arrive, not requests this node makes. The launch-time
+	# device registration is invisible here: what it eventually produces is an
+	# entitlements_changed, which is the only thing the shelf ever cared about.
 	Backend.entitlements_changed.connect(_on_backend_shelf_changed)
 	Backend.installed_packs_changed.connect(_on_backend_shelf_changed)
 	# Start under the fade so the first screen arrives the same way every other
@@ -654,8 +655,8 @@ func _show_screen(
 	_gear.visible = id == SCREEN_BOOK_SELECT
 	_transitioning = false
 	# After the flag drops: _refresh_more_books() refuses to show anything mid-swap,
-	# which is what keeps a sign-in landing during a transition from painting a
-	# button onto the wrong screen.
+	# which is what keeps an entitlement answer landing during a transition from
+	# painting a button onto the wrong screen.
 	_refresh_more_books()
 	screen_changed.emit(id)
 	return screen
@@ -882,7 +883,7 @@ func open_settings() -> SettingsPanel:
 	_settings.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_settings.closed.connect(close_settings)
 	_settings.erase_all_confirmed.connect(_on_settings_erase_all)
-	_settings.account_requested.connect(_on_settings_account)
+	_settings.restore_requested.connect(_on_settings_restore)
 	_overlays.add_child(_settings)
 	settings_toggled.emit(true)
 	return _settings
@@ -903,21 +904,46 @@ func _on_settings_erase_all() -> void:
 		_populate_shelf(_current_screen as BookSelect)
 
 
-# ============================================================ WP10: the account ==
-# DLC_SERVER.md 4.1: "Adult gate in the client before any account UI ... Reuse the
-# existing settings-gear overlay placement from main.gd." That is what this block
-# is, and the ORDER is the point -- the gate is not a mode of the account panel, it
-# is a separate overlay that must be passed before the account panel is ever built.
+# ========================================================== WP10: the restore ==
+# DLC_SERVER.md 4.1's adult gate, now guarding the only grown-up decision the app
+# has left. There is no account UI to put it in front of -- [Backend] registers
+# this device by itself, silently, and there is nothing to sign into.
+#
+# The ORDER is the point: the gate is not a mode of anything, it is a separate
+# overlay that must be passed before a single request goes out.
 
-## "Account" in settings. Closes settings and puts the [AdultGate] up; the account
-## panel only exists once the gate is passed.
-func _on_settings_account() -> void:
-	close_settings()
-	open_adult_gate(open_account_panel)
+## "Restore" in settings. Keeps the panel OPEN behind the gate on purpose -- the
+## answer is reported into that panel's own status line, so it has to still be
+## there when the network comes back.
+func _on_settings_restore() -> void:
+	open_adult_gate(_restore_purchases)
+
+
+## Asks the store, then the server, what this device owns, and tells the settings
+## panel what happened.
+##
+## [b]The one place in the whole game that awaits a backend call on a grown-up's
+## behalf[/b], and it is allowed to because a grown-up pressed a button and is
+## looking at the answer. Nothing kid-facing waits on it, and the shelf catches up
+## through [signal Backend.entitlements_changed] like it does for every other
+## entitlement change.
+func _restore_purchases() -> void:
+	if not is_instance_valid(_settings):
+		return
+	_settings.get_restore_button().disabled = true
+	var result: Dictionary = await Backend.restore_purchases()
+	if not is_instance_valid(_settings):
+		return
+	_settings.get_restore_button().disabled = false
+	_settings.report_restore(
+		int(result.get(Backend.KEY_RESTORED, 0)),
+		bool(result.get(Backend.KEY_OK, false)),
+		ApiClient.describe_error(result)
+	)
 
 
 ## Shows the arithmetic gate and runs [param on_passed] if it is answered
-## correctly. Public because every future grown-up screen should come through here
+## correctly. Public because every future grown-up action should come through here
 ## rather than growing a second gate.
 func open_adult_gate(on_passed: Callable) -> AdultGate:
 	_close_adult_gate()
@@ -940,32 +966,6 @@ func _close_adult_gate() -> void:
 	_overlays.remove_child(_adult_gate)
 	_adult_gate.queue_free()
 	_adult_gate = null
-
-
-## The account overlay itself. Reachable ONLY through [method open_adult_gate] in
-## the real flow; the harnesses call it directly, which is the same reason
-## [method GameState.set_save_root] exists.
-func open_account_panel() -> AccountPanel:
-	if is_instance_valid(_account_panel):
-		_account_panel.refresh()
-		return _account_panel
-	_account_panel = ACCOUNT_PANEL_SCENE.instantiate() as AccountPanel
-	_account_panel.name = "AccountPanel"
-	_account_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	_account_panel.closed.connect(close_account_panel)
-	_account_panel.account_changed.connect(func(_signed_in: bool) -> void:
-		_refresh_more_books()
-	)
-	_overlays.add_child(_account_panel)
-	return _account_panel
-
-
-func close_account_panel() -> void:
-	if not is_instance_valid(_account_panel):
-		return
-	_overlays.remove_child(_account_panel)
-	_account_panel.queue_free()
-	_account_panel = null
 
 
 # ============================================================ WP10: more books ==
@@ -999,17 +999,11 @@ func _build_more_books() -> void:
 	_overlays.add_child(_more_books)
 
 
-## Shown on the shelf whenever this build has a server at all -- signed in or not
-## (BL-25).
-##
-## [b]It used to require a signed-in account[/b], on the argument that a shop a
-## grown-up cannot use is just confusing. That argument dies with the built-in
-## books: a shipped build ships NO books, so the catalogue is the only way a shelf
-## ever gets one, and hiding the way in until somebody signs in makes first launch a
-## dead end with nothing on screen to press. [code]GET /packs[/code] is optional-auth
-## and renders signed out (DLC_SERVER.md 7.4/9), and the first [b]Get[/b] is what
-## sends the grown-up to the adult gate -- so the sign-in still happens, at the
-## moment it is actually needed, instead of being a precondition for looking.
+## Shown on the shelf whenever this build has a server at all (BL-25). A shipped
+## build ships NO books, so the catalogue is the only way a shelf ever gets one and
+## the way in can never be hidden behind anything: [code]GET /packs[/code] is
+## optional-auth and renders on a device the server has never met
+## (DLC_SERVER.md 7.4/9).
 func _refresh_more_books() -> void:
 	if not is_instance_valid(_more_books):
 		return
@@ -1026,12 +1020,6 @@ func open_pack_shop() -> PackShop:
 	_pack_shop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_pack_shop.closed.connect(close_pack_shop)
 	_pack_shop.pack_installed.connect(func(_slug: String) -> void: _rescan_shelf())
-	# BL-25: a Get pressed while signed out leads to the gate rather than failing.
-	# The shop stays open underneath, so passing the gate and signing in leaves the
-	# grown-up looking at the catalogue they were already looking at.
-	_pack_shop.sign_in_requested.connect(func() -> void:
-		open_adult_gate(open_account_panel)
-	)
 	_overlays.add_child(_pack_shop)
 	return _pack_shop
 
@@ -1044,19 +1032,15 @@ func close_pack_shop() -> void:
 	_pack_shop = null
 
 
-func _on_backend_auth_changed(_signed_in: bool) -> void:
-	_refresh_more_books()
+## The entitlement list moved -- a launch refresh landed, a restore granted
+## something, or the server revoked a pack. The shelf re-filters; a settings panel
+## that is open re-reads its purchase count; a shop that is open is left alone,
+## because it owns its own refresh and re-asking underneath a grown-up mid-scroll
+## would rebuild every row from nothing.
+func _on_backend_shelf_changed() -> void:
 	_rescan_shelf()
 	if is_instance_valid(_settings):
 		_settings.refresh()
-	if is_instance_valid(_pack_shop):
-		# Signing in from on top of the shop changes every row's `owned` flag and is
-		# what makes Get work; re-ask rather than leave a signed-out catalogue up.
-		_pack_shop.refresh()
-
-
-func _on_backend_shelf_changed() -> void:
-	_rescan_shelf()
 
 
 ## Rebuilds the shelf in place if it is the current screen. A fresh
@@ -1070,7 +1054,6 @@ func _rescan_shelf() -> void:
 func _close_overlays() -> void:
 	close_settings()
 	_close_adult_gate()
-	close_account_panel()
 	close_pack_shop()
 
 
@@ -1116,10 +1099,6 @@ func get_more_books_button() -> Button:
 
 func get_adult_gate() -> AdultGate:
 	return _adult_gate if is_instance_valid(_adult_gate) else null
-
-
-func get_account_panel() -> AccountPanel:
-	return _account_panel if is_instance_valid(_account_panel) else null
 
 
 func get_pack_shop() -> PackShop:

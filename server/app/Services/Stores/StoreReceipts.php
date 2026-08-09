@@ -10,7 +10,7 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
  * Everything `POST /entitlements/verify` needs to know about stores that isn't
- * the verification itself (BL-52, DLC_SERVER.md §9).
+ * the verification itself (DLC_SERVER.md §9).
  *
  * Two jobs, both config-driven:
  *
@@ -56,9 +56,8 @@ class StoreReceipts
     /**
      * The pack a SKU names, on the platform that named it.
      *
-     * `downloadable()` rather than `listable()`: a household re-installing on a
-     * new tablet must be able to restore a pack that has since been retired
-     * (§7.3).
+     * `downloadable()` rather than `listable()`: a device re-installing must be
+     * able to restore a pack that has since been retired (§7.3).
      */
     public function packForSku(string $platform, string $sku): Pack
     {

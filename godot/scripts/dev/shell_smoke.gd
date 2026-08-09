@@ -41,8 +41,8 @@ extends Control
 ##      crashing (the future one is backed up first)
 ##   i  BL-48: the overlay layer is sized for a phone. Desktop first (nothing may
 ##      have moved), then a real portrait window with a real phone's squeeze forced
-##      on, across all five overlays -- panel width, the 44 pt touch floor, the
-##      stacked rows, and an account email that is readable rather than clipped
+##      on, across all four overlays -- panel width, the 44 pt touch floor, the
+##      stacked rows, and a long settings value that is readable rather than clipped
 ##
 ## Exit code is 0 only if every check passes.
 
@@ -81,8 +81,9 @@ const PORTRAIT_WINDOW := Vector2i(720, 1280)
 ## 1152 px base canvas), so it is forced through OverlayMetrics.debug_squeeze --
 ## the same dev hook SafeArea.debug_insets is, and for the same reason.
 const PHONE_SQUEEZE := 2.95
-## Long enough to be the complaint BL-48 opened with.
-const LONG_EMAIL := "binaryrabbit101@gmail.com"
+## Long enough, and unbreakable enough, to be the complaint BL-48 opened with: a
+## value with no spaces in it is the only thing AUTOWRAP_ARBITRARY is needed for.
+const LONG_VALUE := "twenty-seven-packs-on-this-device"
 ## The settings panel's authored width, which the desktop half of check (i) says
 ## must not have moved.
 const DESKTOP_PANEL_WIDTH := 600.0
@@ -103,6 +104,10 @@ var _probe_color := Color.MAGENTA
 
 
 func _ready() -> void:
+	# No harness but backend_smoke wants a network. Cleared BEFORE the first frame,
+	# which is when Backend's launch session would otherwise register the
+	# DEVELOPER's real device (see Backend.autostart_enabled).
+	Backend.autostart_enabled = false
 	get_window().size = DESKTOP_WINDOW
 	# The coverage readback stalls on the presentation queue under FIFO v-sync
 	# (see coloring_page.gd); the run is minutes shorter on mailbox.
@@ -930,16 +935,16 @@ func _check_overlay_scaling() -> void:
 		_expect(false, "the settings panel opened")
 		return
 	var box := panel.get_node("Center/Panel") as Control
-	var account_row := panel.get_node("Center/Panel/Margin/Column/AccountRow") as BoxContainer
-	var email := panel.get_account_label()
+	var purchases_row := panel.get_node("Center/Panel/Margin/Column/PurchasesRow") as BoxContainer
+	var purchases := panel.get_purchases_label()
 	_expect(is_equal_approx(box.size.x, DESKTOP_PANEL_WIDTH),
 		"the settings panel is still its authored %.0f px wide (%.0f)"
 		% [DESKTOP_PANEL_WIDTH, box.size.x])
 	_expect(panel.get_close_button().custom_minimum_size.y == 56.0,
 		"Done is still the 56 px it was authored at (%.0f)"
 		% panel.get_close_button().custom_minimum_size.y)
-	_expect(not account_row.vertical, "the account row is still a ROW on a desktop")
-	_expect(email.clip_text, "...and the email still clips there, exactly as authored")
+	_expect(not purchases_row.vertical, "the purchases row is still a ROW on a desktop")
+	_expect(purchases.clip_text, "...and its value still clips there, exactly as authored")
 	_expect(is_equal_approx(_main.get_gear_button().size.x, Main.GearButton.SIZE.x),
 		"the settings gear is still %.0f px (%.0f)"
 		% [Main.GearButton.SIZE.x, _main.get_gear_button().size.x])
@@ -971,29 +976,33 @@ func _check_overlay_scaling() -> void:
 		% [OverlayMetrics.TOUCH_TARGET_PT, floor_px / PHONE_SQUEEZE])
 
 	_check_panel_fits("settings", box, canvas, floor_px)
-	_expect(account_row.vertical,
-		"the account row STACKS in portrait -- caption, address, button, one each per line")
+	_expect(purchases_row.vertical,
+		"the purchases row STACKS in portrait -- caption, value, button, one each per line")
 	_expect((panel.get_node("Center/Panel/Margin/Column/ConfirmBox/Row") as BoxContainer)
 			.vertical,
 		"...and so does the erase confirm's yes/no pair")
 
-	# --- the email: the complaint BL-48 opened with ---------------------------
-	email.text = LONG_EMAIL
-	panel.get_account_button().visible = true
+	# --- a long value: the complaint BL-48 opened with ------------------------
+	# The string is an unbreakable one on purpose. AUTOWRAP_ARBITRARY is the whole
+	# fix, and a value with spaces in it would wrap without needing it.
+	purchases.text = LONG_VALUE
+	panel.get_restore_button().visible = true
 	await _settle_layout()
-	_expect(not email.clip_text and email.autowrap_mode == TextServer.AUTOWRAP_ARBITRARY,
-		"the account email wraps instead of clipping (clip=%s, wrap=%d)"
-		% [email.clip_text, email.autowrap_mode])
-	_expect(email.text == LONG_EMAIL,
-		"...and the label still holds every character ('%s')" % email.text)
-	var needed := email.get_theme_font("font").get_string_size(
-		LONG_EMAIL, HORIZONTAL_ALIGNMENT_LEFT, -1, email.get_theme_font_size("font_size")).x
-	var room := email.size.x * float(maxi(email.get_line_count(), 1))
+	_expect(not purchases.clip_text
+			and purchases.autowrap_mode == TextServer.AUTOWRAP_ARBITRARY,
+		"the purchases value wraps instead of clipping (clip=%s, wrap=%d)"
+		% [purchases.clip_text, purchases.autowrap_mode])
+	_expect(purchases.text == LONG_VALUE,
+		"...and the label still holds every character ('%s')" % purchases.text)
+	var needed := purchases.get_theme_font("font").get_string_size(
+		LONG_VALUE, HORIZONTAL_ALIGNMENT_LEFT, -1,
+		purchases.get_theme_font_size("font_size")).x
+	var room := purchases.size.x * float(maxi(purchases.get_line_count(), 1))
 	_expect(room >= needed,
 		"...with room to draw all %.0f px of it across %d line(s) (%.0f px available)"
-		% [needed, email.get_line_count(), room])
-	_expect(email.size.x > DESKTOP_PANEL_WIDTH * 0.6,
-		"...on a line of its own rather than beside the button (%.0f px)" % email.size.x)
+		% [needed, purchases.get_line_count(), room])
+	_expect(purchases.size.x > DESKTOP_PANEL_WIDTH * 0.6,
+		"...on a line of its own rather than beside the button (%.0f px)" % purchases.size.x)
 	await _screenshot("settings_portrait.png")
 
 	# --- the gear and the shelf's shop button ---------------------------------
@@ -1037,7 +1046,7 @@ func _check_overlay_scaling() -> void:
 			"...with the first book whole and against the left end of the rail")
 		await _screenshot("book_select_phone.png")
 
-	# --- the other three overlays, on the same one mechanism ------------------
+	# --- the other two overlays, on the same one mechanism --------------------
 	var gate := _main.open_adult_gate(Callable())
 	await _settle_layout()
 	_check_panel_fits("adult gate", gate.get_node("Center/Panel") as Control, canvas, floor_px)
@@ -1049,16 +1058,6 @@ func _check_overlay_scaling() -> void:
 	await _screenshot("adult_gate_portrait.png")
 	gate.get_cancel_button().pressed.emit()
 	await get_tree().process_frame
-
-	var account := _main.open_account_panel()
-	await _settle_layout()
-	_check_panel_fits("account", account.get_node("Center/Panel") as Control, canvas, floor_px)
-	_expect(account.get_email_field().size.y >= floor_px
-			and account.get_password_field().size.y >= floor_px,
-		"both sign-in fields clear the touch floor (%.0f / %.0f of %.0f)"
-		% [account.get_email_field().size.y, account.get_password_field().size.y, floor_px])
-	await _screenshot("account_portrait.png")
-	_main.close_account_panel()
 
 	var shop := _main.open_pack_shop()
 	shop.set_packs([
@@ -1090,9 +1089,9 @@ func _check_overlay_scaling() -> void:
 	_expect(is_equal_approx(again_box.size.x, DESKTOP_PANEL_WIDTH),
 		"back on a desktop the panel is its authored %.0f px again (%.0f)"
 		% [DESKTOP_PANEL_WIDTH, again_box.size.x])
-	_expect(not (again.get_node("Center/Panel/Margin/Column/AccountRow") as BoxContainer).vertical
-			and again.get_account_label().clip_text,
-		"...the account row is a row again and the email clips again")
+	_expect(not (again.get_node("Center/Panel/Margin/Column/PurchasesRow") as BoxContainer).vertical
+			and again.get_purchases_label().clip_text,
+		"...the purchases row is a row again and its value clips again")
 	_expect(is_equal_approx(_main.get_gear_button().size.x, Main.GearButton.SIZE.x),
 		"...and the gear is back to %.0f px (%.0f)"
 		% [Main.GearButton.SIZE.x, _main.get_gear_button().size.x])

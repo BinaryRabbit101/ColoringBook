@@ -15,11 +15,11 @@ use Inertia\Response as InertiaResponse;
 /**
  * The gift desk: `/admin/entitlements`.
  *
- * Until payments land this is the only way a paid pack reaches an account, so
- * the page shows the most recent claims as well as the form — the question
- * after granting one is always "did that land on the right address".
+ * The only way a paid pack reaches a player without a store receipt, so the
+ * page shows the most recent claims as well as the form — the question after
+ * granting one is always "did that land on the right device".
  *
- * A missing account or slug comes back as a **field error**, not a red banner:
+ * A missing device or slug comes back as a **field error**, not a red banner:
  * the operator mistyped one of two inputs and the form should say which.
  */
 class EntitlementController extends Controller
@@ -29,7 +29,7 @@ class EntitlementController extends Controller
     public function index(): InertiaResponse
     {
         $entitlements = Entitlement::query()
-            ->with(['user', 'pack'])
+            ->with(['device', 'pack'])
             ->orderByDesc('granted_at')
             ->orderByDesc('id')
             ->limit(self::RECENT)
@@ -45,7 +45,8 @@ class EntitlementController extends Controller
                     'status' => $pack->status,
                 ])->all(),
             'entitlements' => $entitlements->map(fn (Entitlement $entitlement): array => [
-                'email' => $entitlement->user->email,
+                'device_uid' => $entitlement->device->device_uid,
+                'device_name' => $entitlement->device->device_name,
                 'pack_slug' => $entitlement->pack->slug,
                 'source' => $entitlement->source,
                 'granted_at' => $entitlement->granted_at->toIso8601String(),
@@ -63,12 +64,12 @@ class EntitlementController extends Controller
     {
         try {
             $grant->handle(
-                (string) $request->string('email'),
+                (string) $request->string('device_uid'),
                 (string) $request->string('pack_slug'),
                 (string) ($request->string('source')->toString() ?: Entitlement::SOURCE_PROMO),
             );
         } catch (ApiException $e) {
-            $field = $e->errorCode === 'PACK_NOT_FOUND' ? 'pack_slug' : 'email';
+            $field = $e->errorCode === 'PACK_NOT_FOUND' ? 'pack_slug' : 'device_uid';
 
             return back()->withErrors([$field => $e->getMessage()]);
         }

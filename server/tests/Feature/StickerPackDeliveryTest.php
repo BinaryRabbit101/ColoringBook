@@ -4,11 +4,11 @@ namespace Tests\Feature;
 
 use App\Actions\Packs\PublishPackDirectory;
 use App\Models\Asset;
+use App\Models\Device;
 use App\Models\Pack;
 use App\Models\PackVersion;
 use App\Models\Sticker;
 use App\Models\StickerSet;
-use App\Models\User;
 use App\Services\PackManifest;
 use App\Services\PackManifestValidator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -130,8 +130,8 @@ class StickerPackDeliveryTest extends TestCase
     {
         $this->publishStickerPack(free: true);
 
-        $user = User::factory()->create();
-        $token = $this->issueDeviceToken($user);
+        $device = Device::factory()->create();
+        $token = $this->issueDeviceToken($device);
 
         // A free pack grants itself on first fetch — unchanged by BL-37,
         // because entitlements never looked at what a pack contains.
@@ -151,8 +151,8 @@ class StickerPackDeliveryTest extends TestCase
     {
         $this->publishStickerPack();
 
-        $user = User::factory()->create();
-        $token = $this->issueDeviceToken($user);
+        $device = Device::factory()->create();
+        $token = $this->issueDeviceToken($device);
 
         $this->withToken($token)->getJson('/api/v1/packs/sticker-sheet/manifest')->assertOk();
 

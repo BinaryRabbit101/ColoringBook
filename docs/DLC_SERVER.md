@@ -1,13 +1,14 @@
 # DLC & Backend Server — Design
 
-Backlog item **BL-8**. Originally pure design; as of 2026-08-07 **Phases 0–5 plus the
-§10.3 web-authoring flow are built and live on the mini-pc** — §12 tracks phase status,
-and [SERVER_BUILD_PLAN.md](SERVER_BUILD_PLAN.md)'s Decisions table records where the
-as-built app deviates from this document (SQLite not MySQL, Inertia + Vue not
-Blade + Livewire, `server/` inside the game repo, child profiles in v1, no `age_band`).
-Phase 6 (payments) remains design-only. Where a §-body below still speaks in the future
-tense, it is the original design text — the deltas above and the per-entry as-built notes
-in [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md) are what actually shipped.
+Backlog item **BL-8**. Originally pure design; as of 2026-08-09 **the server, its client
+integration and the §10.3 web-authoring flow are built and live on the mini-pc** — §12
+tracks phase status, and [SERVER_BUILD_PLAN.md](SERVER_BUILD_PLAN.md)'s Decisions table
+records where the as-built app deviates from this document (SQLite not MySQL, Inertia + Vue
+not Blade + Livewire, `server/` inside the game repo, and the **device-only identity**
+decided 2026-08-09, which is what §4–§6 below describe). Phase 6 (payments) remains
+design-only. Where a §-body below still speaks in the future tense, it is the original
+design text — the deltas above and the per-entry as-built notes in
+[BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md) are what actually shipped.
 
 Companion documents: [DESIGN.md](DESIGN.md) (the game), [ANDROID.md](ANDROID.md) (exports),
 [BACKLOG.md](BACKLOG.md) (open items) + [BACKLOG_ARCHIVE.md](BACKLOG_ARCHIVE.md)
@@ -26,31 +27,35 @@ assumes that stack and does not re-litigate it.
 
 ### Goals
 
-1. **Optional parent-managed accounts.** A grown-up signs up; children never touch an email
-   field. The game must remain fully playable with no account at all.
-2. **Cloud-synced progress.** A kid who colours the coyote book on the tablet sees that
-   progress on the web build, without losing work when two devices disagree.
+1. **No accounts. The device is the identity.** Nobody signs up, nobody signs in, nobody
+   types an email — the install registers itself and is handed a token (§4). The game is
+   fully playable whether that ever succeeds or not.
+2. **Buy a pack once, own it on every device.** The store account already carries a
+   household's purchases across devices; the server re-verifies the same receipt from a
+   second device and grants that device its own entitlement (§9).
 3. **DLC coloring-book packs.** Buy/claim a pack → it downloads → new books appear on the
    shelf, at runtime, in an exported build (where `res://` is read-only).
 4. **An admin flow to publish books.** Upload the artist's source art, attach the mapping
    pipeline's output, preview it, publish it as a pack version.
-5. **Offline-first, always.** The local save stays the source of truth for gameplay. The
-   network is a background reconciliation, never a gate on a screen.
+5. **Offline-first, always.** The local save is the *only* save, and it never leaves the
+   device. The network delivers catalogue and pack bytes; it is never a gate on a screen.
 6. **Solo-developer sized.** One Laravel app, one database, local disk storage, Laravel's
    built-in queue. No microservices, no Kubernetes, no event bus.
 
 ### Non-goals
 
+- **No player accounts, no sign-in, no account linking, no child profiles.** The one email
+  address this system stores belongs to the *operator* who publishes packs (§4.1).
+- **No cloud save-sync.** Progress, paint layers and sticker placements live in `user://`
+  and stay there (§6). Nothing a child makes is ever uploaded.
 - **No user-generated content, no sharing, no chat, no social graph, no leaderboards.** These
   are the features that turn a kids' app into a compliance project. Deliberately out of scope.
 - **No third-party analytics or ad SDKs in the client.** This is the single biggest COPPA
   risk surface and the cheapest one to avoid: don't add it.
 - **No server-side rendering of gameplay.** Painting stays entirely client-side.
-- **No real-time multiplayer / websockets.** Sync is request/response.
+- **No real-time multiplayer / websockets.** Every client call is request/response.
 - **No CDN in v1.** One Nginx serving zips off local disk is enough for the expected scale.
 - **The server is not the payment processor** on mobile — see §9.
-- **No server-side account for a child.** Child profiles are rows under a parent account with
-  a nickname and an avatar index, nothing more.
 
 ---
 
@@ -63,10 +68,10 @@ These come from the existing code and are not negotiable without changing it:
 | `res://` is read-only in exports | Godot | DLC must install into `user://` |
 | `BookDef.discover()` scans `res://resources/books/*/book.tres` only | `book_def.gd:79` | Discovery needs a second, `user://`-aware root |
 | `PageDef` holds `res://` **paths**, and `PageView.load_page()` calls `load()` on them | `page_def.gd`, `page_view.gd:148` | Runtime PNGs need a texture-injecting overload; `load()` cannot open an unimported `user://` PNG |
-| The save is keyed by `BookDef.resource_path` | `game_state.gd:336` `book_key()` | A `res://` path is a terrible cross-device key. Needs a stable `book_uid` — see §6.1 |
+| The save is keyed by `BookDef.resource_path` | `game_state.gd:336` `book_key()` | A `res://` path breaks the moment a book arrives in `user://dlc/`. Needs a stable `book_uid` — see §6.1 |
 | The ID map must stay lossless or region IDs bleed | DESIGN.md §3.2 | Drives the pack format decision in §7.1 |
 | `GameState` owns **all** of `user://` | `game_state.gd` header | The pack installer must go *through* `GameState`, not around it |
-| Page status is already monotonic and sticky | `game_state.gd:462` `mark_page_status()` | Progress merge is nearly a CRDT for free — see §6.3 |
+| Page status is already monotonic and sticky | `game_state.gd:462` `mark_page_status()` | Two book entries can be folded together without asking anybody, which is what the v1→v2 save migration needs — see §6.3 |
 | A page is ~450–630 KB of shipped art (coyote) | `assets/books/coyote/` | A 12-page pack is ~6–8 MB. Small. No chunked-upload machinery needed |
 
 ---
@@ -82,28 +87,30 @@ flowchart LR
         art --> pipe --> packer
     end
 
-    subgraph minipc["Mini-pc — Nginx + PHP-FPM + MySQL"]
+    subgraph minipc["Mini-pc — Nginx + PHP-FPM + SQLite"]
         api["Laravel API<br/>/api/v1/*"]
-        admin["Admin UI<br/>(Blade + Livewire)"]
-        db[("MySQL")]
-        disk[("Local disk<br/>packs/ + paint/")]
+        admin["Operator UI<br/>(Inertia + Vue)"]
+        db[("SQLite")]
+        disk[("Local disk<br/>packs/ + assets/")]
         api --- db
         api --- disk
         admin --- api
     end
 
     subgraph client["Godot client (Android / Web / PC)"]
-        gs["GameState<br/>user:// save + paint"]
-        backend["Backend autoload<br/>api + sync + installer"]
+        gs["GameState<br/>user:// save + paint<br/>(never leaves the device)"]
+        backend["Backend autoload<br/>api + installer"]
         dlc[("user://dlc/&lt;pack&gt;/")]
-        backend --- gs
         backend --- dlc
     end
 
     packer -- "POST pack version (zip)" --> api
     api -- "signed pack URL (X-Accel-Redirect)" --> backend
-    backend -- "progress sync / entitlements" --> api
+    backend -- "device register / entitlements" --> api
 ```
+
+`GameState` and `Backend` sit side by side rather than one above the other, and the missing
+edge is the design: nothing the child paints is ever handed to the network layer.
 
 Suggested deployment: a sibling Laravel app on the mini-pc, `coloringbook-api`, on its own
 port next to the game's port-91 vhost, following whatever the house Nginx + PHP-FPM pattern
@@ -111,28 +118,32 @@ already is for the other sites.
 
 ---
 
-## 4. Accounts & authentication
+## 4. Identity & authentication
 
-### 4.1 The account belongs to a grown-up
+### 4.1 The device is the identity
 
-- **Registration** requires: email, password, and an explicit "I am the parent or guardian"
-  confirmation. No date of birth, no name, no phone. That's the whole PII footprint.
-- **Child profiles** live under the account: `nickname` (free text, but never displayed to
-  anyone outside the account), `avatar_index` (an integer into a shipped avatar set), and an
-  optional coarse `age_band` (`3-5` / `6-8` / `9+`) used only to pick a default difficulty
-  mode. No child email, no child password, no child-authored text leaving the device.
-- **Adult gate** in the client before any account UI: a simple "type the number twenty-seven"
-  / small arithmetic prompt. It is a *deterrent*, not security — its job is to keep a five
-  year old out of the sign-in screen, and it is the industry-normal pattern. Reuse the
-  existing settings-gear overlay placement from `main.gd`.
-- **Parent dashboard** (plain web, no game): manage profiles, see owned packs, revoke device
-  tokens, delete the account and all data. Account deletion must be self-serve and must
-  actually delete (progress rows, paint blobs, profiles), not soft-delete.
-- **COPPA-shaped posture in one line**: we collect a parent's email and nothing about the
-  child, we run no ads and no analytics, we let no content leave the device except the
-  child's own colouring progress, and deletion is one button. That is a much cheaper place to
-  be than "verifiable parental consent for child accounts", and it is achievable by a solo
-  developer.
+There is no player account anywhere in this system. An install of the game mints a
+`device_uid` (a ULID, persisted in `user://`), registers it, and is handed a token. That is
+the whole of who anybody is.
+
+- **Nothing is collected about the player.** No email, no password, no name, no date of
+  birth, no nickname, no avatar. The `device_uid` is a random string the client chose about
+  itself and the server cannot resolve to a person.
+- **`users` is an operator table.** The only rows in it belong to the person who signs in at
+  `/admin/*` to publish packs; `is_admin` is the whole authorisation model, and rows are
+  created by a seeder or a shell. There is no registration route in the application. That
+  operator's email address is the only address stored anywhere.
+- **The adult gate guards money, not identity.** The client still puts an arithmetic prompt
+  in front of the one grown-up action left — *Restore purchases*, and later a purchase — for
+  the reason it always did: it is a deterrent that keeps a five year old out of a screen
+  meant for a parent, and it is the industry-normal pattern. It no longer guards a sign-in
+  screen because there is not one.
+- **COPPA-shaped posture in one line**: nothing a child makes ever leaves the device,
+  nothing about a child is ever collected, we run no ads and no analytics, and the one
+  identifier that exists is used solely to deliver content the device already owns — which
+  is squarely the "support for internal operations" exemption. There is no consent flow to
+  build because there is nothing to consent to, and no deletion button to build because
+  uninstalling the app *is* the deletion.
 
 ### 4.2 Token auth for the Godot client
 
@@ -141,88 +152,59 @@ already is for the other sites.
 same-origin story worth having. Even for the Web export, cross-origin cookies would be a
 fight for no benefit. One uniform bearer-token path across Android, Web and PC.
 
-- Sign-in returns a token scoped to a **device**: `POST /api/v1/auth/token` with email,
-  password, `device_name`, `device_uid` (a client-generated ULID persisted in `user://`).
+The token is minted **on the `Device` row itself** — `Device` is `Authenticatable` and
+carries `HasApiTokens` — so `$request->user()` is a `Device` on every game route and a
+device owns its entitlements directly, with no join through anything.
+
 - The token is stored in `user://auth.json`. This is **not** secure storage on any of our
   platforms — assume it is readable. Mitigations, in order of importance:
-  - **Abilities**: `save:sync`, `entitlements:read`, `packs:download`. No account mutation,
-    no purchase, no profile deletion from a game token. Anything destructive requires a fresh
-    password confirmation in the web dashboard.
-  - **Revocable per device** from the parent dashboard.
-  - **Expiry**: 90 days sliding; refresh on any successful call. An expired token puts the
-    game into offline mode, silently — never a modal in a kid's face.
-- Password reset is email-based and web-only (the game links out to a browser). This needs
-  outbound SMTP on the mini-pc — see open question **Q11**.
-- Rate-limit auth routes (`throttle:6,1`) and sync routes (`throttle:60,1`).
+  - **Abilities**: exactly `entitlements:read` and `packs:download`, and there is nothing
+    else on the server for a game token to reach. It cannot publish a pack, cannot spend
+    money, and cannot write a single byte of anybody's drawing, because no such route exists.
+  - **Expiry**: 90 days sliding; the expiry moves forward on any successful call. An expired
+    token puts the game into offline mode, silently — never a modal in a kid's face.
+  - **Scoped to one install.** The token's *name* is the `device_uid`, so deleting the tokens
+    of that name signs out exactly one install.
+- **There is no refresh route, and no sign-out route.** A `401` is recovered by calling
+  `/device/register` again with the same uid: find-or-create is what makes re-auth
+  idempotent — the row survives, its entitlements survive, only the token string rotates.
+- Rate-limit registration hard (`throttle:6,1`, stacked on the API-wide `throttle:60,1`):
+  it is the one route that mints a credential out of a client-chosen string.
 
-### 4.3 The anonymous device tier (2026-08-09, BL-52)
+### 4.3 Registration, and why it is not a hole
 
-The account above is **one of two identities**, and it is the bigger one. BL-52
-adds a smaller one underneath it, born from a product requirement ("never buy a
-pack twice between devices") and a compliance stance (no PII unless a grown-up
-chooses an account):
+```
+POST /api/v1/device/register   {device_uid, device_name, platform}
+    → {token, abilities, expires_at, device: {ulid}}
+```
 
-- **`POST /api/v1/device/register`** (no auth, `throttle:6,1`) finds-or-creates an
-  **anonymous** `devices` row — `user_id` NULL — for the client's `device_uid` and
-  answers `{token, abilities, expires_at, device: {ulid}}`. The token carries
-  exactly `entitlements:read` + `packs:download`, **never `save:sync`**: an
-  anonymous device can own packs; it can never upload a child's artwork. Same
-  90-day sliding window as account tokens.
-- **Registration is lazy.** The client calls it only when a purchase needs
-  verifying or a restore is attempted — never on first launch — so a device that
-  only ever plays free content sends the server no identifier at all.
-- **The store account is the cross-device identity for purchases.** Play
-  Billing / StoreKit return the same purchase tokens on every device signed into
-  the same store account; each device re-verifies them (§9) and earns its own
-  entitlement rows. The server never needs to own an identity to prevent a double
-  purchase.
-- **Linking is adoption.** `POST /auth/token` already carries `device_uid`; when
-  the uid has an anonymous row, sign-in migrates its entitlements to the user
-  (union — a pack the user holds revoked stays revoked), revokes the anonymous
-  tokens, and removes the anonymous row. Idempotent. Signing out drops back to
-  the anonymous tier; purchases re-restore from receipts.
-- **A linked `device_uid` is never exposed through register**: the route only
-  ever scopes to the `user_id IS NULL` row, so knowing a device's uid earns an
-  attacker a fresh empty anonymous identity, not someone's account entitlements.
-- **COPPA posture**: the anonymous identifier is a persistent identifier used
-  solely to authenticate content the device already bought — squarely the
-  "support for internal operations" exemption. Free play (with free packs public
-  per §7.4) involves no identifier, no account, no request that says who anyone
-  is.
+**This contract is pinned.** The shipped game codes against exactly these field names, there
+is no second identity to fall back on, and old builds live on players' devices forever.
 
-**The client half, as built.** `AuthStore` holds both identities in the one
-`user://auth.json` (additive keys `anon_token` / `anon_abilities` /
-`anon_expires_at`, on the same schema version — bumping it would sign a
-downgrading build out of a perfectly good account for nothing), and offers two
-deliberately different accessors:
+- **Find-or-create, unauthenticated, by `device_uid` alone.** `devices.device_uid` is
+  globally unique; there is no account for it to be scoped inside.
+- **It runs on startup, silently, and nothing waits for it.** The title screen is already up.
+  If it succeeds the catalogue can say what this device owns and a paid pack will download;
+  if it fails the app is simply offline for the session — free packs, installed packs and
+  every drawing on disk behave exactly as before, and the next launch tries again. The player
+  is never told either way.
+- **Knowing a `device_uid` is knowing a password.** That is the honest framing of the
+  no-auth route: an attacker holding somebody's uid gets that device's entitlements, exactly
+  as a stolen password would have got them an account's. The uid is a 128-bit ULID that the
+  client never displays, never puts in a URL and never sends anywhere but this route's body.
+- **The store account is the cross-device identity for purchases.** Play Billing and StoreKit
+  return the same purchase tokens on every device signed into the same store account, and
+  each device re-verifies them (§9) to earn its own entitlement rows. The server never needs
+  to own an identity to stop somebody paying twice — which is the whole reason accounts are
+  not needed here.
 
-| accessor | is | asked by |
-|---|---|---|
-| `get_live_token()` | the **account** token, or "" | `SyncQueue.is_active()`, `/me`, `/sync/*` |
-| `get_entitlement_token()` | account token, else the anonymous one, else "" | `GET /entitlements`, `/entitlements/verify`, catalogue `owned`, a **paid** pack's download |
-
-That split is the whole client-side enforcement of "an anonymous device can own
-packs; it can never upload a child's artwork" — an anonymous token lacks
-`save:sync` and would 403 forever, so sync must never key off the accessor that
-can return one. `Backend._sync_token()` puts the *entitlement* token on the
-`ApiClient`, which is safe precisely because the queue declines to fire in the
-one state where the two accessors differ.
-
-`Backend.ensure_device_registered()` is the lazy seam, and **nothing in normal
-play calls it** — only a purchase about to be verified
-(`Backend.verify_purchase()` → `ApiClient.verify_receipt()`) and a future
-restore action. `install_pack()` no longer requires an account at all: a free
-pack's bytes are public (§7.4) and a paid one is refused by the server in codes
-the shop already reads, so the client stopped guessing at an answer it is about
-to be given. The shop's Get button asks `PackRow.needs_account()` —
-`not is_free and not owned`, both the server's flags — instead of "is anybody
-signed in".
-
-Schema deltas: `devices.user_id` nullable (uniqueness of `device_uid` extends
-over the anonymous rows); `entitlements.user_id` nullable plus a nullable
-`entitlements.device_id`, exactly one owner per row, unique per `(owner, pack)`
-via the `profile_key`-style generated column, with `platform_txn_id` uniqueness
-relaxed to per-owner — the same purchase legitimately grants on N devices.
+**The client half, as built.** `AuthStore` owns `user://auth.json` — schema **v2**,
+`{device_uid, device_name, token, abilities, expires_at}` — and a v1 file (which held an
+account) is migrated by keeping its `device_uid` and discarding everything else.
+`Backend.sign_in_device()` is the startup call, fire-and-forget; `Backend._authed()` replays
+a request **exactly once** after re-registering on a `401`, so a dead token costs one extra
+round trip and never a user-visible failure. `Backend`'s two carve-outs from `GameState`'s
+monopoly on `user://` are `auth.json` and `dlc/`, and neither is anything the game saves.
 
 ---
 
@@ -230,21 +212,24 @@ relaxed to per-owner — the same purchase legitimately grants on N devices.
 
 MySQL. Laravel conventions (`id` bigint auto-increment, timestamps). Where a value is public
 or crosses the client boundary, add a `ulid`/`slug` column and expose that, never the numeric
-id.
+id. *(As built: SQLite — see the build plan's Decisions table.)*
 
-### Accounts
+### Identities
 
 ```
-users                 id, ulid, email (unique), password, is_admin,
-                      email_verified_at, timestamps
-child_profiles        id, ulid, user_id →users, nickname, avatar_index,
-                      age_band nullable, default_mode ('child'|'adult'), timestamps
-                      (default_mode is vestigial since BL-20 removed the mode split —
-                       the column stays, nothing reads it)
-devices               id, ulid, user_id →users, device_uid (unique per user),
-                      device_name, platform, last_seen_at, timestamps
-personal_access_tokens   (Sanctum's own table; token→device via tokenable + name)
+users                 id, ulid, email (unique), password, is_admin, timestamps
+                      OPERATORS ONLY — the person who publishes packs. No player
+                      has a row here and there is no route that creates one.
+devices               id, ulid, device_uid (globally unique), device_name,
+                      platform, last_seen_at, timestamps
+                      One install of the game, and the whole of a player's identity.
+personal_access_tokens   (Sanctum's own table; a game token is tokenable=Device,
+                          named after the device_uid — see §4.2)
 ```
+
+`devices` has no `user_id`: there is nothing for it to point at. `Device` is the
+`Authenticatable` the game's tokens are minted on, which is why `entitlements` below can
+name it directly.
 
 ### Catalog & content
 
@@ -294,50 +279,33 @@ never derived from a filename or a `res://` path. Built-in books get one too (§
 ### Entitlements
 
 ```
-entitlements          id, user_id →users, pack_id →packs,
+entitlements          id, device_id →devices, pack_id →packs,
                       source ('purchase'|'promo'|'free'|'gift'|'admin'),
                       platform ('google'|'apple'|'stripe'|null),
-                      platform_txn_id nullable (unique per platform),
+                      platform_txn_id nullable,
                       granted_at, revoked_at nullable, timestamps
-                      UNIQUE(user_id, pack_id)
+                      UNIQUE(device_id, pack_id)
+                      UNIQUE(device_id, platform, platform_txn_id)
 ```
+
+**The owner is a device, and only a device.** One row per `(device, pack)` — owning a pack
+is not a quantity. `revoked_at` (a refund, or an admin take-back) is deliberately *not* a
+delete: it hides the books from the shelf while the pixels a child already painted stay on
+the tablet (§7.3), and a revoked free pack stays revoked because the auto-grant never
+resurrects it.
+
+**Receipt uniqueness is per device, on purpose.** `UNIQUE(device_id, platform,
+platform_txn_id)` rather than a global `UNIQUE(platform, platform_txn_id)`: Play Billing and
+StoreKit hand the *same* purchase token to every device signed into the same store account,
+and each of them legitimately earns its own row. That is the entire "restore purchases"
+mechanism (§9), and Google Play requires non-consumables to be restorable. Within one device
+it is still once-only, so a replayed receipt cannot mint a second row. SQL treats NULLs as
+distinct, so free/promo rows with no platform are unaffected either way.
 
 ### Saves
 
-```
-book_progress         id, user_id →users, child_profile_id →child_profiles nullable,
-                      book_uid, revision (int), current_page_index,
-                      page_statuses json  ["complete","in_progress",...],
-                      page_erased_at json nullable  [null,"2026-…",…]  (BL-18)
-                      furthest_page_index, client_updated_at, timestamps
-                      UNIQUE(user_id, child_profile_id, book_uid)
-paint_layers          id, book_progress_id →book_progress, page_index,
-                      sha256, bytes, storage_path, revision,
-                      client_painted_at, timestamps
-                      UNIQUE(book_progress_id, page_index)
-shelf_erasures        id, user_id →users, child_profile_id →child_profiles nullable,
-                      erased_at, timestamps                            (BL-18)
-                      UNIQUE(user_id, child_profile_id)
-```
-
-One row **per book**, not one blob per account. That single choice removes most conflicts:
-two devices colouring different books never contend. `revision` is a per-row integer for
-optimistic concurrency.
-
-*As built (2026-08-06):* the literal `UNIQUE(user_id, child_profile_id, book_uid)` would not
-constrain the account-level shelf — SQL treats two NULLs as distinct — so the implemented
-key is `UNIQUE(user_id, profile_key, book_uid)` over a stored generated column
-`profile_key = coalesce(child_profile_id, 0)`. Losing paint versions live in a sidecar
-`retained_paint_layers` table rather than extra `paint_layers` rows, keeping
-`UNIQUE(book_progress_id, page_index)` meaning "the current picture".
-
-*As built (2026-08-07, BL-18):* `shelf_erasures` postdates this section. It is a table
-rather than a column on `users`/`child_profiles` for one concrete reason — the erase censor
-is a `<=` against `client_updated_at`, so the clock must keep its microseconds, and
-microsecond storage on an Eloquent model is a `$dateFormat` on the *whole* model; a column
-on `users` would silently restamp every other timestamp on the account. It carries the same
-`profile_key` generated column, for the same NULL reason. A missing row means "never
-erased", which is deliberately not the epoch.
+There are none on the server. A child's progress, paint layers and sticker placements live
+in `user://` on the device that made them and are never uploaded — see §6.
 
 ### Storage layout on disk
 
@@ -346,22 +314,31 @@ storage/app/private/
   packs/<pack_slug>/v<version>/pack.zip        # the shipped bundle
   packs/<pack_slug>/v<version>/files/...       # unpacked, for per-file delta downloads
   assets/<sha256[0:2]>/<sha256>                # content-addressed originals (incl. masks)
-  paint/<user_ulid>/<book_uid>/page_NN.png             # account shelf
-  paint/<user_ulid>/<profile_ulid>/<book_uid>/page_NN.png   # a child's shelf (as built)
 ```
 
-The `<profile_ulid>` segment postdates this section: two children painting the same book on
-one account must not share a file. Unambiguous because `book_uid` is a lower-case slug and
-ULIDs are upper-case base32.
+Everything on this disk is **content the operator published**. No byte of it came from a
+player, which is what makes the backup story (**Q2**) small: a lost disk costs a re-publish,
+never somebody's drawing.
 
 Content-addressing the assets means re-uploading identical art is free and a checksum
 mismatch is detectable without a database round trip.
 
 ---
 
-## 6. Cloud saves
+## 6. Saves — local, and only local
 
-### 6.1 Mapping the current local save to the server
+**The `user://` save is the whole persistence story.** Nothing in this section describes a
+network call, because there is not one: no progress endpoint, no paint blob, no merge, no
+conflict, no erase clock. `GameState` keeps its monopoly on `user://` and `Backend` never
+reads it. A drawing exists on the device it was drawn on, and moving a child's colouring
+between two tablets is not a feature this product has.
+
+What survives from the original cloud design, and why it is still here: the **save's key**
+(§6.1), which stopped being a `res://` path so that a book delivered in a pack could be
+saved against at all, and the **status ordering** (§6.3), which the v1→v2 migration folds two
+book entries together with.
+
+### 6.1 The save's key: `book_uid`
 
 Today (`game_state.gd`, `save_v1.json`):
 
@@ -376,12 +353,12 @@ Today (`game_state.gd`, `save_v1.json`):
 (A page entry was a bare status string until BL-10 added the coloring lock; the
 reader still accepts that form, so v1 files from before it load unchanged.)
 
-Paint lives beside it at `user://paint/<book_slug>/page_NN.png`.
+Paint lives beside it at `user://paint/<book_slug>/page_NN.png`, and since BL-38 an animated
+finish adds `page_NN_fx.png` next to it.
 
-The mapping to the server is almost 1:1 — one `books` entry becomes one `book_progress` row —
-**except for the key**. `res://resources/books/coyote/book.tres` is a build-time path: it
-breaks the moment a DLC book lives in `user://dlc/…`, and it is meaningless as a cross-device
-identifier. So:
+The problem is **the key**. `res://resources/books/coyote/book.tres` is a build-time path: it
+breaks the moment the book arrives in `user://dlc/…` instead, and since BL-25 a release build
+ships no `res://` books at all, so every book on a player's shelf is one of those. So:
 
 > **Decision — save schema v2.** Introduce `BookDef.book_uid` (an authored `@export String`),
 > key the save's `books` object by `book_uid`, and migrate v1 files with a lookup table of the
@@ -390,92 +367,64 @@ identifier. So:
 > directories get renamed once during migration. This is a client-side change with no server
 > dependency and belongs in **Phase 0**.
 
+`book_uid` is authored once, globally unique and never reused — the same promise §7.2 makes
+about it in a pack manifest, and the reason a book keeps its progress across a pack update,
+a re-install or a move from a built-in fixture to a downloaded pack.
+
 The `mode` field stays local — and since BL-20 (2026-08-07) it is vestigial everywhere:
 the game has one palette, nothing writes or branches on `mode`, and readers merely
 tolerate the key in old saves.
 
-### 6.2 What syncs, and how eagerly
+### 6.2 What leaves the device
 
-| Data | Size | Sync policy |
+Nothing the player creates. This is the whole table:
+
+| Data | Where it lives | Leaves the device? |
 |---|---|---|
-| Progress JSON (per book) | ~200 B | **Eager.** Pushed at the existing save points, debounced 5 s. Pulled on launch and on book open. |
-| Paint layer PNG (per page) | 0.5–2 MB | **Lazy.** Uploaded at the existing save points, but only on unmetered connections by default, and only for pages the player actually touched. Downloaded **on demand** when a page is opened on a device that has no local paint but the server has a newer layer. |
-| Mode / settings | tiny | **Local only** in v1. |
+| Progress JSON (per book) | `user://save_v2.json` | **No.** |
+| Paint layer PNG (per page) | `user://paint/<book_slug>/page_NN.png` (+ `_fx.png`, BL-38) | **No.** |
+| Sticker placements (per page) | in the same save, beside `status`/`locked` (BL-36/BL-42) | **No.** |
+| Settings | local | **No.** |
 
-The save points do not change: page complete, leaving the book, app quit
-(DESIGN.md §3.2, M6). The sync layer hooks `GameState.save_written` and the paint-write path;
-it never triggers an extra `get_paint_image()` readback of its own.
+The save points do not change and never did: page complete, leaving the book, app quit
+(DESIGN.md §3.2, M6). What changed is that they are now the *end* of the write path rather
+than the start of one — nothing hooks `GameState.save_written` to push anything, and no
+part of the network layer ever calls `get_paint_image()`.
 
-### 6.3 Conflict handling
+Two consequences worth stating plainly, because they are the price of this design and it was
+paid deliberately:
 
-**Progress: merge, don't overwrite.** The existing data is nearly a CRDT already —
-`mark_page_status()` refuses to downgrade a `complete` page, and coverage is monotonic. So the
-merge rule is:
+- **A drawing is only ever on one device**, and a second tablet starts with an empty shelf of
+  the same books. Colouring is not portable, and a family with two tablets has two shelves.
+- **Uninstalling the app deletes the artwork**, because nothing anywhere else has a copy.
+  Platform-level backup is the only mitigation and it is off (`user_data_backup/allow=false`
+  — see [ANDROID.md](ANDROID.md)).
 
-```
-page_statuses[i]   = max(local[i], server[i])   under untouched < in_progress < complete
-furthest_page_index= max(local, server)
-current_page_index = the one from whichever side has the newer client_updated_at
-```
+What is bought is portable; what is drawn is not. That asymmetry is §9's whole subject.
 
-Both sides run the identical merge, so it is commutative and idempotent — replaying a sync
-never changes the result. The client sends `base_revision`; the server 409s with the current
-state if it moved underneath, the client merges and retries once. That is the whole protocol.
+### 6.3 Status ordering — the one merge rule that survives
 
-**Paint layers: last-write-wins, with a safety net.** Two devices painting the same page
-cannot be merged (compositing two paint layers produces something neither child drew). So:
-
-- LWW on `client_painted_at`, with the server clock as tie-break and a sanity clamp for
-  devices whose clock is wildly wrong (reject timestamps more than 24 h in the future).
-- The **losing** version is retained for 30 days at `paint/<user>/<book>/page_NN.<rev>.png`,
-  and the parent dashboard exposes a plain "restore the older picture" button. This is the
-  cheap answer to the only genuinely upsetting failure mode: a child's finished picture
-  vanishing.
-- The client uploads a **sha256 first** (`HEAD`-style check); if the server already has that
-  hash for that page, the upload is skipped entirely. Re-syncing an unchanged page is free.
-
-**Never resolve a conflict with a dialog.** A five year old cannot answer "keep local or
-keep remote". Merge silently; surface anything questionable in the parent dashboard.
-
-**Erasure: a state that wins, not an absence that loses** (2026-08-07, BL-18). Everything
-above only ever *climbs*, and paint keeps the newest picture. That is right for a save and
-wrong for a deletion: "Erase all progress" and the page's "Start over" were local absences,
-and an absence always loses — the next pull put it all back and the buttons looked broken.
-So an erasure is an **instant**, stored, and every state is measured against it:
+Page status is monotonic and sticky: `mark_page_status()` refuses to downgrade a `complete`
+page, and coverage only climbs. The ordering that falls out of it,
 
 ```
-shelf:  a state whose client_updated_at <= erased_at IS the empty book
-page:   page_erased_at[i] = max(a[i], b[i]); a side whose client_updated_at is
-        <= that reads `untouched` for page i
-paint:  an upload whose client_painted_at is <= either clock is refused
+untouched < in_progress < complete
 ```
 
-- **Ties go to the erase** (`<=`, not `<`). A wipe is the newest thing anybody said about
-  the shelf, and a save from the same microsecond surviving it is the failure the button is
-  pressed to avoid.
-- Both censors apply to **each side independently**, so the merge stays commutative and
-  idempotent with a clock in play. That matters more here than anywhere: an erase that were
-  order-dependent would resurrect on one device and not another, which *is* the bug.
-- Clocks are **monotonic** — `max`, never assignment — so replaying an erase is free, and a
-  device delivering a week-old erase cannot undo yesterday's wipe.
-- The shelf clock lives in `shelf_erasures`, keyed `(user, child_profile|null)` like
-  `book_progress`. The page clocks live in `book_progress.page_erased_at`, a nullable JSON
-  list index-parallel to `page_statuses`, trailing nulls trimmed.
-- The **rows are really deleted** by a wipe — progress, paint layers, retained versions and
-  the blobs. The clock is the only thing left behind, and it is enough: a device that slept
-  through the wipe finds no row to conflict with, and the create path censors its push
-  rather than "recreating progress beats losing it".
-- **A page reset retains nothing.** The 30-day net above catches a *lost race*; a reset is a
-  deliberate act that already deletes the local file with no undo, and offering to restore a
-  picture onto a page a child asked to start over would be the surprising answer.
-- Stickers (BL-36) are local-only state, so there is nothing on the server to erase; both
-  convergence paths go through `GameState.erase_all_progress()` /
-  `erase_page_progress()`, which clear them, so they ride along.
+is still written down here because one piece of live code needs it: the **v1→v2 save
+migration**, where two `res://`-keyed book entries can migrate onto the same `book_uid` and
+have to be folded into one. The fold is the obvious one — the better status wins per page, a
+lock anywhere wins, the furthest cursor wins, and nothing is ever downgraded —
+`GameState._merge_book_entries()`.
 
-The client mirrors the rule exactly (`SyncQueue.merge_states`), pushes erasures **ahead of
-the pull** in a drain — until the server has been told, a pull hands back the very shelf
-that was erased — and resets its own base revisions and fingerprints when it erases, so the
-next drain cannot re-upload the erased state at a revision the server still agrees with.
+It is commutative and idempotent, which is worth keeping true even now that only a migration
+uses it: a save that is loaded twice must not come out different the second time.
+
+Everything else that used to live in this section — optimistic revisions, last-write-wins on
+paint, the 30-day retention net, the erase clocks of BL-18 — existed to reconcile two devices
+that had both written. There is one writer now, so there is nothing to reconcile.
+**"Erase all progress" and the page's "Start over" are plain local deletes**, and the
+absence they leave is permanent because nothing will ever pull it back.
 
 ---
 
@@ -650,15 +599,16 @@ v4 to fix one page downloads that one page, not 8 MB.
 
 ### 7.4 Delivery
 
-- `GET /api/v1/packs/{slug}/download` (auth + entitlement check) responds `302` to a
-  **short-lived signed URL** (`URL::temporarySignedRoute`, 10 min).
-- **Free packs are public** (2026-08-09, BL-52): when the pack `is_free` and is in
-  a downloadable status, `manifest`, `download` and `files/{path}` skip the token +
-  entitlement gate entirely — a signed-out fresh install can download every free
-  book. The 302-to-signed-URL mechanics below are untouched (the signature was
-  always what moves bytes), the per-IP throttle stays, and the free-claim
-  auto-grant still fires when a token happens to be present so `owned` and
-  `GET /entitlements` keep their meaning for signed-in users.
+- `GET /api/v1/packs/{slug}/download` (device token + `packs:download` + entitlement)
+  responds `302` to a **short-lived signed URL** (`URL::temporarySignedRoute`, 10 min).
+- **Free packs are public.** When the pack `is_free` and is in a downloadable status,
+  `manifest`, `download` and `files/{path}` skip the token and entitlement gate entirely — an
+  install whose registration has never succeeded can still download every free book. The
+  302-to-signed-URL mechanics below are untouched (the signature was always what moves
+  bytes), the per-IP throttle stays, and the free-claim auto-grant still fires when a token
+  *is* present, so `owned` and `GET /entitlements` keep their meaning. Whether a route needs
+  a token therefore depends on the **pack**, which is why the check lives in
+  `PackDownloadController::authorised()` rather than in route middleware.
 - The signed route hands off to Nginx with **`X-Accel-Redirect`** into a private `internal;`
   location. PHP-FPM authorises; Nginx pushes the bytes. This is the standard house pattern
   and keeps a 8 MB download off a PHP worker.
@@ -719,13 +669,15 @@ v4 to fix one page downloads that one page, not 8 MB.
    `load_page(paths…)` becoming a thin wrapper over it. `_id_image` handling, the shader,
    and the whole stroke lifecycle are untouched.
 4. **A `Backend` layer.** DESIGN.md §3.4 and the godot-practices skill both say "one
-   autoload", and this proposes a second. The justification: an auth token, a sync queue and
-   an in-flight download genuinely outlive every screen, and threading them through
-   `main.gd` would put networking in the flow orchestrator. The mitigation: `Backend` is a
-   **thin facade** over plain `RefCounted` classes (`api_client.gd`, `sync_queue.gd`,
+   autoload", and this proposes a second. The justification: a device token, a cached
+   entitlement list and an in-flight download genuinely outlive every screen — the shelf is
+   freed while a download continues — and threading them through `main.gd` would put
+   networking in the flow orchestrator. The mitigation: `Backend` is a **thin facade** over
+   plain `RefCounted` classes (`api_client.gd`, `auth_store.gd`, `entitlements_store.gd`,
    `pack_installer.gd`) that are unit-testable without the tree, it owns **no game state**
-   (it calls into `GameState`, which keeps its monopoly on `user://`), and with no account
-   configured every method is a no-op. Flagged as **Q3** — worth an explicit yes.
+   (`GameState` keeps its monopoly on `user://` bar two carve-outs, `auth.json` and `dlc/`),
+   and with no server reachable every method is a no-op rather than an error. Flagged as
+   **Q3** — worth an explicit yes.
 
 ### 8.2 Offline-first behaviour
 
@@ -733,49 +685,57 @@ Non-negotiable rules:
 
 - **No screen ever awaits a request.** Title, shelf, and colouring screens render from local
   state and are patched when a response lands.
-- **The local save is authoritative for gameplay.** Sync writes into `GameState` through its
-  existing API (`mark_page_status`, the paint-layer writers) so there is still exactly one
-  writer of `user://`.
-- **Mutations are queued, not lost.** A persisted `user://sync_queue.json` holds pending
-  pushes; an offline session drains it on the next launch. The queue is *idempotent* — every
-  entry is "here is my current state for book X at revision N", not a delta, so replaying it
-  twice is harmless and a stale entry is simply superseded.
-- **Failures are silent to the child.** Network errors go to a debug log and a small
-  status line in the parent/settings panel ("Last synced: 2 hours ago"). Never a modal.
+- **The local save is the only save.** `GameState` is the sole writer of a child's work and
+  `Backend` never reads it. Nothing in the network layer uploads anything, ever.
+- **A dead token is answered, not reported.** There is no refresh route: a `401` makes
+  `Backend` re-register under the same `device_uid` and replay the request exactly once
+  (§4.2). Twice would be a loop; nothing user-facing changes either way.
+- **Books are never yanked away offline.** Hiding a book off the shelf takes a *positive*
+  revocation from a successful `GET /entitlements` — a failed call leaves the last known good
+  cache in place, so a flat network never empties a shelf.
+- **Failures are silent to the child.** Network errors go to a debug log and a warning.
+  Never a modal, never a kid-facing string.
 - **Every request has a timeout** (`HTTPRequest.timeout`, 10 s for JSON, 120 s for a pack) and
   exponential backoff with jitter, capped at ~5 minutes. Give up quietly after that until the
   next app launch.
 - **Downloads are user-initiated.** A pack never starts downloading on its own — a kid on a
   parent's phone plan does not silently pull 8 MB. Tapping a locked book on the shelf asks.
 
-### 8.3 Sync flow
+### 8.3 The client's whole conversation with the server
+
+Three exchanges, and that is all of them.
 
 ```mermaid
 sequenceDiagram
-    participant G as GameState (user://)
+    participant S as Store (Play / StoreKit)
     participant B as Backend
     participant A as Laravel API
 
-    Note over G,B: App launch (token present)
-    B->>A: GET /api/v1/sync/progress?since=<cursor>
-    A-->>B: books[] with revisions
-    B->>B: merge (max per page status)
-    B->>G: mark_page_status / cursor updates
-    B->>A: PUT /api/v1/sync/progress {book_uid, base_revision, ...}
-    A-->>B: 200 {revision} | 409 {server state}
-    B->>B: on 409 → merge → retry once
+    Note over B,A: App launch — silent, nothing waits on it
+    B->>A: POST /api/v1/device/register {device_uid, device_name, platform}
+    A-->>B: 200 {token, abilities, expires_at, device}
+    B->>A: GET /api/v1/entitlements?client_version=…
+    A-->>B: owned packs + latest_version (this IS the update check, §7.3)
 
-    Note over G,B: Page complete (existing save point)
-    G-->>B: save_written / paint saved
-    B->>A: POST /api/v1/sync/paint/{book_uid}/{page} {sha256}
-    A-->>B: 204 already have it | 202 upload it
-    B->>A: PUT (binary) if 202
+    Note over B,A: The grown-up tapped Get, or a pack version moved
+    B->>A: GET /packs/{slug}/manifest?version=
+    B->>A: GET /packs/{slug}/download   (or …/files/&lt;path&gt; per file)
+    A-->>B: 302 → signed URL → bytes (X-Accel-Redirect)
+    B->>B: verify every sha256 → atomic swap into user://dlc/&lt;slug&gt;/
 
-    Note over G,B: Opening a page with no local paint
-    B->>A: GET /api/v1/sync/paint/{book_uid}/{page}
-    A-->>B: 302 signed URL → PNG
-    B->>G: save_page_paint(...) → ColoringPage restores it
+    Note over B,A: Restore purchases (behind the AdultGate)
+    S-->>B: the store's receipts for this store account
+    loop each receipt
+        B->>A: POST /api/v1/entitlements/verify {platform, purchase_token, sku}
+        A-->>B: 200 — granted to THIS device
+    end
+
+    Note over B,A: 401 anywhere above
+    B->>A: POST /device/register (same uid) → replay the request once
 ```
+
+Any of the three failing leaves the game exactly as playable as it was; none of them carries
+a single byte a child drew.
 
 ---
 
@@ -788,22 +748,41 @@ Worth stating plainly because it constrains the API more than anything else:
   completes a Play purchase, sends the purchase token to
   `POST /api/v1/entitlements/verify`, and the server validates it against the Play Developer
   API and writes an `entitlements` row. Same shape for Apple/StoreKit if iOS happens.
-- **On web/desktop**, Stripe Checkout from the parent dashboard is the path of least
-  resistance, with the webhook writing the same `entitlements` row.
-- **The client never decides what it owns.** It caches the entitlement list (with a short TTL
-  and a "last known good" fallback for offline play), but every download is authorised
-  server-side.
+- **On web/desktop**, Stripe Checkout is the path of least resistance, with the webhook
+  writing the same `entitlements` row against the device that started the checkout. Still
+  Phase 6, and still open (**Q6**).
+- **The client never decides what it owns.** It caches the entitlement list (with a "last
+  known good" fallback for offline play), but every paid download is authorised server-side.
 - **Free packs are the honest first milestone.** They exercise the entire catalogue,
   entitlement, download and install path with zero payment integration — see the rollout.
-- **Verification accepts both identities** (2026-08-09, BL-52):
-  `POST /entitlements/verify` takes a device token or an account token and writes
-  the entitlement to whichever owner the token names. Validation goes through a
-  `StoreReceiptVerifier` contract (config seam `coloringbook.stores.*`); until
-  store credentials exist the binding is a fake/dev verifier, so Phase 6 becomes
-  "swap the verifier + add the billing plugin", not a schema change. The
-  new-device flow is: install → store returns purchase tokens → register device
-  (§4.3) → re-verify each token → download. Bought once, owned everywhere,
-  nobody typed an email.
+
+### Restore purchases is the load-bearing path
+
+With no accounts, **re-verifying a store receipt is the only way a purchase reaches a second
+device**, and Google Play *requires* non-consumables to be restorable, so it is not optional
+either.
+
+- `POST /entitlements/verify` `{platform, purchase_token, sku}` takes a device token and
+  writes the entitlement to the device that token was minted on. Validation goes through a
+  `StoreReceiptVerifier` contract (config seam `coloringbook.stores.*`), which ships **all
+  null** — an unconfigured platform answers `STORE_UNAVAILABLE` (503, retryable) rather than
+  silently accepting receipts it cannot check. Phase 6 is therefore "bind a real verifier and
+  add the billing plugin", not a schema change.
+- The new-device flow is: install → register (§4.3) → ask the store for this store account's
+  receipts → re-verify each one → the packs download. **Bought once, owned everywhere, nobody
+  typed an email.**
+- `entitlements` is keyed per device for exactly this reason (§5): the same purchase token
+  legitimately grants on every device that presents it.
+- Client side, this is one button. `Backend.restore_purchases()` posts each receipt that
+  `Backend.get_store_receipts()` returned — the billing-plugin seam, which answers an empty
+  array on every platform that has no store — and the settings overlay's **Purchases →
+  Restore** row sits behind the `AdultGate`. The gate guards money now; it used to guard a
+  sign-in screen (§4.1).
+- **A paid pack nobody owns reads "In the store"** in the shop, rather than offering a
+  download it would be refused. The row keys off the server's own two flags (`is_free`,
+  `owned`) and never off "is anybody signed in", because nobody ever is. Until Phase 6 binds
+  a store, that state is honest and terminal: the way to own it is to buy it where it is
+  sold.
 
 ---
 
@@ -977,54 +956,26 @@ fixture page and diff the artifacts before trusting it.
 Base `/api/v1`. JSON in/out. Bearer token except where noted. Versioned in the path because
 old game builds live on players' devices forever.
 
-### Auth
+### Device identity
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| `POST` | `/auth/register` | none | `{email, password, is_guardian:true}` → 201 |
-| `POST` | `/auth/token` | none | `{email, password, device_uid, device_name}` → `{token, abilities, expires_at, user}`. Adopts the uid's anonymous device row when one exists (§4.3, BL-52) |
-| `POST` | `/device/register` | none | BL-52: `{device_uid, device_name, platform}` → `{token, abilities, expires_at, device}` — anonymous, `entitlements:read` + `packs:download` only |
-| `POST` | `/auth/refresh` | token | slides expiry, returns `{expires_at}` |
-| `DELETE` | `/auth/token` | token | sign out this device |
-| `GET` | `/me` | token | `{user, profiles[], devices[]}` |
+| `POST` | `/device/register` | none, `throttle:6,1` | `{device_uid, device_name, platform}` → `{token, abilities, expires_at, device: {ulid}}`. Find-or-create by `device_uid` (§4.3) |
 
-### Profiles
+That is the entire auth surface. There is no register, no sign-in, no sign-out, no refresh
+and no `/me`: a `401` is answered by calling this route again with the same uid, which is
+idempotent by construction and hands back the same device row, entitlements and all.
+Abilities are exactly `entitlements:read` + `packs:download` and there is nothing else on
+this server a game token can reach.
 
-| Method | Path | Notes |
-|---|---|---|
-| `GET`/`POST` | `/profiles` | list / create `{nickname, avatar_index, age_band?}` |
-| `PATCH`/`DELETE` | `/profiles/{ulid}` | rename / remove (cascades progress) |
+**The response shape is pinned.** Old builds live on players' devices forever and there is no
+second identity for them to fall back on, so no field here is ever renamed, nested or dropped.
 
-### Sync
+### Saves
 
-| Method | Path | Notes |
-|---|---|---|
-| `GET` | `/sync/progress?profile=&since=` | `{books:[{book_uid, revision, current_page_index, page_statuses[], page_erased_at[], client_updated_at}], erased_at, server_time}` |
-| `PUT` | `/sync/progress` | `{profile, books:[{book_uid, base_revision, …, page_erased_at?[]}]}` → `200 {results:[{book_uid, revision}], erased_at}` or per-book `409` with server state. Batched: one call for the whole shelf. |
-| `DELETE` | `/sync/progress` | `{profile?, erased_at?}` → `200 {erased_at, books_erased, pictures_erased}`. "Erase all progress" (BL-18) |
-| `POST` | `/sync/paint/{book_uid}/{page}` | `{sha256, bytes, client_painted_at}` → `204` (already have it) / `202` + upload URL |
-| `PUT` | `/sync/paint/{book_uid}/{page}` | raw PNG body, `Content-Digest` checked → `201 {revision}` |
-| `DELETE` | `/sync/paint/{book_uid}/{page}` | `{profile?, client_erased_at?}` → `200 {erased_at, revision, picture_erased}`. The page's "Start over" (BL-18) |
-| `GET` | `/sync/paint/{book_uid}/{page}` | `302` to signed URL, or `404` |
-
-Erasure (BL-18, §6.3) adds three fields and two verbs, and nothing else moved. `erased_at`
-is top-level on both progress calls — the shelf's erase clock, `null` for a shelf nobody
-has wiped, and **never filtered by `since`**, because a wipe leaves no rows behind and a
-cursored pull has nothing else to learn it from. `page_erased_at` is index-parallel to
-`page_statuses` with `null` where a page has never been reset, trailing nulls trimmed. Both
-`DELETE`s take the **device's** clock, not the server's, so an erase made on a plane still
-beats everything painted before it; both are idempotent, because the clocks only climb.
-
-Codes this adds: `PAINT_ERASED` (409, `details.erased_at`) — that *page* was started over
-more recently than the picture being uploaded, so the device should delete its copy;
-`PROGRESS_ERASED` (409, `details.erased_at`) — the whole *shelf* was, so the device should
-pull progress and converge on empty. Two codes because the remedies are different sizes,
-and because without the second a stale upload would recreate the `book_progress` row it
-hangs off and put a book back on a shelf the parent just cleared.
-
-The parent dashboard's half is `settings/progress`: one row per shelf (the account's own
-plus one per child), what is on each, and a two-step "Erase everything". Session auth,
-never a token — the same rule the pictures page follows.
+There are none. Progress, paint layers and sticker placements never leave the device (§6),
+so there is no `/sync` surface, no progress route, no paint blob route and no erase route to
+document.
 
 ### Catalog & DLC
 
@@ -1032,11 +983,13 @@ never a token — the same rule the pictures page follows.
 |---|---|---|---|
 | `GET` | `/packs` | optional | Published packs; `owned:true` per pack when authed. `?client_version=` filters `min_client_version`. |
 | `GET` | `/packs/{slug}` | optional | Detail + latest `pack_version`, cover, page count, byte size |
-| `GET` | `/packs/{slug}/manifest?version=` | token + entitlement (**public when `is_free`**, BL-52) | The `manifest.json` — lets the client compute a delta before downloading |
-| `GET` | `/packs/{slug}/download?version=` | token + entitlement (**public when `is_free`**, BL-52) | `302` signed URL → `pack.zip` (X-Accel-Redirect) |
-| `GET` | `/packs/{slug}/files/{path}?version=` | token + entitlement (**public when `is_free`**, BL-52) | Single file, for delta updates |
-| `GET` | `/entitlements` | token (account **or device**, BL-52) | `[{pack_slug, latest_version, source, granted_at}]` — also the update check |
-| `POST` | `/entitlements/verify` | token (account **or device**, BL-52) | `{platform, purchase_token, sku}` → validates with the store, grants to the token's owner |
+| `GET` | `/packs/{slug}/cover` | none | The shop thumbnail. Public on purpose — the point of a shop is to show packs nobody owns yet |
+| `GET` | `/packs/{slug}/manifest?version=` | device token + entitlement (**public when `is_free`**) | The `manifest.json` — lets the client compute a delta before downloading |
+| `GET` | `/packs/{slug}/download?version=` | device token + entitlement (**public when `is_free`**) | `302` signed URL → `pack.zip` (X-Accel-Redirect) |
+| `GET` | `/packs/{slug}/files/{path}?version=` | device token + entitlement (**public when `is_free`**) | Single file, for delta updates |
+| `GET` | `/packs/{slug}/v/{version}/archive` \| `.../file/{path}` | **signature only** | The routes that actually move bytes; the signature is the authorisation, so `HTTPRequest.download_file` needs no headers |
+| `GET` | `/entitlements` | device token, `entitlements:read` | `[{pack_slug, latest_version, source, granted_at}]` — also the update check |
+| `POST` | `/entitlements/verify` | device token, `entitlements:read` | `{platform, purchase_token, sku}` → validates with the store, grants to **that device**. This is "restore purchases" (§9) |
 
 ### Admin (`is_admin`, session or admin token)
 
@@ -1047,7 +1000,7 @@ never a token — the same rule the pictures page follows.
 | `POST` | `/admin/packs/{slug}/versions` | the whole zip **or** a manifest + asset ulids → runs validation, returns `{version, warnings[], errors[]}` |
 | `GET` | `/admin/packs/{slug}/versions/{v}/preview` | region-overlay preview per page |
 | `POST` | `/admin/packs/{slug}/versions/{v}/publish` | flips `published_at` |
-| `POST` | `/admin/entitlements` | grant a promo/gift entitlement by email |
+| `POST` | `/admin/entitlements` | grant (or un-revoke) a promo/gift entitlement **by `device_uid`** — the only handle a player has. `DEVICE_NOT_FOUND` (404) when the uid has never registered |
 
 Web authoring (§10.3, BL-24) adds book/page CRUD alongside the pack routes:
 
@@ -1107,69 +1060,73 @@ stable machine-readable `code` — the client branches on `code`, never on prose
 
 Each phase is independently shippable and leaves the game working.
 
-> **Implementation status (2026-08-06):** Phases **0–5** are built — the server
-> at `server/` in this repo, the client work (Phase 0 plus the §8 Backend
-> autoload, DLC install, and progress/paint sync) in `godot/`. See
-> `docs/SERVER_BUILD_PLAN.md` for the decisions that supersede this document
-> (SQLite not MySQL, Inertia+Vue not Blade+Livewire, profiles in v1, no
-> `age_band`) and `server/CLAUDE.md` for the as-built conventions. Phase 6
-> (payments) remains open, as does deploying the Laravel app to the mini-pc
-> (the game's web build ships to port 91; see BL-18 for a sync/erase design
-> question found during client integration).
+> **Implementation status (2026-08-09):** every phase that still exists is built — the
+> server at `server/` in this repo, the client work (Phase 0 plus the §8 `Backend`
+> autoload and DLC install) in `godot/`, both deployed to the mini-pc. See
+> `docs/SERVER_BUILD_PLAN.md` for the decisions that supersede this document (SQLite
+> not MySQL, Inertia + Vue not Blade + Livewire, and the device-only identity) and
+> `server/CLAUDE.md` for the as-built conventions. **Phase 6 (payments) is the only
+> open one.**
 
 | Phase | Scope | Server needed? |
 |---|---|---|
 | **0 — Client prep** | `book_uid` + save schema v2 + migration; `BookDef.discover()` reads `user://dlc` too; BL-9 display/mask split; `PageView.load_page_textures()`. Prove it by hand-placing a fake pack in `user://dlc/`. | **No** |
-| **1 — Laravel skeleton + auth** | App on the mini-pc, users/profiles/devices, Sanctum tokens, adult gate + sign-in in the client, parent dashboard with device revocation and account deletion. Sign in does nothing yet — that's fine, it's the riskiest surface and it should stand alone. | Yes |
-| **2 — Progress sync** | `book_progress` table, `GET`/`PUT /sync/progress`, the merge rule, `sync_queue.json`, offline drain. **No paint blobs.** Progress alone is already most of the perceived value. | Yes |
+| **1 — Laravel skeleton + device identity** | App on the mini-pc, `devices` + Sanctum tokens minted on them, `POST /device/register`, the operator's own login and dashboard. The game registers silently and nothing on screen changes — the riskiest surface, and it should stand alone. | Yes |
+| **2** | **Not a phase.** Saves are local (§6); there is nothing to sync. | — |
 | **3 — Free DLC packs** | Catalog, entitlements (free/promo only), manifest + zip download, `pack_installer.gd`, atomic install, update check. Ship one real free pack to exercise it end to end. | Yes |
-| **4 — Paint layer sync** | Blob endpoints, sha256 skip, LWW + 30-day retention, restore button in the dashboard. Deferred because it is the most bandwidth and the least certain value (**Q5**). | Yes |
+| **4** | **Not a phase.** A paint layer is a file in `user://` and stays there (§6.2). | — |
 | **5 — Admin pipeline** | `pack build` CLI, admin upload + validation + preview + publish. Until this exists, packs are published by running an artisan command with files on disk — perfectly adequate for the first two or three packs. | Yes |
-| **6 — Payments** | Play Billing / StoreKit / Stripe + `entitlements/verify`. Last deliberately: everything above must work with free packs before money is involved. | Yes |
+| **6 — Payments** | Play Billing / StoreKit / Stripe + `entitlements/verify` + restore purchases (§9). Last deliberately: everything above must work with free packs before money is involved. | Yes |
 
-The ordering principle: **auth before sync, progress before paint, free before paid,
-CLI before UI.** Every phase can stop being worked on without leaving a half-migrated player.
+Phases 2 and 4 were progress sync and paint sync. They kept their numbers when they were cut
+so that "Phase 6" goes on meaning payments everywhere it is written down, here and in code.
+
+The ordering principle: **identity before content, free before paid, CLI before UI.** Every
+phase can stop being worked on without leaving a half-migrated player.
 
 ---
 
 ## 13. Open questions
 
-These need the developer's answer before Phase 1; some change the design materially.
+These needed the developer's answer before Phase 1. Four are closed by the device-only
+design (§4) and are kept, answered, because the reasoning is why the system looks like this.
 
 1. **Q1 — Is this ever a public product, or a family/LAN project?** **ANSWERED 2026-08-06:
    this will ultimately become a public product.** Consequences: keep payments/store billing
    and the full COPPA posture (§4, §9); plan for TLS, a public hostname, offsite backups of
-   MySQL + `paint/`, and a privacy policy. The mini-pc remains the dev/staging host.
+   the database, and a privacy policy. The mini-pc remains the dev/staging host.
 2. **Q2 — Public exposure of the mini-pc.** Tailscale (`minipc.jackal-hippocampus.ts.net`)
-   covers a private answer. A public one needs a reverse proxy, certificates, and a real
-   backup story for user data the game cannot regenerate.
+   covers a private answer. A public one needs a reverse proxy and certificates. The backup
+   story shrank to nothing frightening: the server holds no player data at all (§5), so a
+   restore costs a re-publish rather than somebody's drawing.
 3. **Q3 — Is a second autoload (`Backend`) acceptable?** DESIGN.md §3.4 says one. §8.1 argues
    yes with mitigations; the alternative is `main.gd` owning a `RefCounted` API client and
    passing it down, which is more faithful to the convention and more plumbing.
-4. **Q4 — Child profiles in v1, or one save per account?** Multiple profiles are the right
-   model for a family tablet but touch every sync payload and every save-file key. One save
-   per account is dramatically simpler and can be migrated to profiles later.
-5. **Q5 — Do we actually want paint-layer sync?** It is ~95 % of the bytes for the thing kids
-   care about most (their picture) — and the one piece that cannot be merged. A defensible v1
-   is: sync *progress* everywhere, sync *paint* only on Wi-Fi, and accept that a picture lives
-   on the device it was painted on.
+4. **Q4 — Child profiles?** **ANSWERED 2026-08-09: no, and no accounts to hang them on.**
+   Profiles were the right model for a family tablet only while a shelf lived on a server;
+   with the save local (§6) a second child on the same tablet shares the shelf, exactly as
+   they share the crayons.
+5. **Q5 — Do we actually want paint-layer sync?** **ANSWERED 2026-08-09: no.** It was
+   ~95 % of the bytes for the thing kids care about most and the one piece that cannot be
+   merged. A picture lives on the device it was painted on (§6.2), and losing that is what
+   bought a system with no PII in it.
 6. **Q6 — Pricing model**: one-time per pack, a bundle, a subscription, or free-with-a-tip-jar?
    Only affects Phase 6 but determines whether `entitlements` needs an expiry column.
 7. **Q7 — Web build storage quota.** `user://` on web is IndexedDB. Several installed packs
    plus paint layers will hit browser quotas. Do we cap installed packs on web, stream pages
    instead of installing them there, or accept that web is the demo and mobile is the product?
+   Sharper now that the local file is the only copy: hitting the quota loses artwork.
 8. **Q8 — Artist licensing metadata.** If books ever come from third-party artists, `books`
    needs attribution/licence columns and the shelf needs a credits screen. Cheap now,
    annoying later.
-9. **Q9 — Which profile is colouring right now?** Even with profiles server-side, the client
-   needs a "who's playing?" picker, and a kid-friendly way to switch. That is a UX design
-   question, not a server one, but Phase 2 cannot ship without an answer.
+9. **Q9 — Which profile is colouring right now?** **MOOT 2026-08-09** — see Q4. There is no
+   picker to design because there is nothing to pick between.
 10. **Q10 — Pack format stability policy.** `manifest_version` is in the file, but what is the
     promise? Proposal: the client must read every manifest version it has ever shipped, and
     format changes are additive only. Confirm.
-11. **Q11 — Outbound email.** Password reset and email verification need SMTP from the
-    mini-pc (a relay like Postmark/SES/Mailgun, or the household mail setup). Without it,
-    Phase 1's account recovery story is "ask the developer".
-12. **Q12 — Do we collect `age_band` at all?** It only picks a default difficulty mode, which
-    the parent can set directly. Collecting nothing about the child is a cleaner story; the
-    field is in §5 as a proposal, not a decision.
+11. **Q11 — Outbound email.** Narrowed to one user: the operator's own password reset.
+    `MAIL_MAILER=log` is adequate until this app is public, and a relay
+    (Postmark/SES/Mailgun, or the household mail setup) is a deploy-time concern. No player
+    ever receives mail, because no player has an address here.
+12. **Q12 — Do we collect `age_band` at all?** **ANSWERED: nothing about a child is
+    collected**, `age_band` included — there is no row it could go in (§5).

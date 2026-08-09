@@ -30,7 +30,6 @@ return [
 
     'accel_locations' => [
         'packs' => env('COLORINGBOOK_ACCEL_LOCATION_PACKS', '/_packs'),
-        'paint' => env('COLORINGBOOK_ACCEL_LOCATION_PAINT', '/_paint'),
     ],
 
     /*
@@ -43,7 +42,6 @@ return [
     |   packs/<pack_slug>/v<version>/pack.zip
     |   packs/<pack_slug>/v<version>/files/...
     |   assets/<sha256[0:2]>/<sha256>
-    |   paint/<user_ulid>/<book_uid>/page_NN.png
     |
     | The disks themselves are declared in config/filesystems.php.
     |
@@ -52,10 +50,9 @@ return [
     'storage' => [
         'packs_disk' => env('COLORINGBOOK_PACKS_DISK', 'packs'),
         'assets_disk' => env('COLORINGBOOK_ASSETS_DISK', 'assets'),
-        'paint_disk' => env('COLORINGBOOK_PAINT_DISK', 'paint'),
 
-        // Root of the private tree, relative to storage/app. The three disks
-        // above are rooted at <private_root>/{packs,assets,paint}.
+        // Root of the private tree, relative to storage/app. The two disks
+        // above are rooted at <private_root>/{packs,assets}.
         'private_root' => env('COLORINGBOOK_PRIVATE_ROOT', 'private'),
     ],
 
@@ -78,20 +75,16 @@ return [
         // token is this many days old. Keeps the sliding window cheap.
         'slide_after_days' => (int) env('COLORINGBOOK_TOKEN_SLIDE_AFTER_DAYS', 1),
 
-        // Same idea for devices.last_seen_at: the dashboard wants "an hour
-        // ago", not a write on every request.
+        // Same idea for devices.last_seen_at: operator forensics want "an
+        // hour ago", not a write on every request.
         'touch_device_after_minutes' => (int) env('COLORINGBOOK_TOUCH_DEVICE_AFTER_MINUTES', 15),
 
-        // Abilities a device token may hold. Nothing destructive: account
-        // mutation always requires a fresh password confirm in the dashboard.
-        'abilities' => ['save:sync', 'entitlements:read', 'packs:download'],
-
-        // BL-52: what an *anonymous* device token carries. Deliberately the
-        // set above minus `save:sync` — an anonymous device can own packs, it
-        // can never upload a child's artwork (§4.3). Sync stays behind the
-        // adult gate on a parent account, which is the only path that ever
-        // carries PII or a child's picture.
-        'anonymous_abilities' => ['entitlements:read', 'packs:download'],
+        // Everything a device token may hold, and the whole set. A device can
+        // read what it owns and download it; there is nothing else on this
+        // server for a game client to reach, and no cloud save to write to.
+        // The `admin` ability is deliberately absent — it is minted only by
+        // `php artisan admin:token`, on a User, from a shell.
+        'abilities' => ['entitlements:read', 'packs:download'],
     ],
 
     /*
@@ -142,36 +135,10 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Child profiles
-    |--------------------------------------------------------------------------
-    |
-    | The whole record of a child: a nickname and an index into the shipped
-    | avatar set. No age band, no email, nothing else (DLC_SERVER.md §4.1 and
-    | SERVER_BUILD_PLAN.md Q12). The nickname is never rendered outside the
-    | account, so it only needs to be short enough to store and display.
-    |
-    */
-
-    'profiles' => [
-        'nickname_max' => (int) env('COLORINGBOOK_NICKNAME_MAX', 40),
-
-        // avatar_index is validated as 0 .. avatar_count - 1.
-        'avatar_count' => (int) env('COLORINGBOOK_AVATAR_COUNT', 12),
-
-        // The palette/difficulty a profile opens in.
-        'modes' => ['child', 'adult'],
-
-        // A guard rail, not a product limit: keeps a scripted client from
-        // filling the table.
-        'max_per_account' => (int) env('COLORINGBOOK_MAX_PROFILES', 12),
-    ],
-
-    /*
-    |--------------------------------------------------------------------------
     | Signed URLs
     |--------------------------------------------------------------------------
     |
-    | Pack and paint downloads 302 to a short-lived temporarySignedRoute.
+    | Pack downloads 302 to a short-lived temporarySignedRoute.
     |
     */
 
@@ -299,53 +266,6 @@ return [
             'rdp' => (float) env('COLORINGBOOK_MAPPING_RDP', 1.5),
             'giant_fraction' => (float) env('COLORINGBOOK_MAPPING_GIANT_FRACTION', 0.9),
         ],
-    ],
-
-    /*
-    |--------------------------------------------------------------------------
-    | Paint layers
-    |--------------------------------------------------------------------------
-    |
-    | Last-write-wins on client_painted_at, with the losing version retained
-    | for 30 days at page_NN.<rev>.png so a parent can restore it (§6.3).
-    | Client clocks more than `max_clock_skew_hours` in the future are
-    | *rejected* — unlike progress, which clamps. A paint upload that loses to
-    | a bogus future timestamp would bury a real picture behind a fake one, and
-    | the client can retry a rejected upload once its clock is sane.
-    |
-    | `max_bytes` is the ceiling on one page's PNG. A 2048² paint layer is
-    | 0.5–2 MB (§6.2); 8 MB is generous headroom and still small enough that
-    | one upload can be buffered without thought.
-    |
-    */
-
-    'paint' => [
-        'retention_days' => (int) env('COLORINGBOOK_PAINT_RETENTION_DAYS', 30),
-        'max_clock_skew_hours' => (int) env('COLORINGBOOK_PAINT_MAX_CLOCK_SKEW_HOURS', 24),
-        'max_bytes' => (int) env('COLORINGBOOK_PAINT_MAX_BYTES', 8 * 1024 * 1024),
-    ],
-
-    /*
-    |--------------------------------------------------------------------------
-    | Progress sync
-    |--------------------------------------------------------------------------
-    |
-    | `PUT /sync/progress` is batched — one call for the whole shelf (§11) —
-    | so the two limits below are guard rails on a single request, not product
-    | limits: a book has a handful of pages and an account a handful of books.
-    |
-    | `max_clock_skew_hours` mirrors the paint knob (§6.3), but progress
-    | *clamps* rather than rejects. A tablet with a wrong clock must never
-    | fail to save a child's colouring; clamping to the server's now is also
-    | strictly safer than rejecting, since it stops a far-future timestamp
-    | winning `current_page_index` forever.
-    |
-    */
-
-    'sync' => [
-        'max_books_per_request' => (int) env('COLORINGBOOK_SYNC_MAX_BOOKS', 200),
-        'max_pages_per_book' => (int) env('COLORINGBOOK_SYNC_MAX_PAGES', 500),
-        'max_clock_skew_hours' => (int) env('COLORINGBOOK_SYNC_MAX_CLOCK_SKEW_HOURS', 24),
     ],
 
 ];

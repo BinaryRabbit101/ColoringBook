@@ -3,19 +3,19 @@
 /*
  * The root of the private content tree, relative to `storage/app`, as declared
  * by `coloringbook.storage.private_root`. The three private disks below are
- * rooted at `<private_root>/{packs,assets,paint}` — read here rather than
+ * rooted at `<private_root>/{packs,assets}` — read here rather than
  * through `config()` because a disk's root has to be a literal by the time the
  * filesystem manager resolves it.
  *
  * It exists so a browser-test run can be given its own tree
- * (`.env.dusk.local` sets `private/dusk`) instead of writing pack, asset and
- * paint blobs into the developer's own `storage/app/private/`, where nothing
- * in the dev database would ever account for them again.
+ * (`.env.dusk.local` sets `private/dusk`) instead of writing pack and asset
+ * blobs into the developer's own `storage/app/private/`, where nothing in the
+ * dev database would ever account for them again.
  */
 $private = 'app/'.trim((string) env('COLORINGBOOK_PRIVATE_ROOT', 'private'), '/');
 
 /*
- * Permissions for the three private disks below.
+ * Permissions for the two private disks below.
  *
  * Flysystem's local adapter creates "private" files 0600 and directories 0700 by
  * default, owned by whoever ran the process. On the deployed box that is *two*
@@ -104,15 +104,6 @@ return [
         'assets' => [
             'driver' => 'local',
             'root' => storage_path($private.'/assets'),
-            'serve' => false,
-            'permissions' => $privatePermissions,
-            'throw' => true,
-            'report' => false,
-        ],
-
-        'paint' => [
-            'driver' => 'local',
-            'root' => storage_path($private.'/paint'),
             'serve' => false,
             'permissions' => $privatePermissions,
             'throw' => true,

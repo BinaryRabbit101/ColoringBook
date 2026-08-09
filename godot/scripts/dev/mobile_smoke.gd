@@ -125,6 +125,10 @@ var _idle_frame_ms := 0.0
 
 
 func _ready() -> void:
+	# No harness but backend_smoke wants a network. Cleared BEFORE the first frame,
+	# which is when Backend's launch session would otherwise register the
+	# DEVELOPER's real device (see Backend.autostart_enabled).
+	Backend.autostart_enabled = false
 	get_window().size = LANDSCAPE_WINDOW
 	# NOT setting the v-sync mode is the point of this harness (see the class doc).
 	_shot_dir = _arg_value("--shot-dir", _shot_dir)

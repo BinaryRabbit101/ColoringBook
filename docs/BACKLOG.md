@@ -7,26 +7,136 @@ institutional memory (decisions, gotchas, smoke counts); nothing is deleted.
 
 ## Open
 
-### BL-8: DLC support + backend server — `server + client integrated` (2026-08-06; Phases 0–5 of docs/DLC_SERVER.md §12)
+### BL-8: DLC support + backend server — `server + client integrated; only payments left` (2026-08-06; docs/DLC_SERVER.md §12)
 Longer-term: introduce DLC coloring-book packs. Backed by a (most likely
 Laravel) server handling:
-- user accounts and cloud-synced game saves
-- DLC entitlement/delivery
+- device identity + entitlement/delivery — bought once, owned on every device
 - uploading and managing coloring books and pages (admin tooling that feeds
   the region-mapping pipeline)
 The Laravel app lives at `server/` (see `server/CLAUDE.md` and
-`docs/SERVER_BUILD_PLAN.md`): accounts/auth/parent dashboard, progress sync,
-catalog + free-pack DLC delivery, paint-layer sync, admin upload/validation/
-preview/publish. 416 tests green. Still open: Phase 0 client work (`book_uid`,
-save v2, `user://dlc` discovery, runtime textures), payments (Phase 6), and
-deploy to the mini-pc.
+`docs/SERVER_BUILD_PLAN.md`): device registration, catalog + free-pack DLC
+delivery, admin upload/validation/preview/publish, and the web authoring
+surface. Deployed to the mini-pc; the client half (`book_uid`, save v2,
+`user://dlc` discovery, runtime textures, `Backend`) shipped with it.
 - 2026-08-07: **payments (Phase 6) deliberately deferred** — the user will pick
-  the provider/pricing/COPPA-consent shape when ready; everything else in this
-  entry has shipped in the meantime (deploy, sync, DLC, authoring, erasure).
+  the provider/pricing shape when ready; everything else in this entry has
+  shipped in the meantime (deploy, DLC, authoring).
+- 2026-08-09: **accounts and cloud save-sync were removed entirely** (BL-53).
+  The bullets about user accounts and cloud-synced saves that used to head this
+  entry are gone from the product, not merely deferred; `user://` is the whole
+  persistence story. What is left open here is **Phase 6 alone**: a real
+  `StoreReceiptVerifier`, a Play Billing plugin behind
+  `Backend.get_store_receipts()`, and the Gradle build that a plugin needs
+  (docs/ANDROID.md).
 - Affected: `server/` (Laravel app in this repo), `docs/DLC_SERVER.md`,
   `docs/SERVER_BUILD_PLAN.md`
 
-### BL-52: Own once, everywhere — anonymous device entitlements + public free packs — `open` (2026-08-09)
+## Completed — awaiting archive
+
+### BL-53: No accounts — the device is the identity — `done` (2026-08-09)
+Product decision, taken the day after BL-52 shipped and superseding half of it:
+**manual account registration and login are gone.** Every install auto-signs-in
+through `POST /api/v1/device/register` (find-or-create by `device_uid`), and
+that is the whole of who anybody is. No parent accounts, no sign-in screen, no
+account linking, no child profiles, no cloud save-sync. Local on-device saving
+is unchanged and is now the sole persistence. The admin web login and the pack
+publishing flow did not move at all.
+
+BL-52 had already proved the load-bearing half — the store account, not ours, is
+what carries a purchase between a household's devices. Once that is true, an
+account buys the product nothing and costs it a PII footprint, a consent story,
+a deletion story and a merge algorithm.
+
+**Server.**
+- The `Device` row **is** the identity: Sanctum tokens are minted on it
+  (`Device` is `Authenticatable` + `HasApiTokens`), so `$request->user()` is a
+  `Device` on every game route. `users` is an operator/admin-only table.
+  `App\Services\EntitlementOwner` deleted; entitlements are owned by
+  `entitlements.device_id` and nothing else.
+- Routes removed: all `/auth/*` (register, token, refresh, sign-out), `GET /me`,
+  all `/profiles`, all `/sync/*` (progress, paint, paint-blob). Web:
+  `settings/{profiles,devices,pictures,progress}`, `DELETE settings/profile`,
+  the passkey well-known, and Fortify's register / email-verification /
+  two-factor / passkey routes.
+- Tables removed: `child_profiles`, `book_progress`, `paint_layers`,
+  `retained_paint_layers`, `shelf_erasures`, `passkeys`, the `two_factor_*`
+  columns, `devices.user_id` / `owner_key`, `entitlements.user_id` /
+  `owner_key`. **Squashed into the original `create_*` migrations** rather than
+  added as a drop round — nothing is deployed that needs the intermediate
+  states.
+- `devices.device_uid` is now **globally** unique (no account to scope it
+  inside). `entitlements` is `UNIQUE(device_id, pack_id)` and
+  `UNIQUE(device_id, platform, platform_txn_id)` — **per-device receipt
+  uniqueness is deliberate**, so the same store receipt grants on every device
+  that presents it. That is the entire restore-purchases mechanism, and Google
+  Play requires non-consumables to be restorable.
+- `POST /device/register` is **byte-for-byte the contract BL-52 shipped**:
+  `{device_uid, device_name, platform}` → `{token, abilities, expires_at,
+  device:{ulid}}`, `throttle:6,1`, abilities exactly
+  `["entitlements:read","packs:download"]`. `save:sync` no longer exists
+  anywhere. **No refresh route**: a `401` is answered by registering again.
+- Final API surface: `device/register`; packs index/show/cover;
+  manifest/download/files (public if free, else token + `packs:download` +
+  entitlement); the signed archive/file routes (`X-Accel-Redirect`);
+  `GET /entitlements` and `POST /entitlements/verify`. `/api/v1/admin/*` is
+  unchanged except that `POST /admin/entitlements` now addresses a
+  **`device_uid`** (`DEVICE_NOT_FOUND` instead of `USER_NOT_FOUND`) — the only
+  handle a player has. Web: `/admin/*`, `/login`, `/dashboard`,
+  `settings/{profile,security,appearance}`, admin session only.
+- Paint disk, the `paint:prune` schedule and `PaintStorage` are all gone.
+- **PII: players have none.** The operator's email is the only address stored,
+  and nothing a child makes ever leaves the device — which makes the COPPA
+  posture an argument nobody has to have.
+
+**Client (Godot).**
+- `sync_queue.gd` deleted (`user://sync_queue.json` is orphaned — nothing reads
+  or writes it), along with `account_panel` and the sync smoke.
+- `auth_store.gd` rewritten: `user://auth.json` schema **v2**, device-only
+  (`{device_uid, device_name, token, abilities, expires_at}`); a v1 file is
+  migrated by keeping **only** its `device_uid`.
+- `Backend`: `sign_in_device()` on startup — silent, fire-and-forget, degrades
+  to offline; `_authed()` replays a request **exactly once** after re-registering
+  on a `401`; `restore_purchases()` + `get_store_receipts()` are the
+  billing-plugin seam; `Backend.DEVICE_ABILITIES` pins the contract for
+  harnesses; `Backend.autostart_enabled` is the dev hook that stops a smoke
+  registering the developer's real device. Backend's `user://` carve-outs are
+  now two: `auth.json` and `dlc/`.
+- The entitlements cache lost its account key — `EntitlementsStore.store()`
+  takes rows only.
+- Shop: a paid, unowned row shows **"In the store"** (`STATE_PURCHASE`) rather
+  than offering a download the server would refuse. Settings' Account row is now
+  **Purchases → Restore**, behind the `AdultGate` — which guards money now
+  instead of accounts.
+- Local `user://` saving is untouched.
+
+**What this costs, stated plainly**: a drawing lives on the device that made it,
+a second tablet starts with an empty shelf of the same books, and uninstalling
+loses the artwork (`user_data_backup/allow` is `false` — see docs/ANDROID.md,
+which now flags that as the deliberate place to revisit). What is *bought* is
+portable; what is *drawn* is not.
+
+- Docs reconciled the same day: `docs/DLC_SERVER.md` §1–§6, §7.4, §8, §9, §11,
+  §12, §13 (§4 is now identity, §6 is local-only saves, §6.1/§6.3 keep their
+  numbers because code comments cite them); `docs/SERVER_BUILD_PLAN.md` gained a
+  2026-08-09 Decisions block that supersedes the design doc's account and sync
+  sections, with the historical work packages left as written;
+  `docs/DESIGN.md` §2/§3.5; `docs/ANDROID.md`.
+- Affected: `server/` (models, migrations, routes, actions, services, tests),
+  `server/CLAUDE.md`, `godot/autoload/backend.gd`,
+  `godot/scripts/backend/{auth_store,api_client,entitlements_store}.gd`,
+  `godot/scripts/components/{settings_panel,adult_gate,pack_shop}.gd`,
+  `godot/scripts/dev/*_smoke.gd`, `docs/*`.
+
+### BL-52: Own once, everywhere — device entitlements + public free packs — `done` (2026-08-09)
+> **Partly superseded the same day by BL-53.** Decisions 1–3 below are exactly
+> what the system does. Decision 4 (linking an anonymous device to an account by
+> adoption) and the closing "this does NOT change artwork sync" paragraph are
+> **gone**: there are no accounts to link to and no artwork sync to preserve.
+> Read the word "anonymous" throughout as simply "the device" — once the account
+> tier above it was removed, the tier this entry added became the only one.
+> The insight that made BL-53 possible is the one this entry opens with, so the
+> reasoning is worth keeping intact.
+
 The requirement, verbatim: *"What's most important is allow the user to not need to
 purchase coloring books twice between devices"* — with an explicit licence to cut
 cloud artwork sync back if that is what a clean COPPA posture costs, and a product
@@ -76,60 +186,50 @@ Four decisions, each independently shippable:
      `(owner, pack)` (the `profile_key` generated-column trick is the house
      pattern for NULL-proof uniqueness). `platform_txn_id` uniqueness relaxes to
      per-owner — the same purchase legitimately grants on N devices.
-4. **Linking is adoption, and it is optional.** When a grown-up signs in
-   (`POST /auth/token`, which already carries `device_uid`), the server migrates
-   the anonymous row's entitlements to the user (union; a pack the user holds
-   revoked stays revoked), revokes the anonymous tokens, and removes the
-   anonymous device row. Idempotent. Signing out drops back to the anonymous
-   tier; purchases re-restore from receipts.
+4. ~~**Linking is adoption, and it is optional.**~~ **Struck by BL-53** — there is
+   no account to be adopted into. A device's entitlements are reached from a
+   second device by re-verifying the store receipt (decision 3), which is the
+   path this entry built anyway.
 
-**What this deliberately does NOT change: artwork sync.** The cutback the
-requirement licensed is realised as "anonymous devices never upload anything",
-not as deleting the built parent-account sync. Sync stays exactly where BL-18/
-BL-50 left it — behind the adult gate, on a parent account, the only path that
-ever carries PII or a child's picture. The COPPA story gets *stronger*: the
-anonymous identifier is used solely for entitlement delivery (squarely the
-"support for internal operations" exemption), free play sends nothing at all,
-and the store handles payment authorisation including platform parental
-controls.
+~~**What this deliberately does NOT change: artwork sync.**~~ **Struck by
+BL-53**, which took the licence this requirement offered in full: artwork sync
+is deleted rather than merely fenced off. The COPPA argument survives it and
+gets shorter — the device identifier is used solely for entitlement delivery
+(squarely the "support for internal operations" exemption), free play sends
+nothing at all, nothing a child makes leaves the device at all, and the store
+handles payment authorisation including platform parental controls.
 
-**Client half (Godot) — shipped 2026-08-09:**
-- `AuthStore` grew the second accessor: `get_live_token()` still means the
-  **account** token and `SyncQueue.is_active()` still keys off it, so an
-  anonymous token cannot turn save-sync on; `get_entitlement_token()` is the
-  account token if signed in, else the anonymous one. Both live in
-  `user://auth.json` as additive keys on the unchanged schema version.
-- Catalog / manifest / download / files calls use the entitlement accessor, and
+**Client half (Godot) — shipped 2026-08-09**, then simplified by BL-53 the same
+day when the account accessor it was balanced against went away:
+- ~~`AuthStore` grew the second accessor~~ — the two-accessor split
+  (`get_live_token()` for the account, `get_entitlement_token()` for either)
+  existed to stop an entitlement-only token being handed to save-sync. With no
+  account and no sync there is **one** token, and `auth.json` went to schema v2
+  to say so (BL-53).
+- Catalog / manifest / download / files calls carry the device token, and
   free-pack downloads work with **no token at all** — `install_pack()` dropped
   its `is_signed_in()` gate entirely (the server is the authority), and the shop
-  offers Download for `is_free || owned` via `PackRow.needs_account()`,
-  regardless of sign-in state.
-- `Backend.ensure_device_registered()` — the lazy registration seam; nothing in
-  normal free play calls it. `Backend.verify_purchase()` +
-  `ApiClient.verify_receipt()` are the Phase-6 receipt seam, with no UI.
-- Sign-in discards the local anonymous token (the server revoked it while
-  adopting) and refreshes entitlements, so the pack a device bought anonymously
-  is on the account's shelf.
-- Web build: no store, so the anonymous tier is dormant there; free packs are
-  public and paid packs remain the parent-account + Stripe path (Phase 6,
-  unchanged).
+  offers Download for `is_free || owned` from the server's own flags rather than
+  from "is anybody signed in".
+- ~~`Backend.ensure_device_registered()` — the lazy registration seam~~;
+  registration is no longer lazy, because with nothing else to identify a device
+  there is no reason to defer it: `Backend.sign_in_device()` runs at startup
+  (BL-53). `ApiClient.verify_receipt()` is still the Phase-6 receipt seam and
+  now has UI — the settings overlay's **Restore**.
+- Web build: no store, so restore is inert there; free packs are public and paid
+  packs remain a Stripe question (Phase 6, unchanged).
 - Smoke coverage: `backend_smoke` (b) tokenless free install + the paid refusal,
-  (n) the whole anonymous tier including the fake verifier, (c) adoption, (h)
-  free-installs-while-expired; `sync_smoke` (c) an anonymous token leaves sync
-  inert, (d) the token is discarded on sign-in; `dlc_smoke` (i) the Get
-  button's decision, serverless.
+  (n) the device tier including the fake verifier, (h)
+  free-installs-while-expired; `dlc_smoke` (i) the Get button's decision,
+  serverless. (`sync_smoke` was deleted with sync.)
 
 Server error codes this adds: `RECEIPT_INVALID` (422), `STORE_UNAVAILABLE`
 (503, retryable), `DEVICE_REGISTRATION_FAILED` (422).
-- Affected: `server/` (migrations, `routes/api/auth.php` or a new
-  `routes/api/device.php`, `routes/api/catalog.php`, `StoreReceiptVerifier` +
-  fake, adoption in the token action, `server/CLAUDE.md`),
-  `godot/scripts/backend/{auth_store,api_client,entitlements_store,sync_queue}.gd`,
-  `godot/scripts/components/pack_shop.gd`, sync/dlc smokes,
+- Affected: `server/` (migrations, `routes/api/device.php`,
+  `routes/api/catalog.php`, `StoreReceiptVerifier` + fake, `server/CLAUDE.md`),
+  `godot/scripts/backend/{auth_store,api_client,entitlements_store}.gd`,
+  `godot/scripts/components/pack_shop.gd`, dlc smoke,
   `docs/DLC_SERVER.md` §4.3/§7.4/§9/§11.
-
-## Completed — awaiting archive
-
 ### BL-47: Four more animated crayon boxes, on a style-level mask decode — `done`
 Logged 2026-08-08. BL-38 shipped two animated boxes and, without meaning to, a
 ceiling: the effect mask hard-coded exactly two animation families, one per
@@ -575,6 +675,14 @@ A grid cannot dodge them; its job is to use the whole width. A rail can.
   `scripts/components/book_cell.gd` (`cancel_press`), `scripts/main.gd`
   (`_apply_shelf_chrome`), flow + shell + mobile smokes, DESIGN.md §2.
 ### BL-50: A page saved on one device never appeared on the other — `done` (2026-08-08)
+> **Moot since BL-53 (2026-08-09).** A page saved on one device never appears on
+> the other now *by design* — there is no sync. `SyncQueue` and its pull are
+> gone; of the fix below only `GameState.page_paint_installed` and
+> `ColoringPage`'s persist guards survive, and nothing emits the signal any
+> more. Kept for the lesson, which outlived the feature: **a screen that reads
+> a file once at load and never again will happily overwrite whatever lands
+> underneath it.**
+
 Playtest report: *"I'm logged in and saved my page canvas, yet when I logged in on
 another device, I didn't see my previously saved page. Both apps were continuously
 running without a refresh/restart."*

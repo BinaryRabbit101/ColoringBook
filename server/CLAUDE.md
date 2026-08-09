@@ -1,7 +1,7 @@
 # Agent instructions — ColoringBook server
 
-The Laravel backend for the ColoringBook game: parent accounts, cloud-synced
-progress, DLC coloring-book packs, and the admin publishing flow.
+The Laravel backend for the ColoringBook game: **device-only identities**, DLC
+coloring-book packs, entitlements, and the admin publishing flow.
 
 **Read before writing code:**
 
@@ -12,7 +12,42 @@ progress, DLC coloring-book packs, and the admin publishing flow.
   doc, house conventions.
 
 Where the two disagree, the build plan's "Decisions" table wins; where the
-build plan is silent, the design doc rules.
+build plan is silent, the design doc rules. **Where either still describes
+parent accounts, child profiles or cloud save-sync, this file wins** — see the
+next section.
+
+## The device is the identity
+
+Internalise this before touching anything else.
+
+There are **no player accounts**. No registration, no sign-in, no account
+linking, no child profiles, no cloud save. A game install calls
+
+```
+POST /api/v1/device/register   {device_uid, device_name, platform}
+    → {token, abilities, expires_at, device: {ulid}}
+```
+
+which **find-or-creates** the `devices` row for that uid and mints a Sanctum
+token **on that row**. `$request->user()` is therefore an `App\Models\Device`
+on every game route, and that device owns every entitlement it holds.
+
+- **The contract above is pinned.** The Godot client codes against those exact
+  field names. Do not rename, nest or drop one.
+- **Abilities are exactly `entitlements:read` + `packs:download`**
+  (`coloringbook.token.abilities`). `save:sync` no longer exists anywhere.
+- **There is no refresh route.** A 401 is recovered by calling
+  `/device/register` again with the same uid: find-or-create makes re-auth
+  idempotent, the row and its entitlements survive, only the token rotates.
+  The 90-day sliding window still applies (`SlideTokenExpiry`).
+- **A purchase reaches a second device by re-verifying the store receipt**,
+  never by signing in. See "Restore purchases" below — Google Play *requires*
+  non-consumables to be restorable, so this is the load-bearing path.
+
+`users` still exists and holds **operators only**: the person who signs in at
+`/admin/*` to publish packs. `is_admin` is the whole authorisation model. Rows
+come from `database/seeders` or a shell — there is no registration route in
+this application at all.
 
 ## Stack
 
@@ -20,8 +55,8 @@ build plan is silent, the design doc rules.
 |---|---|
 | Framework | Laravel 13, PHP 8.3+ (this box runs 8.4.0) |
 | Starter kit | `laravel/vue-starter-kit` (`dev-main`) — Inertia v3 + Vue 3 + TypeScript + Vite + Tailwind 4 |
-| Web auth | Fortify (session), incl. two-factor and passkeys from the kit |
-| Client auth | Sanctum bearer tokens with abilities — **not** SPA cookie mode (design §4.2) |
+| Web auth | Fortify (session) — **login + password reset only**; no registration, no email verification, no two-factor, no passkeys |
+| Client auth | Sanctum bearer tokens minted on `Device`, with abilities — **not** SPA cookie mode (design §4.2) |
 | Database | SQLite, `database/database.sqlite` (house pattern: one file per site) |
 | Storage | Local disks under `storage/app/private/` |
 | Tests | Pest v5 |
@@ -31,8 +66,9 @@ build plan is silent, the design doc rules.
 ## Running it
 
 ```
-composer setup     # install, .env, key, migrate, npm install, npm run build
-composer dev       # serve + queue + vite (php artisan dev)
+composer setup       # install, .env, key, migrate, npm install, npm run build
+php artisan db:seed  # the first operator — admin@example.com / password
+composer dev         # serve + queue + vite (php artisan dev)
 ```
 
 The app listens on `http://localhost:8000`. `MAIL_MAILER=log` — password-reset
@@ -69,11 +105,9 @@ the `/api/v1` prefix with the `api.v1.` name prefix and a baseline
 `throttle:60,1`:
 
 ```
-routes/api/auth.php      WP1 — register, token, refresh, /me, profiles
-routes/api/device.php    BL-52 — anonymous device registration
-routes/api/sync.php      WP2 (progress) + WP4 (paint)
+routes/api/device.php    the only identity — POST /device/register
 routes/api/catalog.php   WP3 — packs, manifest, download, entitlements
-                         BL-52 — public free delivery, /entitlements/verify
+                         public free delivery, /entitlements/verify
 routes/api/admin.php     WP5 — assets, pack versions, preview, publish
                          WP14 — books/pages authoring, one-button publish
                          BL-37 — sticker-set/sticker authoring, same publish
@@ -81,7 +115,13 @@ routes/api/admin.php     WP5 — assets, pack versions, preview, publish
 
 Each file is owned by exactly one work package so parallel agents never edit
 the same route file. **Add your routes to your domain file, not to
-`routes/api.php`.** Auth routes stack `throttle:6,1` on top of the baseline.
+`routes/api.php`.** Device registration stacks `throttle:6,1` on top of the
+baseline.
+
+> **Gone, and not coming back:** `routes/api/auth.php` (register, token,
+> refresh, `/me`, `/profiles`) and `routes/api/sync.php` (progress, paint,
+> erasure, the signed paint-blob route). Nothing in this application syncs a
+> save; the game keeps its colouring in `user://` and that is the whole story.
 
 Web/Inertia routes stay in `routes/web.php` and `routes/settings.php`.
 
@@ -94,17 +134,22 @@ response.
 ### Identifiers
 
 Numeric auto-increment primary keys internally; every row that crosses the API
-boundary also carries a `ulid` column and is addressed by it. `User` mints its
-ULID in a `creating` hook and sets `getRouteKeyName()` to `ulid` — follow that
-shape for new models.
+boundary also carries a `ulid` column and is addressed by it. `Device` and
+`User` mint their ULID in a `creating` hook and set `getRouteKeyName()` to
+`ulid` — follow that shape for new models.
 
 `book_uid` is the exception: it is *authored* (e.g. `coyote-2026`), stable
 forever, never derived from a filename or a `res://` path (design §6.1). BL-37
 adds one more of the same kind, `set_uid`, for sticker sets.
 
+`device_uid` is minted by the **client** and lives in `user://` forever. It is
+globally unique in `devices` — nothing scopes it any more — and it is also the
+*name* of that device's Sanctum token, which is the per-device revocation
+story.
+
 Resources (`App\Http\Resources\*`) are unwrapped — `JsonResource::withoutWrapping()`
 is set in `AppServiceProvider`, because §11's shapes are hand-written
-(`{token, abilities, expires_at, user}`, `{user, profiles, devices}`) and have
+(`{token, abilities, expires_at, device}`, a bare entitlements array) and have
 no `data` envelope.
 
 ### API error shape
@@ -135,277 +180,255 @@ Web/Inertia responses are untouched — the renderer only fires for `/api/*`.
 
 ### Device tokens
 
-`App\Services\DeviceTokens` owns the 90-day sliding window; the token is
-*named* after the client's `device_uid`, which is the only link between
-Sanctum's table and `devices`, and therefore the whole per-device revocation
-story. `App\Http\Middleware\SlideTokenExpiry` is appended to the `api`
-middleware group as an **after**-middleware, so any successful authenticated
-call in any work package slides the expiry and refreshes `devices.last_seen_at`
-— you don't have to do anything.
+`App\Services\DeviceTokens` owns the 90-day sliding window.
+`App\Http\Middleware\SlideTokenExpiry` is appended to the `api` middleware
+group as an **after**-middleware, so any successful authenticated call slides
+the expiry and refreshes `devices.last_seen_at` — you don't have to do
+anything.
 
-Every game token carries exactly `save:sync`, `entitlements:read`,
-`packs:download`. Gate your routes with `abilities:<ability>` (alias registered
-in `bootstrap/app.php`). Nothing a token can reach may delete the account,
-change the password or revoke another device — those live in the dashboard
-behind a password re-confirmation.
+Every game token carries exactly `entitlements:read` + `packs:download`. Gate
+your routes with `abilities:<ability>` (alias registered in
+`bootstrap/app.php`).
 
-Since BL-52 there is a **second kind of token**: an anonymous device's, minted
-on the `Device` row rather than on a user and carrying `entitlements:read` +
-`packs:download` and never `save:sync`. `$request->user()` may therefore be a
-`Device`. Anything that must be account-only is gated on `save:sync` and needs
-no type check; anything that reads or writes entitlements goes through
-`App\Services\EntitlementOwner`. See the BL-52 section below.
+There is a **second kind of token**, and it is not a game token: an admin
+token, minted on a `User` by `php artisan admin:token`, carrying only `admin`.
+It is the dev box's pack-build credential. `App\Concerns\ResolvesDevice` is how
+a catalog or entitlement controller asks "is this bearer a device?"; an admin
+token answers no, though in practice it never gets past
+`abilities:entitlements:read` in the first place.
 
-`Tests\TestCase` provides `issueDeviceToken($user, $deviceUid, $abilities)` and
-`forgetResolvedGuards()`. Use the latter between "revoke" and "try again" in a
-test: the container survives between calls and Sanctum's `RequestGuard`
+> **phpstan note.** Larastan types `$request->user()` from
+> `auth.providers.users.model`, so an inline `$identity instanceof Device` is
+> reported as always-false. `ResolvesDevice::asDevice()` and
+> `DeviceTokens::deviceForIdentity()` therefore take `mixed`, which is where
+> the real branch lives. Don't "fix" that back into an inline instanceof.
+
+`Tests\TestCase` provides `registerDevice($uid)` (through the real action, so a
+test that uses it also proves the abilities), `issueDeviceToken(?Device)` (a
+bare token, with an optional deliberately-incomplete ability list) and
+`forgetResolvedGuards()`. Use the last one between "revoke" and "try again" in
+a test: the container survives between calls and Sanctum's `RequestGuard`
 memoises the user it resolved, so without it a revoked token appears to keep
 working.
 
 ### Storage
 
-Three private disks, matching design §5 — see `config/filesystems.php`:
+Two private disks, matching design §5 — see `config/filesystems.php`:
 
 ```
 storage/app/private/packs/<pack_slug>/v<version>/pack.zip
 storage/app/private/packs/<pack_slug>/v<version>/files/...
 storage/app/private/assets/<sha256[0:2]>/<sha256>
-storage/app/private/paint/<user_ulid>/<book_uid>/page_NN.png
 ```
 
-None of them is web-readable. Downloads are authorised in PHP and then either
+Neither is web-readable. Downloads are authorised in PHP and then either
 streamed (`Storage::download`) or handed to Nginx via `X-Accel-Redirect`,
 switched by `config('coloringbook.accel_redirect')` — **off by default**,
 because `php artisan serve` has no Nginx in front of it.
 
+(The third disk, `paint`, went with save-sync. Nothing a child draws ever
+reaches this server.)
+
 ### Configuration
 
 App-specific knobs live in `config/coloringbook.php`: accel-redirect toggle
-and internal locations, disk names, the 90-day sliding token TTL, signed-URL
-TTL, pack manifest/min-client-version defaults, paint retention and clock
-skew. Read config through `config()`, never `env()` outside a config file.
+and internal locations, disk names, the 90-day sliding token TTL and its
+ability list, signed-URL TTL, pack manifest / min-client-version defaults,
+store verifiers, and the admin/authoring knobs. Read config through `config()`,
+never `env()` outside a config file.
 
 ### Kids-app constraints that bind server work too
 
-- The parent's email and password are the entire PII footprint. No `age_band`,
-  no child email, no analytics, no third-party SDKs (design §4.1, build plan).
-- Account deletion is a real hard delete that cascades progress, paint and
-  profiles — never a soft delete.
-- Nothing the server returns should ever become a modal in a child's face:
-  sync conflicts merge silently and surface, if at all, in the parent
-  dashboard.
+- **The PII footprint for players is zero.** A `device_uid` is a ULID the
+  client minted for itself; `device_name` and `platform` are optional labels
+  so a support question has something readable in it. No email, no password,
+  no `age_band`, no analytics, no third-party SDKs (design §4.1/§4.3). The
+  operator's email in `users` is the only address this server holds, and it
+  belongs to us.
+- **Nothing a child draws is uploaded**, so there is nothing here to erase,
+  retain, restore or prune. "Delete my data" is a device-local act.
+- Nothing the server returns should ever become a modal in a child's face: an
+  expired token drops the game to offline and it re-registers silently.
 
-## Progress sync (WP2)
+## Identity, entitlements and restore purchases
 
-`routes/api/sync.php`, both gated on `auth:sanctum` + `abilities:save:sync`.
+Design §4.3 (the authority), §7.4 (public free delivery), §9 (receipts), §5
+(ownership), §11's route tables.
 
-```
-GET /api/v1/sync/progress?profile=<ulid>&since=<cursor>
-    → {books: [{book_uid, revision, current_page_index, page_statuses,
-                furthest_page_index, client_updated_at}], server_time}
+**The claim the whole entry rests on: the store account is the cross-device
+identity for purchases.** Play Billing and StoreKit hand the same purchase
+tokens to every device signed into the same store account, so the server never
+needs to *own* an identity to stop a household buying a pack twice — it needs
+to verify a receipt from whichever device presents it. No email, no password,
+no PII, no account.
 
-PUT /api/v1/sync/progress
-    {profile?, books: [{book_uid, base_revision, current_page_index,
-                        page_statuses, furthest_page_index, client_updated_at}]}
-    → {results: [...], server_time}
-```
+### `POST /device/register`
 
-`profile` names a child's shelf; omitting it means the **account-level** shelf
-(`child_profile_id IS NULL`), which is a separate row from any child's. A ULID
-that isn't one of this user's children is a `404`, never a `403`.
+`routes/api/device.php`, `throttle:6,1` stacked on the baseline.
+`App\Actions\Devices\RegisterDevice` find-or-creates the row and answers
+`{token, abilities, expires_at, device: {ulid}}`.
 
-### Conflicts are per book, inside a 200
+- **Find-or-create, so re-auth is idempotent.** That is what lets the refresh
+  route not exist: the client re-registers on a 401 and keeps everything.
+- **Re-registering rotates.** The device's old tokens are deleted before the
+  new one is minted, so a uid never accumulates credentials. Its *entitlements*
+  are untouched — the row survives, only its credentials turn over.
+- A lost unique-index race resolves to the existing row; a genuinely
+  unresolvable write is `DEVICE_REGISTRATION_FAILED` (422).
+- The uid is the only secret. It is a client-minted ULID that is never
+  displayed, and the route is find-or-create, so guessing one would hand over
+  that device's entitlements — the same exposure a password would have had, at
+  128 bits.
 
-The design asks for "a per-book 409", but the call is batched, and a shelf
-where one book conflicted and four synced cleanly has no single HTTP status.
-So the status is always `200` and every result carries its own verdict:
-
-```json
-{"book_uid": "coyote-2026", "revision": 4, "conflict": false}
-{"book_uid": "fox-2026", "revision": 9, "conflict": true, "server": { … }}
-```
-
-A conflicted book was **not written**. Its `server` block is the full server
-state, which is everything the device needs to merge locally and retry that one
-book at `base_revision: 9`. There is deliberately no whole-request 409, not
-even when every book conflicts.
-
-Other behaviours worth knowing:
-
-- A `book_uid` with no row yet is created at **revision 1**, and its
-  `base_revision` is ignored — recreating progress beats losing it.
-- A push that merges to exactly what is stored is a **no-op**: the revision
-  stands and `updated_at` is untouched, so re-syncing doesn't wake every other
-  device through the `since` cursor.
-- `client_updated_at` is **clamped** to the server's now when it is more than
-  `config('coloringbook.sync.max_clock_skew_hours')` ahead. Paint rejects a bad
-  clock; progress clamps, because a save must never fail over a wrong clock.
-
-### The merge rule
-
-`App\Services\ProgressMerge` is pure — no clock, no database — and implements
-§6.3 over `ProgressState` values: per-page `max(status)` under
-`untouched < in_progress < complete`, `max(furthest_page_index)`, and
-`current_page_index` from whichever side has the newer `client_updated_at`.
-Unequal page counts pad with `untouched`; equal timestamps tie-break on
-`max(current_page_index)` so the rule stays commutative. It is **commutative
-and idempotent**, and `tests/Unit/ProgressMergeTest.php` proves both across a
-grid of states rather than by example. Don't "improve" it without re-running
-those properties.
-
-### `book_progress`
-
-One row per `(user, child_profile|null, book)`. Two things to know before
-touching the table:
-
-- The unique key is `(user_id, profile_key, book_uid)`, where `profile_key` is
-  a **stored generated column** `coalesce(child_profile_id, 0)`. A plain
-  `UNIQUE(user_id, child_profile_id, book_uid)` would not constrain the
-  account-level shelf at all, because SQL treats two NULLs as distinct.
-- Timestamps are **microsecond precision** (`timestamps(6)` plus
-  `BookProgress::DATE_FORMAT` on the model). `updated_at` is the `since`
-  cursor, and at whole-second resolution a row written later in the same second
-  as the cursor would never be pulled. A `where('updated_at', …)` binding has
-  to be formatted with `BookProgress::DATE_FORMAT` by hand — the query
-  grammar's default would truncate it.
-
-## BL-18 — erasure: the state that wins
-
-Design §6.3 "Erasure", §11 (the two `DELETE` routes). Routes live beside WP2's
-and WP4's in `routes/api/sync.php`; the dashboard half is in
-`routes/settings.php`.
-
-**The bug.** The §6.3 merge only ever climbs, and LWW keeps the newest picture.
-So "Erase all progress" and the page's "Start over" were *absences*, and an
-absence always loses: the next pull put everything back and the buttons looked
-broken against a synced account.
-
-**The fix, in one sentence.** An erasure is an **instant**, stored, and every
-state is measured against it — `client_updated_at <= erased_at` reads as the
-empty book. Ties go to the erase, deliberately: a wipe is the newest thing
-anybody said about the shelf.
-
-### Three scopes, one rule
-
-| Scope | Where the clock lives | Set by |
-|---|---|---|
-| shelf | `shelf_erasures.erased_at` | `DELETE /sync/progress`, `settings/progress` |
-| page | `book_progress.page_erased_at[i]` | `DELETE /sync/paint/{book}/{page}` |
-| — | (a whole book has no clock; nothing in the game erases one across devices) | |
-
-`shelf_erasures` is a table rather than a column on `users`/`child_profiles` for
-one concrete reason: the censor is a `<=` against `client_updated_at`, so the
-clock must keep its microseconds, and microsecond storage on an Eloquent model
-is a `$dateFormat` on the **whole** model. A column on `users` would silently
-restamp every other timestamp on the account. Keyed `(user_id, profile_key)`
-with the same stored generated column `book_progress` uses.
-
-`page_erased_at` is a nullable JSON list, index-parallel to `page_statuses`,
-trailing nulls trimmed — a book nobody has reset stores `null` and sends `[]`.
-
-### The merge, with the clocks in it
-
-`ProgressMerge::merge($a, $b, ?$shelfErasedAt)`:
+### Schema
 
 ```
-a, b               = each censored by shelf_erased_at first (→ empty book,
-                     stamped with the erase so it cannot lose to what it replaced)
-page_erased_at[i]  = max(a[i], b[i])            monotonic, like furthest_page_index
-page_statuses[i]   = max over the sides whose client_updated_at > page_erased_at[i]
-                     (a censored side contributes `untouched`, the identity)
+devices       id, ulid, device_uid (UNIQUE), device_name, platform,
+              last_seen_at, timestamps
+
+entitlements  id, device_id →devices cascade, pack_id →packs cascade,
+              source, platform, platform_txn_id, granted_at, revoked_at
+              UNIQUE(device_id, pack_id)
+              UNIQUE(device_id, platform, platform_txn_id)
 ```
 
-Both censors apply to each side **independently**, which is what keeps the rule
-commutative and idempotent with a clock in play. `tests/Unit/ProgressMergeTest.php`
-now runs its two property grids under four shelf clocks (none, before, mid-grid,
-after) and carries three erasure-bearing states in the grid itself. An erase that
-were order-dependent would resurrect on one device and not another, which is
-exactly the bug.
+Two decisions worth knowing before touching either table:
 
-### `DELETE /sync/progress`
+- **`device_uid` is globally unique.** There is nothing left to scope it to,
+  and two rows for one uid would be two inventories for one install — the
+  second of which would silently be the empty one.
+- **Receipt uniqueness is per device, and that is the whole restore
+  mechanism.** A global `UNIQUE(platform, platform_txn_id)` would let the first
+  tablet claim a purchase and lock every other one out. Google Play requires a
+  non-consumable to be restorable, so the same receipt is *supposed* to grant
+  on N devices. Within one device it is still once-only, so a replayed receipt
+  cannot mint a second row.
 
+There are **no live users and no drop migrations**: the schema was squashed
+back into the original `create_*` migrations, so `migrate:fresh` is the only
+path anybody takes.
+
+### `App\Services\Entitlements`
+
+Every method takes a `Device`. Grant, regrant, revoke, `owns`, `live` and the
+free-claim all mean exactly what they used to, per device. `device_id` is not
+fillable and is stamped in `grant()` — who owns what is never something a
+request body gets to say.
+
+`App\Services\EntitlementOwner` is **gone**: there is one kind of owner now, so
+the value object that told the two apart had nothing left to say.
+
+### Restore purchases — the path that must keep working
+
+`App\Actions\Entitlements\VerifyStoreReceipt`, behind
+`POST /entitlements/verify`:
+
+1. resolve the pack from the **SKU alone** (there is deliberately no
+   `pack_slug` field, or a client could pair a valid receipt with a pack of its
+   choosing). Resolution uses `downloadable()`, so a retired pack can still be
+   restored (§7.3);
+2. if this device already has a row, answer it — idempotent, and a re-verify on
+   every launch must not cost a round trip to Google;
+3. otherwise ask the platform's `StoreReceiptVerifier` and write a
+   `source = 'purchase'` row for this device.
+
+A second tablet installs the game, registers itself, asks the store what it
+owns and re-verifies each token — and gets its own rows. **A test pins this**
+(`ReceiptVerificationTest::test_the_same_purchase_grants_on_every_device_that_presents_it`);
+if you ever tighten `platform_txn_id` uniqueness, that test is the one that
+will tell you why not.
+
+Three refusals, meaning different things: `RECEIPT_INVALID` (422 — the store
+said no, do not retry), `STORE_UNAVAILABLE` (503 — we could not ask, retry),
+`ENTITLEMENT_REQUIRED` (403 — this device has the pack revoked; a receipt is
+not a way back, un-revoking is a deliberate admin act).
+
+### The receipt seam, and how to fake it
+
+`App\Contracts\StoreReceiptVerifier` is the only thing that talks to a store,
+and it must stay side-effect free — the entitlement is written by
+`VerifyStoreReceipt`, which is where the idempotency and
+revoked-stays-revoked rules live.
+
+```php
+// config/coloringbook.php
+'stores' => [
+    'verifiers'   => ['google' => null, 'apple' => null, 'stripe' => null],
+    'sku_columns' => ['google' => 'sku_google', 'apple' => 'sku_apple', 'stripe' => 'sku_stripe'],
+    'fake'        => ['prefix' => 'test-'],
+],
 ```
-DELETE /api/v1/sync/progress   {profile?, erased_at?}
-    → {erased_at, books_erased, pictures_erased, server_time}
+
+**All three verifiers ship null, and that is the safe default rather than an
+oversight**: an unconfigured platform answers `STORE_UNAVAILABLE` (503,
+retryable), so a deployment can never silently accept receipts it has no way of
+checking. In a test, wire the fake for one platform and nothing else — and set
+the others to `null` explicitly if the assertion depends on it, because a
+developer's own `.env` may well name the fake:
+
+```php
+config(['coloringbook.stores.verifiers.google' => FakeStoreReceiptVerifier::class]);
 ```
 
-`App\Actions\Sync\EraseShelf`: advance the clock (inside the transaction, first
-— it is the only part that must survive), delete the shelf's
-`retained_paint_layers` → `paint_layers` → `book_progress`, then sweep the blobs
-**after the commit**, one `directoryFor()` per book. Not `forgetUser()`: an
-account-level shelf's books sit directly under `paint/<user_ulid>/`, *beside*
-the child directories, so there is no single directory meaning "the account's
-pictures and not the children's".
+`FakeStoreReceiptVerifier` is deterministic — valid **iff** the purchase token
+starts with `stores.fake.prefix`, transaction id = the token — so "verify
+twice, get one row" is a real assertion rather than a lucky one. It has two
+locks against reaching production: the null default above, and `StoreReceipts`
+refusing to hand it out when `app()->isProduction()`, whatever the config says.
 
-- **Rows are deleted, not tombstoned.** The clock alone is enough, and it means
-  a wiped shelf really is empty.
-- `erased_at` is the **device's** clock, clamped like `client_updated_at` (an
-  erase stamped a decade ahead would keep the shelf empty for a decade). Absent
-  means now.
-- Monotonic and therefore idempotent — the client keeps the instant in its queue
-  and re-sends until a drain succeeds.
-- `GET /sync/progress` publishes the clock as a top-level `erased_at`, **never
-  filtered by `since`**: the rows are gone, so a cursored pull has nothing else
-  to learn it from.
-- `PUT /sync/progress` censors every pushed book against it, and — the case that
-  matters — `ApplyBookProgress` censors the *create* path too. A device that
-  slept through the wipe arrives with no row to conflict against, and "recreating
-  progress beats losing it" would otherwise resurrect the whole shelf.
+`sku_columns` also defines the platforms the request validator accepts, so an
+unknown platform is a `422 VALIDATION_FAILED` while a known-but-unconfigured
+one is the 503. Two different problems, two different answers.
 
-### `DELETE /sync/paint/{book_uid}/{page}`
+### Free packs are public
 
-```
-DELETE /api/v1/sync/paint/{book_uid}/{page}   {profile?, client_erased_at?}
-    → {book_uid, page_index, erased_at, revision, picture_erased}
-```
+`manifest`, `download` and `files/{path}` sit behind `OptionalSanctumUser`
+rather than `auth:sanctum`, because whether a token is required depends on the
+*pack* and only the controller knows which this is.
+`PackDownloadController::authorised()`:
 
-`App\Actions\Sync\ErasePageProgress`. One instant, both halves of the page:
+- **free + downloadable status** → allowed, token or no token. If a token
+  happens to be present the free-claim still fires, so `owned` and
+  `GET /entitlements` keep meaning what they mean.
+- **anything else** → 401 without a token, `403 MISSING_ABILITY` without
+  `packs:download` (the same `MissingAbilityException` the middleware threw, so
+  the wire response is byte-identical), then the entitlement check as before.
 
-- The **picture** loses LWW to it exactly as another upload would (newer or an
-  exact tie wins; older is `409 PAINT_STALE` with `details.server`, because a
-  picture painted on another device *after* the reset is the newer statement).
-- The **status** is censored by `page_erased_at[i]`, which is what stops a device
-  still holding `complete` from putting the badge back on a blank page.
+**The 302-to-signed-URL half did not move a byte.** The signature was always
+what authorises the transfer; what changed is who may ask for one.
 
-The progress row's `revision` **and** `updated_at` both move — unlike a paint
-upload, which deliberately leaves them alone. An erase changes progress, so it
-has to wake the `since` cursor and make every stale `base_revision` conflict.
+**The sharp edge:** a **revoked** entitlement on a **free** pack does not
+refuse the download. It cannot sensibly — the same bytes are one token-less
+request away. Revocation governs the *row*: the pack stays out of
+`GET /entitlements`, `owned` stays false, and the claim is never resurrected
+(`grant()` only fires when there is no row at all).
 
-**Nothing is retained.** §6.3's 30-day net is for a race nobody chose to lose;
-this is a deliberate reset that already deletes the local file with no undo, so
-the retained versions and their blobs go with it. Keeping them would leave the
-dashboard offering to restore a picture onto a page a child asked to start over.
-
-Both the negotiation and the `PUT` refuse a picture painted at or before either
-clock, before a megabyte moves.
+A token-less free fetch writes **nothing** — no entitlement, no device row.
+Free play sends no identifier at all, which is the §4.3 COPPA posture.
 
 ### Codes this adds
 
-`PAINT_ERASED` (409, `details.erased_at`) — the *page* was started over more
-recently than this picture; the device should delete its copy.
-`PROGRESS_ERASED` (409, `details.erased_at`) — the *shelf* was erased more
-recently; the device should pull progress and converge on empty. Two codes
-rather than one because the remedies are different sizes, and because without
-the second a stale upload would recreate the `book_progress` row it hangs off
-and put a book back on a shelf the parent just cleared.
+`RECEIPT_INVALID` (422), `STORE_UNAVAILABLE` (503),
+`DEVICE_REGISTRATION_FAILED` (422), `DEVICE_NOT_FOUND` (404 — the admin grant
+desk, below).
 
-### The dashboard
+### Testing
 
-`settings/progress` (`progress.edit` / `progress.destroy`,
-`resources/js/pages/settings/Progress.vue`). One row per shelf — the account's
-own plus one per child, empty ones included, because "there is nothing here" is
-the answer a parent came to check. `{shelf}` is a child's ULID or the literal
-`account`. Session auth, never a token, and a two-step confirm: it is the same
-rule and the same shape as the pictures page.
-
-### Testing erasure
-
-`tests/Feature/Api/ProgressErasureTest.php` (14),
-`tests/Feature/Api/PageErasureTest.php` (17),
-`tests/Feature/Settings/ProgressPageTest.php` (8), plus the erasure block and
-the clocked property grids in `tests/Unit/ProgressMergeTest.php`. Every one of
-them is really the same question: after the erase, can anything put the
-colouring back?
+- `tests/Feature/Api/DeviceRegistrationTest.php` — the pinned contract: the
+  response keys, the exact ability pair, the sliding window, rotation with
+  `forgetResolvedGuards()` around the dead token, **re-registering keeps the
+  entitlements**, uid uniqueness at the database level, and the rate limit
+  asserted on the route rather than by hammering it (two unnamed limiters share
+  a cache key, so counting responses would pin that quirk instead of the
+  contract).
+- `tests/Feature/Api/ReceiptVerificationTest.php` — grant, the same purchase
+  granting on two devices, idempotency, revoked-stays-revoked, a rejected
+  receipt, the unconfigured platform, the production refusal of the fake,
+  per-platform SKU columns, a retired pack still restorable.
+- `tests/Feature/Api/PublicFreePackTest.php` — every delivery route with no
+  token, the paid mirror of each, "a public fetch writes no row", the free
+  claim still firing behind a token, retired-stays-public / draft-is-404, and
+  the manifest allow-list still governing a public delta.
 
 ## WP3 — catalog, entitlements, DLC delivery
 
@@ -419,11 +442,11 @@ WP3 writes are `free` and whatever WP5 grants.
 |---|---|---|
 | `GET` | `/packs?client_version=` | optional |
 | `GET` | `/packs/{slug}?client_version=` | optional |
-| `GET` | `/packs/{slug}/manifest?version=` | **public if `is_free`** (BL-52), else token + `packs:download` + entitlement |
+| `GET` | `/packs/{slug}/manifest?version=` | **public if `is_free`**, else token + `packs:download` + entitlement |
 | `GET` | `/packs/{slug}/download?version=` | **public if `is_free`**, else token + `packs:download` + entitlement |
 | `GET` | `/packs/{slug}/files/{path}?version=` | **public if `is_free`**, else token + `packs:download` + entitlement |
-| `GET` | `/entitlements?client_version=` | token + `entitlements:read` (account **or** device, BL-52) |
-| `POST` | `/entitlements/verify` | token + `entitlements:read` (account **or** device, BL-52) |
+| `GET` | `/entitlements?client_version=` | token + `entitlements:read` |
+| `POST` | `/entitlements/verify` | token + `entitlements:read` |
 
 `/entitlements` returns a **bare array** — `[{pack_slug, latest_version,
 source, granted_at}]`, §11's literal shape. `/packs` returns `{packs: [...]}`
@@ -436,10 +459,10 @@ asking for a new one rather than by hiding the pack).
 
 ### Three tiers of access
 
-1. **Optional auth** (`OptionalSanctumUser`) on the two catalog routes. The
-   shop must answer a signed-out client, and add `owned` when a token happens
-   to be there; `auth:sanctum` can't express that. A bad token degrades to
-   anonymous — browsing is never a failure state.
+1. **Optional auth** (`OptionalSanctumUser`) on the two catalog routes and the
+   three delivery routes. The shop must answer a client with no token at all,
+   and add `owned` when one happens to be there; `auth:sanctum` can't express
+   that. A bad token degrades to anonymous — browsing is never a failure state.
 2. **Token + ability + entitlement** on anything that *names* bytes. These
    never send bytes: they `302` to a signed URL.
 3. **Signed, no token** (`VerifySignedDownload`) on the routes that *move*
@@ -448,7 +471,7 @@ asking for a new one rather than by hiding the pack).
    (10).
 
 `published` packs are listable; `published` **and `retired`** are downloadable
-— delisting must never take away books a household owns (§7.3). `draft` is
+— delisting must never take away books a device owns (§7.3). `draft` is
 invisible to both.
 
 ### Free-claim semantics
@@ -463,12 +486,12 @@ authenticated device hits `manifest`, `download` or `files` for it. Therefore:
   only for `!is_free && !owned`.
 - **A revoked entitlement stays revoked, free packs included** — the grant only
   fires when there is no row at all. Un-revoking is a deliberate admin act.
-  *(BL-52: it stays revoked as a **row**; it no longer blocks the download of a
-  free pack, whose bytes are public. See the BL-52 section.)*
+  *(It stays revoked as a **row**; it no longer blocks the download of a free
+  pack, whose bytes are public — see "Free packs are public" above.)*
 - Grants are idempotent on `(owner, pack_id)` and survive the unique-index
   race two tablets can cause.
-- `user_id`/`device_id`/`pack_id` are not fillable: who owns what is never
-  something a request body gets to say.
+- `device_id`/`pack_id` are not fillable: who owns what is never something a
+  request body gets to say.
 
 ### `pack:publish`
 
@@ -494,7 +517,7 @@ Three things worth knowing before building on it:
   advisory; publishing again is always `max + 1`, and published rows are never
   rewritten. A disagreement is a warning, not an error.
 - **Books and pages are rebuilt** from the newest release rather than merged.
-  Progress and paint key off `book_uid` and page index, never these row ids.
+  A saved sticker placement keys off `book_uid`/`set_uid`, never these row ids.
 - **`books/<book_uid>/book.json` is synthesised** when the builder didn't ship
   one, and added to the manifest's `files` map so it carries a digest like
   everything else (§7.2's self-describing install tree).
@@ -526,158 +549,6 @@ Pack covers were only reachable through the entitled delta route, so the shop
 could not render a cover for a pack nobody owns yet. WP5 added
 `GET /packs/{slug}/cover`; see "Covers are public, by route" below.
 
-## WP4 — paint-layer sync
-
-Design §6.2–6.3 (policy, LWW, retention), §5 (`paint_layers`, storage layout),
-§11 "Sync". Routes live in the paint block of `routes/api/sync.php`, beside
-WP2's progress routes and behind the same `auth:sanctum` + `abilities:save:sync`
-gate.
-
-Paint is the *lazy* half of sync: 0.5–2 MB a page against progress's 200 bytes.
-Everything below exists to move as few of those bytes as possible.
-
-### The surface
-
-| Method | Path | Answers |
-|---|---|---|
-| `POST` | `/sync/paint/{book_uid}/{page}` | `204` have-it / `202` + upload instructions |
-| `PUT` | `/sync/paint/{book_uid}/{page}?sha256=&client_painted_at=` | `201 {revision}` / `204` / `409` |
-| `GET` | `/sync/paint/{book_uid}/{page}` | `302` signed URL, or `404` |
-| `GET` | `/sync/paint/{book_uid}` | per-page metadata for one book (**added**) |
-| `GET` | `/sync/paint-blob/{layer}` | the bytes — **signed, no token** |
-
-`?profile=<ulid>` scopes every one of them exactly as it does in WP2: omitted
-means the account-level shelf, and a ULID that isn't one of this user's
-children is a `404`.
-
-The last row is the only route in `sync.php` outside the token group, for the
-reason WP3 documents: the signature *is* the authorisation, so
-`HTTPRequest.download_file` can stream straight to `user://paint/` without
-carrying headers. It reuses `VerifySignedDownload` and
-`PrivateDownloads::serve()` unchanged, `X-Accel-Redirect` switch included.
-
-`GET /sync/progress` is untouched — WP2's response shape is exactly what it
-was. The per-book paint metadata is a separate endpoint precisely so it stayed
-that way.
-
-### `{page}` is the page *index*; `page_NN.png` is 1-based
-
-The API speaks 0-based indices everywhere (`page_statuses`,
-`current_page_index`, and `{page}` here). The **file** is
-`page_01.png` for index 0, because that is what the client already writes to
-`user://paint/<slug>/` (`game_state.gd`). `App\Services\PaintStorage` is the
-only code that names files, and the only place that conversion happens.
-
-### Storage layout, and the one deviation from §5
-
-```
-paint/<user_ulid>/<book_uid>/page_NN.png                 account shelf (§5, verbatim)
-paint/<user_ulid>/<profile_ulid>/<book_uid>/page_NN.png  a child's shelf
-paint/<user_ulid>/…/page_NN.<revision>.png               a retained loser
-```
-
-§5's layout predates child profiles: two children painting the same book on one
-account would write to the same file. The extra segment is unambiguous because
-a `book_uid` is an authored lower-case slug (§6.1) and a ULID is upper-case
-Crockford base32, so neither can be read as the other.
-
-### Last-write-wins, and what each verdict means
-
-`App\Actions\Sync\StorePaintLayer` decides, on `client_painted_at`:
-
-- **Same sha256** → `204`, and *nothing is written* — no revision, no retained
-  version, and `client_painted_at` is **not** advanced. The row describes a
-  picture and that picture has not changed. Re-syncing an unchanged page is
-  free, which is the entire point of the sha-first negotiation.
-- **Newer, or an exact tie** → the incoming write wins (`201 {revision}`).
-  §6.3 makes the server clock the tie-break, and by the server's clock the
-  write arriving now is the later one.
-- **Older** → `409 PAINT_STALE`, carrying `details.server` (the current
-  `{page_index, sha256, bytes, revision, client_painted_at}`). Nothing is
-  written. Rejecting rather than silently dropping is what tells the device
-  *its* copy is the stale one, so it pulls instead of retrying forever.
-- **No row yet** → revision 1, creating the `book_progress` row if the shelf
-  has never synced this book — empty `page_statuses`, revision 1. Paint
-  legitimately arrives before progress does; the two requests race.
-
-A winning write does **not** touch `book_progress.updated_at`. That column is
-WP2's `since` cursor, and a picture upload is no news to the other devices.
-
-**The negotiation writes nothing at all** — not a row, not a timestamp, not
-even on `204`. The `PUT` is the only thing that creates state.
-
-### Clock skew: paint rejects where progress clamps
-
-`config('coloringbook.paint.max_clock_skew_hours')` (24). More than that in the
-future and both the `POST` and the `PUT` answer `PAINT_CLOCK_SKEW` (422) with
-the server's time. Deliberately unlike progress, which clamps: a save must
-never fail over a wrong clock, but a picture stamped three years out would win
-LWW forever and bury every later drawing behind it. Rejection is recoverable.
-
-### Codes this package adds
-
-`PAINT_STALE` (409), `PAINT_CLOCK_SKEW` (422), `PAINT_NOT_FOUND` (404),
-`PAINT_TOO_LARGE` (413, `coloringbook.paint.max_bytes`, 8 MB),
-`PAINT_NOT_PNG` (422), `PAINT_EMPTY` (422), `DIGEST_MISSING` (400),
-`DIGEST_MISMATCH` (422), `PAGE_OUT_OF_RANGE` (422).
-
-The digest is checked **twice** (`App\Services\PaintUploads`): `Content-Digest`
-against the body proves the bytes survived the wire, and the body against the
-negotiated `?sha256=` proves they are the bytes both ends agreed to move. RFC
-9530 (`sha-256=:<base64>:`) and the older `Digest: SHA-256=<base64>` are both
-read. The client never has to build that header itself — the `202` hands back
-the exact URL and headers to use.
-
-### Retention, restore, prune
-
-The losing version is not deleted: it moves to `page_NN.<revision>.png` and
-gets a row in **`retained_paint_layers`**, a sidecar table rather than more
-rows in `paint_layers` — `UNIQUE(book_progress_id, page_index)` is what makes
-"the current picture" unambiguous, and relaxing it would put every reader in
-the business of asking which row is live.
-
-- **Restore** (`App\Actions\Sync\RestorePaintLayer`) is a *swap*, not a
-  rollback: the demoted version takes the retained one's place with a fresh
-  30-day lease, so the button can never be the thing that loses a picture, and
-  pressing it twice returns the page to where it started. The restored layer is
-  stamped with the **server's clock**, not the older picture's — otherwise the
-  device that won the first race would win it again on its next upload and the
-  button would be a lie. The original painting time travels with the version
-  into retention, which is what the dashboard displays.
-- **Dashboard**: `settings/pictures` (`pictures.edit` / `pictures.restore`,
-  `resources/js/pages/settings/Pictures.vue`), listing only pages that actually
-  have an older version. Session auth, never a token: a five year old must
-  never be shown the choice (§6.3), and a game token must never be able to
-  make it.
-- **Prune**: `php artisan paint:prune [--days=] [--pretend]`, scheduled daily
-  at 03:20 in `routes/console.php`. Blob first, row second — a row without its
-  file is a broken button; a file without its row is invisible and gets swept
-  by the next account deletion.
-
-### Deletion sweeps
-
-`DeleteAccount` and `DeleteChildProfile` now delete the paint rows explicitly
-(so it is correct with foreign keys off) and then, **after the transaction
-commits**, the blobs: `paint/<user_ulid>/` for an account,
-`paint/<user_ulid>/<profile_ulid>/` for one child. A disk cannot be rolled
-back, so the order matters.
-
-### Testing paint
-
-`Tests\Concerns\PaintsPages` drives the endpoints the way the game does:
-`upload()` negotiates and then PUTs to whatever URL the `202` handed back, so
-every test that stores a picture also proves those instructions are usable.
-`png()` is a real 1×1 PNG with a suffix, so two calls differ in sha256 while
-both still carry the signature the upload path checks. `fakePaintStorage()`
-first.
-
-One trap worth knowing: `auth:sanctum` calls `shouldUse('sanctum')`, which
-rewrites `auth.defaults.guard` **for the rest of the process**. In a test the
-container survives between calls, so after any API request a bare `auth`
-(session) route will happily accept a bearer token and a "a game token cannot
-do this" test silently passes for the wrong reason. `useSessionGuard()` in that
-trait puts it back; call it between an API call and a dashboard call.
-
 ## WP5 — admin upload, validation, preview, publish
 
 Design §10 (admin flow, and what the server validates versus what stays a dev
@@ -697,8 +568,9 @@ two stacks:
 | Auth | `auth:sanctum` + `abilities:admin` | `auth` (Fortify session) |
 | Non-admin | `403 FORBIDDEN` | **`404`** |
 
-The 404 is deliberate: an ordinary parent should never learn the section
-exists, and `AppSidebar.vue` renders no nav entry unless `auth.user.is_admin`.
+The 404 is deliberate, and it stays even though `users` now holds operators
+only: `AppSidebar.vue` renders no nav entry unless `auth.user.is_admin`, and a
+non-admin row should never learn the section exists.
 
 The `admin` ability is **not** in `coloringbook.token.abilities`, so no game
 token can ever reach these routes, and an admin token cannot read anyone's
@@ -722,7 +594,8 @@ POST /admin/packs/{slug}/versions                 zip OR manifest+ulids → draf
 GET  /admin/packs/{slug}/versions/{v}/preview     the page list
 GET  .../preview/{book_uid}/{page}                one region-overlay PNG
 POST /admin/packs/{slug}/versions/{v}/publish     flips published_at
-POST /admin/entitlements                          promo/gift grant, and un-revoke
+POST /admin/entitlements                          promo/gift grant by device_uid,
+                                                  and un-revoke
 ```
 
 §11 lists one `preview`; it is two routes here because a page list is JSON and
@@ -737,9 +610,16 @@ identical bytes resolve to the same row. Identity is `(sha256, kind)`, not
 `POST /admin/entitlements` is a *re-*grant. `Entitlements::grant()` still never
 touches an existing row (a revoked pack stays revoked however often a client
 retries), so `Entitlements::regrant()` is the one way back and it lives behind
-an admin typing an email into a form. `purchase` and `free` are not offerable
+an operator typing into a form. `purchase` and `free` are not offerable
 sources: one is written by store verification, the other writes itself on first
 download.
+
+It addresses the claim by **`device_uid`**, not by email: the device is the
+identity, and the uid is the only thing a player can read off their own screen
+and paste into a support message. An unknown uid is `DEVICE_NOT_FOUND` (404 on
+the token door, a field error on the form) — deliberately not an
+`exists:devices` rule, because "no such device" should not look like a typo in
+the form.
 
 ### The draft/publish split
 
@@ -893,8 +773,8 @@ through the escape hatch §10.1 reserved.
 
 `books` and `pages` cannot hold draft state. They are a **projection of the
 newest published release** — `PublishPackDirectory::rebuildCatalog()` drops and
-recreates them on every publish, deliberately, so that progress and paint (which
-key off `book_uid` and page index, never these row ids) are unaffected. A page
+recreates them on every publish, deliberately, so that anything keyed on
+`book_uid` and page index (never these row ids) is unaffected. A page
 uploaded but not yet mapped, a title changed since the last release, a per-page
 tuning override: none of it can live there without being deleted by the next
 publish.
@@ -937,7 +817,7 @@ authored_pages   id, ulid, authored_book_id, page_index, title,
 
 `page_index` is 0-based like every other page index on this API; the *file* stem
 is 1-based (`page_01` for index 0), which `AuthoredPage::fileStem()` is the only
-place that knows — the same rule `PaintStorage` follows on the sync side.
+place that knows.
 
 ### The mapping job, and the one seam
 
@@ -1085,7 +965,7 @@ no ID map yet).
   reported in plain language", "publishing refuses while a page is failing" and
   "publishing again is a new immutable version".
 - `tests/Feature/Admin/AuthoringPagesTest.php` — the Inertia half: the 404 for a
-  parent, and a refused publish bouncing with the whole list.
+  non-admin, and a refused publish bouncing with the whole list.
 - `tests/Feature/Admin/GodotMappingRunnerTest.php` — the command line, with
   `Process::fake()`.
 - `tests/Feature/Admin/MappingPipelineIntegrationTest.php` — **opt-in**, skipped
@@ -1207,9 +1087,10 @@ path shells out, so the tests are real from the upload to the zip.
 - `tests/Unit/StickerValidationTest.php` — each case asserts the right problem was
   found *and* that nothing else was (7).
 
-`StickerSetsTest` pulls in `PaintsPages` for `useSessionGuard()` alone: it authors
-through the API and then publishes through the browser, and `auth:sanctum` rewrites
-the default guard for the rest of the process.
+`StickerSetsTest` calls `useSessionGuard()` (on `Tests\TestCase`) between its API
+calls and its browser calls: it authors through the API and then publishes through
+the web door, and `auth:sanctum` rewrites the default guard for the rest of the
+process.
 
 ### Admin UI
 
@@ -1326,249 +1207,11 @@ publishes page one as the cover", and "publishing omits `anim` for a still
 sticker". Both assert that **nothing moved** for content that predates the
 feature, which is the only way this stays true.
 
-## BL-52 — two identities: public free packs + the anonymous device tier
-
-Design §4.3 (the authority), §7.4 (public free delivery), §9 (receipts), §5
-(the owner split), §11's route tables. Routes live in a new
-`routes/api/device.php` and beside WP3's in `routes/api/catalog.php`.
-
-**The claim the whole entry rests on: the store account is already the
-cross-device identity for purchases.** Play Billing and StoreKit hand the same
-purchase tokens to every device signed into the same store account, so the
-server never needs to *own* an identity to stop a household buying a pack
-twice — it needs to verify a receipt from whichever device presents it. No
-email, no password, no PII, no account.
-
-### The two identities, and the one that cannot sync
-
-| | account (`User`) | anonymous device (`Device`, `user_id IS NULL`) |
-|---|---|---|
-| Made by | `POST /auth/register` + `/auth/token` | `POST /device/register` |
-| Token minted on | the user | **the device row itself** |
-| Abilities | `save:sync`, `entitlements:read`, `packs:download` | `entitlements:read`, `packs:download` |
-| Can reach `/sync/*`, `/me`, `/profiles` | yes | **no** — it never carries `save:sync` |
-
-`Device` gained `HasApiTokens` **and** `Authenticatable`, so `auth:sanctum`
-resolves it into `$request->user()` like any other identity and the ordinary
-`abilities:` middleware does the gating. That is the whole enforcement story
-for "an anonymous device can own packs; it can never upload a child's artwork":
-there is no `instanceof User` check on the sync routes and there must never
-need to be — the ability it was never issued is the gate.
-
-Both token kinds ride the same 90-day sliding window. `SlideTokenExpiry` stopped
-checking `instanceof User` and asks `DeviceTokens::deviceForIdentity()` instead:
-for an account token the device is found by name → `device_uid`, for a device
-token the tokenable *is* the device.
-
-> **phpstan note.** Larastan types `$request->user()` from
-> `auth.providers.users.model`, so `$identity instanceof Device` after
-> `! $identity instanceof User` is reported as always-false. `SlideTokenExpiry`
-> therefore null-checks and hands the value to a `mixed` parameter, which is
-> where the real branch lives. Don't "fix" it back into an instanceof pair.
-
-### `EntitlementOwner` — the one place that knows which owner is which
-
-`App\Services\EntitlementOwner` is a value object wrapping either a `User` or an
-anonymous `Device`, and **every** method on `App\Services\Entitlements` now
-takes one instead of a `User`. Grant, regrant, revoke, `owns`, `live` and the
-free-claim all mean exactly what they used to, per owner.
-
-- `EntitlementOwner::fromAuthenticatable()` returns null for anything that
-  isn't one of the two — including a **linked** device, which is deliberately
-  not an owner: once a device belongs to an account, that account owns its
-  packs. `App\Concerns\ResolvesEntitlementOwner` is the controller-side helper
-  (`owner()` / `requireOwner()`).
-- The column and key are settled in the constructor, so "exactly one owner" is
-  a property of the object rather than something every reader re-derives.
-- `user_id`/`device_id` are still not fillable. `EntitlementOwner::stamp()` is
-  the only thing that writes either.
-
-### Schema: the owner split, and why both new columns are `virtualAs`
-
-```
-devices       user_id NOW NULLABLE
-              owner_key  = coalesce(user_id, 0)          (generated)
-              UNIQUE(owner_key, device_uid)              replaces UNIQUE(user_id, device_uid)
-
-entitlements  user_id NOW NULLABLE
-              device_id →devices nullable, cascade
-              owner_key  = coalesce('u' || user_id, 'd' || device_id)   (generated)
-              UNIQUE(owner_key, pack_id)                 replaces UNIQUE(user_id, pack_id)
-              UNIQUE(owner_key, platform, platform_txn_id)  replaces UNIQUE(platform, platform_txn_id)
-```
-
-Three decisions worth knowing before touching either table:
-
-- **`virtualAs`, not `storedAs`, and it is not a preference.** SQLite's
-  `ALTER TABLE ADD COLUMN` refuses a STORED generated column outright; a VIRTUAL
-  one is fine and a unique index over it behaves identically. `book_progress`
-  and `shelf_erasures` could use `storedAs` because they were written that way
-  at CREATE time. Anything added to an *existing* table has to be virtual, or
-  the table needs a full rebuild — which is a much bigger blast radius for the
-  same index.
-- **`platform_txn_id` uniqueness was deliberately relaxed** from global to
-  per-owner. The same purchase legitimately grants on N devices — that *is* the
-  "bought once, owned everywhere" mechanism. Within one owner it is still
-  once-only, so a replayed receipt cannot mint a second row.
-- **"Exactly one owner" is a PHP invariant, not a CHECK constraint**, because
-  SQLite cannot add one to an existing table either. A row with neither owner
-  gets a NULL `owner_key` and is constrained by nothing, which is precisely why
-  `EntitlementOwner` is the only writer.
-
-`migrate:fresh` and `migrate:rollback --step=2` both round-trip; the `down()`
-paths drop the indexes before the columns, in that order, or SQLite complains
-about an index over a column that no longer exists.
-
-### Free packs are public
-
-`manifest`, `download` and `files/{path}` moved out of
-`auth:sanctum` + `abilities:packs:download` and into the `OptionalSanctumUser`
-group, because whether a token is required now depends on the *pack* and only
-the controller knows which this is. `PackDownloadController::authorised()`:
-
-- **free + downloadable status** → allowed, token or no token. If a token
-  happens to be present the free-claim still fires, so `owned` and
-  `GET /entitlements` keep meaning what they mean for a signed-in household.
-- **anything else** → 401 without a token, `403 MISSING_ABILITY` without
-  `packs:download` (the same `MissingAbilityException` the middleware threw, so
-  the wire response is byte-identical), then the entitlement check as before.
-
-**The 302-to-signed-URL half did not move a byte.** The signature was always
-what authorises the transfer; what changed is who may ask for one. The
-`VerifySignedDownload` routes, `X-Accel-Redirect`, the manifest allow-list and
-the traversal defence are all untouched and still cover the public path.
-
-**The one behaviour that flipped**, and it is the entry's sharpest edge: a
-**revoked** entitlement on a **free** pack no longer refuses the download. It
-cannot sensibly: the same bytes are one token-less request away, so refusing
-would be theatre. Revocation governs the *row* — the pack stays out of
-`GET /entitlements`, `owned` stays false, and the claim is still never
-resurrected (`grant()` only fires when there is no row at all). The old test
-`test_a_revoked_entitlement_blocks_even_a_free_pack` is now
-`…_neither_blocks_a_free_pack_nor_comes_back` and asserts both halves.
-
-A signed-out free fetch writes **nothing** — no entitlement, no device row.
-Free play sends no identifier at all, which is the §4.3 COPPA posture.
-
-### `POST /device/register`
-
-`routes/api/device.php`, `throttle:6,1` stacked on the baseline. §11 files it
-under "Auth" and it could have lived in `routes/api/auth.php`; it is its own
-file for the house reason — one owner per route file.
-
-`App\Actions\Devices\RegisterAnonymousDevice` find-or-creates the
-`user_id IS NULL` row and answers
-`{token, abilities, expires_at, device: {ulid}}`.
-
-- **Only ever the anonymous row.** A `device_uid` already linked to an account
-  is invisible here, so knowing somebody's uid earns an attacker a fresh empty
-  identity rather than that household's entitlements.
-- **Re-registering rotates**: the device's old tokens are deleted before the new
-  one is minted. Its *entitlements* are untouched — the row survives, only its
-  credentials turn over.
-- A lost unique-index race resolves to the existing row; a genuinely
-  unresolvable write is `DEVICE_REGISTRATION_FAILED` (422).
-
-### The receipt seam, and how to fake it
-
-`App\Contracts\StoreReceiptVerifier` is the only thing that talks to a store,
-and it must stay side-effect free — the entitlement is written by
-`App\Actions\Entitlements\VerifyStoreReceipt`, which is where the idempotency
-and revoked-stays-revoked rules live.
-
-```php
-// config/coloringbook.php
-'stores' => [
-    'verifiers'   => ['google' => null, 'apple' => null, 'stripe' => null],
-    'sku_columns' => ['google' => 'sku_google', 'apple' => 'sku_apple', 'stripe' => 'sku_stripe'],
-    'fake'        => ['prefix' => 'test-'],
-],
-```
-
-**All three verifiers ship null, and that is the safe default rather than an
-oversight**: an unconfigured platform answers `STORE_UNAVAILABLE` (503,
-retryable), so a deployment can never silently accept receipts it has no way of
-checking. In a test, wire the fake for one platform and nothing else:
-
-```php
-config(['coloringbook.stores.verifiers.google' => FakeStoreReceiptVerifier::class]);
-```
-
-`FakeStoreReceiptVerifier` is deterministic — valid **iff** the purchase token
-starts with `stores.fake.prefix`, transaction id = the token — so "verify twice,
-get one row" is a real assertion rather than a lucky one. It has two locks
-against reaching production: the null default above, and `StoreReceipts`
-refusing to hand it out when `app()->isProduction()`, whatever the config says.
-
-`sku_columns` also defines the platforms the request validator accepts, so an
-unknown platform is a `422 VALIDATION_FAILED` while a known-but-unconfigured one
-is the 503. Two different problems, two different answers.
-
-The pack is resolved from the **SKU alone** — there is deliberately no
-`pack_slug` field on the request, or a client could pair a valid receipt with a
-pack of its choosing. Resolution uses `downloadable()`, so a retired pack can
-still be restored (§7.3). A SKU nobody sells is the house `404 NOT_FOUND`, which
-is also what stops the endpoint being a price-list enumerator.
-
-### Adoption on sign-in
-
-`App\Actions\Accounts\AdoptAnonymousDevice`, called from `IssueDeviceToken`
-inside its transaction — a sign-in that half-adopted would leave a device
-holding a token for an identity that no longer owns its packs.
-
-Union, and **the account's own row always wins**. A pack the user already has a
-row for keeps that row exactly as it is, *including a revoked one* — which is
-the case the rule exists for: a refund must not be undone by signing in on a
-tablet that still remembers owning it. Everything else moves across keeping its
-`source`, `platform`, `platform_txn_id` and `granted_at`, so a purchase stays
-auditable as the same row it always was. Then the anonymous tokens are deleted
-and the anonymous row goes; anything still hanging off it was a duplicate and
-cascades away with it.
-
-Idempotent: a second sign-in finds no anonymous row and does nothing. The
-(owner, pack) unique index catches the two-tablets-at-once case — losing that
-race means the account already has the pack, which is the outcome adoption
-wanted.
-
-### Codes this adds
-
-`RECEIPT_INVALID` (422 — the store said no; do not retry),
-`STORE_UNAVAILABLE` (503 — we could not ask; retry),
-`DEVICE_REGISTRATION_FAILED` (422).
-
-**No fourth code for a revoked claim on `verify`.** It answers the existing
-`ENTITLEMENT_REQUIRED` (403), which is already what the download path says for
-exactly this situation, so the client's branch count did not grow.
-
-### Testing
-
-- `tests/Feature/Api/PublicFreePackTest.php` (10) — every delivery route
-  signed-out, the paid mirror of each, "a public fetch writes no row", the
-  free-claim still firing behind a token, retired-stays-public/draft-is-404, and
-  the manifest allow-list still governing a public delta.
-- `tests/Feature/Api/DeviceRegistrationTest.php` (13) — create, rotate (with
-  `forgetResolvedGuards()` around the dead token), linked-uid isolation, the
-  exact ability pair, the sliding window, the whole `save:sync` surface refused,
-  and both halves of the `owner_key` uniqueness at the database level.
-- `tests/Feature/Api/ReceiptVerificationTest.php` (13) — grant to each owner
-  kind, the same purchase granting on two devices, idempotency,
-  revoked-stays-revoked, a rejected receipt, the unconfigured platform, the
-  production refusal of the fake, per-platform SKU columns.
-- `tests/Feature/Api/DeviceAdoptionTest.php` (7) — union, revoked-wins,
-  idempotent, the anonymous row and its token gone, and another household's
-  device left alone.
-
-`Tests\TestCase::registerAnonymousDevice()` is the twin of `issueDeviceToken()`
-and goes through the real action, so a test using it also proves the abilities
-are the anonymous set. `EntitlementFactory::ownedByDevice()` clears `user_id` in
-the same breath it sets `device_id` — a two-owner row is not a state the
-application can produce, so it must not be one a factory can either.
-
 ## WP8 — Dusk browser tests
 
 `laravel/dusk` v8.6 (`php-webdriver/webdriver` 1.16) covers the human-facing
-half of the app: the pages a parent or the operator actually clicks. The API is
-covered by the Pest suite and is not re-tested here.
+half of the app: the pages the operator actually clicks. The API is covered by
+the Pest suite and is not re-tested here.
 
 **The `composer test` gate is untouched.** `phpunit.xml` names only the `Unit`
 and `Feature` suites, so `php artisan test` never sees `tests/Browser`; the
@@ -1591,7 +1234,7 @@ three wrong produces a suite that goes green while proving nothing.
    clears the config cache, so the server process, the test process and every
    artisan call below read one configuration.
 2. `migrate:fresh` on the Dusk database, and empties
-   `storage/app/private/dusk` — a run writes real pack, asset and paint files,
+   `storage/app/private/dusk` — a run writes real pack and asset files,
    and leftovers from a previous run are a source of tests that pass for the
    wrong reason.
 3. Starts `php artisan serve --no-reload` on the port `APP_URL` names, **unless
@@ -1617,14 +1260,14 @@ it is deliberately not the development key.
 |---|---|
 | `APP_URL=http://127.0.0.1:8991` | **Not** 8000. `composer dev` may be serving the real app on 8000 against the real database, and a browser test that quietly drove *that* is the worst outcome available. |
 | `DB_DATABASE=database/dusk.sqlite` | A real file, never `:memory:` (two processes) and never `database/database.sqlite` — `DatabaseMigrations` runs `migrate:fresh` before **every test**, so one run pointed at the development database would wipe it. |
-| `COLORINGBOOK_PRIVATE_ROOT=private/dusk` | Its own `packs`/`assets`/`paint` tree, emptied at the start of each run. |
-| `MAIL_MAILER=log` | Nothing leaves the box; `log` rather than `array` so a registration test is still debuggable from `storage/logs/laravel.log`. |
+| `COLORINGBOOK_PRIVATE_ROOT=private/dusk` | Its own `packs`/`assets` tree, emptied at the start of each run. |
+| `MAIL_MAILER=log` | Nothing leaves the box; `log` rather than `array` so a password-reset mail is still debuggable from `storage/logs/laravel.log`. |
 | `BCRYPT_ROUNDS=4`, `CACHE_STORE=array`, `QUEUE_CONNECTION=sync` | Every test signs somebody in; a queued job must have finished by the time the redirect lands. |
 | `SESSION_DRIVER=database` | Matches production — the login/logout tests are only worth anything against the session store the deployment uses. |
 
 `config/filesystems.php` gained one thing to make that third row work: the
-three private disks now read `COLORINGBOOK_PRIVATE_ROOT` (default `private`,
-so nothing moved) rather than hard-coding `app/private/...`.
+private disks read `COLORINGBOOK_PRIVATE_ROOT` (default `private`, so nothing
+moved) rather than hard-coding `app/private/...`.
 `config/coloringbook.php` had documented that knob since WP1 without anything
 implementing it.
 
@@ -1638,21 +1281,16 @@ real file and `migrate:fresh` between tests (`tests/DuskTestCase.php`).
 The same fact rules out `Storage::fake()` anywhere in this suite: a fake disk
 exists only in the test process's container, and the process being asked for
 those bytes is the server. `Tests\Concerns\SeedsBrowserFixtures` therefore
-writes rows **and real files** — `seedContestedPage()` for a page that has lost
-a last-write-wins race, `seedDraftPack()` importing the `meadow-mates` fixture
-through the real `PublishPackDirectory` as an unpublished draft.
+writes rows **and real files** — `seedDraftPack()` imports the `meadow-mates`
+fixture through the real `PublishPackDirectory` as an unpublished draft, and
+`seedAuthoredBook()` seeds an already-mapped authored page.
 
 ### What is covered
 
 | File | Ground |
 |---|---|
-| `RegistrationTest` | The guardian checkbox is required; confirming it lands on the dashboard; a taken email is refused. |
 | `AuthenticationTest` | Sign in, wrong password, sign out from the sidebar menu, dashboard unreachable signed out. |
-| `ChildProfilesTest` | Add, rename, the **two-step** remove and its cancel, and the per-account guard rail. |
-| `DevicesTest` | A seeded device renders; signing it out deletes the token row and leaves the device row and the other devices alone. |
-| `AccountDeletionTest` | Wrong password deletes nothing; the right one hard-deletes the household, its paint blobs included, and nobody else's. |
-| `PicturesTest` | A contested page is listed under the right shelf; restore swaps the two versions on disk and in the database; twice puts it back. |
-| `AdminTest` | Non-admin: no sidebar entry and a 404. Admin: pack list, create a draft, publish a version, grant a promo entitlement, unknown email is a field error. |
+| `AdminTest` | Non-admin: no sidebar entry and a 404. Admin: pack list, create a draft, publish a version, grant a promo entitlement **by `device_uid`**, unknown device is a field error. |
 | `AuthoringTest` | WP14: non-admin sees no Books entry and gets a 404; the book list, creating a book (one-book draft pack, slug = uid), the page editor rendering the region overlay, a giant region saying "a line has a gap", one-button publish, and the button disabled on a book that cannot publish. BL-39 moved creation into a dialog behind `[data-test="create-book"]` and added the delete-confirm modal, cancel included. |
 
 `AuthoringTest` seeds pages **already mapped** (`SeedsBrowserFixtures::seedAuthoredBook()`).

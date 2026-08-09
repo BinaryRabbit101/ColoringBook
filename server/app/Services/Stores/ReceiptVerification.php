@@ -3,7 +3,7 @@
 namespace App\Services\Stores;
 
 /**
- * What a `StoreReceiptVerifier` came back with (BL-52).
+ * What a `StoreReceiptVerifier` came back with.
  *
  * Two states and no third: the store recognised the purchase and named a
  * transaction, or it didn't. "We could not ask the store" is deliberately not
@@ -21,7 +21,7 @@ final class ReceiptVerification
     /**
      * @param  string  $transactionId  The store's own id for the purchase. It lands in
      *                                 `entitlements.platform_txn_id`, which is unique
-     *                                 **per owner** — the same purchase legitimately
+     *                                 **per device** — the same purchase legitimately
      *                                 grants on every device signed into the store
      *                                 account (§4.3).
      */

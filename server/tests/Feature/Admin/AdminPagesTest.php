@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Admin;
 
+use App\Models\Device;
 use App\Models\Entitlement;
 use App\Models\Pack;
 use App\Models\PackVersion;
@@ -141,7 +142,7 @@ class AdminPagesTest extends TestCase
     public function test_an_admin_grants_an_entitlement_from_the_form(): void
     {
         $admin = User::factory()->admin()->create();
-        User::factory()->create(['email' => 'parent@example.com']);
+        Device::factory()->create(['device_uid' => 'tablet-uid-0001']);
         Pack::factory()->create(['slug' => 'meadow-mates']);
 
         $this->actingAs($admin)
@@ -155,7 +156,7 @@ class AdminPagesTest extends TestCase
 
         $this->actingAs($admin)
             ->post('/admin/entitlements', [
-                'email' => 'parent@example.com',
+                'device_uid' => 'tablet-uid-0001',
                 'pack_slug' => 'meadow-mates',
             ])
             ->assertSessionHasNoErrors()
@@ -164,7 +165,7 @@ class AdminPagesTest extends TestCase
         $this->assertSame(1, Entitlement::query()->count());
     }
 
-    public function test_an_unknown_email_comes_back_as_a_field_error(): void
+    public function test_an_unknown_device_comes_back_as_a_field_error(): void
     {
         $admin = User::factory()->admin()->create();
         Pack::factory()->create(['slug' => 'meadow-mates']);
@@ -172,9 +173,9 @@ class AdminPagesTest extends TestCase
         $this->actingAs($admin)
             ->from('/admin/entitlements')
             ->post('/admin/entitlements', [
-                'email' => 'nobody@example.com',
+                'device_uid' => 'nobody-at-all',
                 'pack_slug' => 'meadow-mates',
             ])
-            ->assertSessionHasErrors('email');
+            ->assertSessionHasErrors('device_uid');
     }
 }

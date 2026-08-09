@@ -104,6 +104,10 @@ var _ended_events: Array[int] = []
 
 
 func _ready() -> void:
+	# No harness but backend_smoke wants a network. Cleared BEFORE the first frame,
+	# which is when Backend's launch session would otherwise register the
+	# DEVELOPER's real device (see Backend.autostart_enabled).
+	Backend.autostart_enabled = false
 	_page_view.region_locked.connect(func(id: int) -> void: _locked_events.append(id))
 	_page_view.stroke_ended.connect(func(id: int) -> void: _ended_events.append(id))
 	await get_tree().process_frame

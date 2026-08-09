@@ -3,25 +3,26 @@
 namespace App\Actions\Admin;
 
 use App\Exceptions\ApiException;
+use App\Models\Device;
 use App\Models\Entitlement;
 use App\Models\Pack;
-use App\Models\User;
-use App\Services\EntitlementOwner;
 use App\Services\Entitlements;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * `POST /admin/entitlements` — hand a household a pack (DLC_SERVER.md §11).
+ * `POST /admin/entitlements` — hand a device a pack (DLC_SERVER.md §11).
  *
- * Until payments land (Phase 6) this is the only way a paid pack reaches an
- * account, so it is also the support desk's "we're sorry, here" button. It
- * addresses the account by **email**, because that is the only identifier a
- * parent can read off a support email — the API never asks an operator to
- * copy a ULID out of a database.
+ * The support desk's "we're sorry, here" button, and the only way a paid pack
+ * reaches a player without a store receipt.
+ *
+ * It addresses the device by its **`device_uid`**, because that is the only
+ * identifier a player can read off their own screen and paste into a support
+ * email. There is no account and no email address to address instead — the
+ * device is the identity.
  *
  * It is a *re-*grant, deliberately: `Entitlements::grant()` refuses to touch an
  * existing row, so a revoked claim would otherwise be unreachable forever.
- * Un-revoking belongs exactly here — an admin typing an email into a form —
+ * Un-revoking belongs exactly here — an operator typing a uid into a form —
  * and nowhere near a game client retrying a download (§9).
  */
 class GrantPackEntitlement
@@ -32,15 +33,15 @@ class GrantPackEntitlement
      * @param  string  $source  One of `Entitlement::SOURCES`; `promo` and
      *                          `gift` are what this endpoint is for.
      */
-    public function handle(string $email, string $slug, string $source = Entitlement::SOURCE_PROMO): Entitlement
+    public function handle(string $deviceUid, string $slug, string $source = Entitlement::SOURCE_PROMO): Entitlement
     {
-        /** @var User|null $user */
-        $user = User::query()->where('email', $email)->first();
+        /** @var Device|null $device */
+        $device = Device::query()->where('device_uid', $deviceUid)->first();
 
-        if ($user === null) {
+        if ($device === null) {
             throw new ApiException(
-                'USER_NOT_FOUND',
-                __('No account has that email address.'),
+                'DEVICE_NOT_FOUND',
+                __('No device has that id.'),
                 Response::HTTP_NOT_FOUND,
             );
         }
@@ -56,8 +57,6 @@ class GrantPackEntitlement
             );
         }
 
-        // Always an *account* owner: an admin grants to a household, never to
-        // an anonymous device, which has no email to be addressed by (BL-52).
-        return $this->entitlements->regrant(EntitlementOwner::forUser($user), $pack, $source);
+        return $this->entitlements->regrant($device, $pack, $source);
     }
 }

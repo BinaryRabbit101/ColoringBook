@@ -5,7 +5,7 @@ namespace App\Contracts;
 use App\Services\Stores\ReceiptVerification;
 
 /**
- * The one seam between this application and a platform store (BL-52,
+ * The one seam between this application and a platform store (
  * DLC_SERVER.md §9).
  *
  * `POST /entitlements/verify` hands a purchase token to whichever

@@ -6,13 +6,11 @@ use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
- * `POST /api/v1/device/register` — the anonymous tier (BL-52,
- * DLC_SERVER.md §4.3).
+ * `POST /api/v1/device/register` — the only client identity (DLC_SERVER.md
+ * §4.3).
  *
- * The same three fields `POST /auth/token` already carries, minus the
- * credentials, and bounded identically so a uid means the same thing on both
- * routes. `device_name` and `platform` exist purely so a parent recognises the
- * row in the dashboard *after* they sign in and the device is adopted.
+ * Three fields; the last two are optional labels, so the operator has something
+ * readable beside a device's entitlements when a support question arrives.
  *
  * Nothing here is PII, and nothing here may be: a `device_uid` is a ULID the
  * client minted for itself.

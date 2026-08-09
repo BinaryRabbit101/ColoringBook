@@ -218,22 +218,16 @@ abstract class DuskTestCase extends BaseTestCase
     }
 
     /**
-     * Open `/login` and wait until it has stopped rearranging itself.
+     * Open `/login` and wait until the form is there.
      *
-     * `PasskeyVerify` decides whether to render at all from an **async**
-     * capability probe (`usePasskeyVerify().isSupported`), and when that
-     * resolves the passkey block is inserted *above* the form, moving
-     * everything under it. Waiting for the block rather than for the heading
-     * means the fields are where they will stay before anything is typed into
-     * or clicked on them.
+     * The passkey block that used to rearrange this page went with the parent
+     * accounts; nothing renders above the form asynchronously any more, so
+     * waiting for the email field is enough.
      */
     protected function visitLogin(Browser $browser): Browser
     {
         return $browser->visit('/login')
             ->waitForText('Log in to your account')
-            // The late-rendering block itself: once it is here, the form
-            // underneath it is stable.
-            ->waitForText('Sign in with a passkey')
             ->waitFor('input[name="email"]');
     }
 

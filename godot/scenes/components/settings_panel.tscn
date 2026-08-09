@@ -113,19 +113,19 @@ horizontal_alignment = 2
 [node name="Divider" type="HSeparator" parent="Center/Panel/Margin/Column"]
 layout_mode = 2
 
-[node name="AccountRow" type="BoxContainer" parent="Center/Panel/Margin/Column"]
+[node name="PurchasesRow" type="BoxContainer" parent="Center/Panel/Margin/Column"]
 layout_mode = 2
 theme_override_constants/separation = 14
 
-[node name="AccountCaption" type="Label" parent="Center/Panel/Margin/Column/AccountRow"]
+[node name="PurchasesCaption" type="Label" parent="Center/Panel/Margin/Column/PurchasesRow"]
 layout_mode = 2
 size_flags_vertical = 4
 mouse_filter = 2
 theme_override_colors/font_color = Color(0.729412, 0.678431, 0.6, 1)
 theme_override_font_sizes/font_size = 22
-text = "Account"
+text = "Purchases"
 
-[node name="AccountValue" type="Label" parent="Center/Panel/Margin/Column/AccountRow"]
+[node name="PurchasesValue" type="Label" parent="Center/Panel/Margin/Column/PurchasesRow"]
 layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 4
@@ -135,7 +135,7 @@ theme_override_colors/font_color = Color(0.976471, 0.960784, 0.933333, 1)
 theme_override_font_sizes/font_size = 22
 text = "—"
 
-[node name="AccountButton" type="Button" parent="Center/Panel/Margin/Column/AccountRow"]
+[node name="PurchasesButton" type="Button" parent="Center/Panel/Margin/Column/PurchasesRow"]
 custom_minimum_size = Vector2(150, 56)
 layout_mode = 2
 focus_mode = 0
@@ -144,7 +144,7 @@ theme_override_font_sizes/font_size = 22
 theme_override_styles/normal = SubResource("StyleBoxFlat_button")
 theme_override_styles/hover = SubResource("StyleBoxFlat_button")
 theme_override_styles/pressed = SubResource("StyleBoxFlat_button")
-text = "Sign in"
+text = "Restore"
 
 [node name="Divider3" type="HSeparator" parent="Center/Panel/Margin/Column"]
 layout_mode = 2

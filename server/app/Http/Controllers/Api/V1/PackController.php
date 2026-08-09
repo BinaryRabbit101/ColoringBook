@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers\Api\V1;
 
-use App\Concerns\ResolvesEntitlementOwner;
+use App\Concerns\ResolvesDevice;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\PackResource;
 use App\Models\Pack;
@@ -19,14 +19,13 @@ use Illuminate\Http\Request;
  * anything an anonymous client shouldn't see — no storage paths, no version
  * rows that were never published, no draft packs.
  *
- * Since BL-52 the token may name an anonymous device rather than an account
- * (§4.3), and `owned` then reflects that device's own claims — which is what
- * makes the shop show "Download" rather than "Buy" on a tablet that has
- * restored its purchases without anybody signing in.
+ * `owned` reflects the bearer device's own claims — which is what makes the
+ * shop show "Download" rather than "Buy" on a tablet that has restored its
+ * purchases, with nobody ever having signed in to anything.
  */
 class PackController extends Controller
 {
-    use ResolvesEntitlementOwner;
+    use ResolvesDevice;
 
     public function __construct(
         private readonly PackCatalog $catalog,
@@ -36,9 +35,9 @@ class PackController extends Controller
     public function index(Request $request): JsonResponse
     {
         $clientVersion = $this->clientVersion($request);
-        $owner = $this->owner($request);
+        $device = $this->device($request);
 
-        $owned = $owner === null ? [] : $this->entitlements->ownedPackIds($owner);
+        $owned = $device === null ? [] : $this->entitlements->ownedPackIds($device);
 
         $packs = $this->catalog->listable($clientVersion)->map(
             fn (Pack $pack): PackResource => new PackResource(
@@ -54,7 +53,7 @@ class PackController extends Controller
     public function show(Request $request, string $slug): JsonResponse
     {
         $clientVersion = $this->clientVersion($request);
-        $owner = $this->owner($request);
+        $device = $this->device($request);
 
         $pack = $this->catalog->findListable($slug);
         $pack->load(['books.pages', 'stickerSets.stickers']);
@@ -63,7 +62,7 @@ class PackController extends Controller
             'pack' => new PackResource(
                 $pack,
                 $this->catalog->latestVersion($pack, $clientVersion),
-                $owner !== null && $this->entitlements->owns($owner, $pack),
+                $device !== null && $this->entitlements->owns($device, $pack),
                 detailed: true,
             ),
         ]);

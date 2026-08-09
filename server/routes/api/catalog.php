@@ -29,10 +29,10 @@ use Illuminate\Support\Facades\Route;
 | Three tiers of access, and the difference is the whole delivery design
 | (§7.4):
 |
-|  1. **Optional auth.** The shop window, and — since BL-52 — the three
-|     delivery routes too. Signed out, the shop lists published packs and the
-|     delivery routes serve **free** ones; signed in, the shop adds `owned`
-|     and the delivery routes also serve what the token's owner has bought.
+|  1. **Optional auth.** The shop window, and the three delivery routes too.
+|     With no token the shop lists published packs and the delivery routes
+|     serve **free** ones; with one, the shop adds `owned` and the delivery
+|     routes also serve what that device has bought.
 |     `OptionalSanctumUser` exists because `auth:sanctum` cannot express
 |     "authenticate if you can" — it 401s.
 |
@@ -50,14 +50,16 @@ use Illuminate\Support\Facades\Route;
 |     `HTTPRequest.download_file` stream a pack straight to disk without
 |     carrying auth headers. Under Nginx these hand off with
 |     `X-Accel-Redirect` (config `coloringbook.accel_redirect`) so an 8 MB
-|     download never occupies a PHP worker. **Untouched by BL-52**: making free
-|     packs public changed who may ask for a signed URL, not what one is.
+|     download never occupies a PHP worker. Making free packs public changed
+|     who may ask for a signed URL, not what one is.
 |
-| `/entitlements` and `/entitlements/verify` accept an account token **or** an
-| anonymous device token (BL-52, §4.3) and read/write the rows of whichever
-| owner the bearer names. They gate on the `entitlements:read` ability, never on
-| the kind of identity — which is also why nothing here can reach `/sync/*`: an
-| anonymous token simply never carries `save:sync`.
+| `/entitlements` and `/entitlements/verify` read and write the rows of the
+| device the bearer token was minted on (§4.3). They gate on the
+| `entitlements:read` ability, never on the kind of identity — an admin token
+| carries only `admin` and so never reaches them.
+|
+| `verify` is the whole "restore purchases" story: the same store receipt,
+| presented from a second device, grants that device its own row.
 |
 | `{path}` is `.*` because a pack-relative path has slashes in it
 | (`books/coyote-2026/page_01.png`). It is not a hole: the delta routes serve
@@ -70,7 +72,7 @@ Route::middleware(OptionalSanctumUser::class)->group(function (): void {
     Route::get('packs/{slug}', [PackController::class, 'show'])->name('packs.show');
 
     /*
-     * Delivery (BL-52). Optional auth rather than `auth:sanctum`, because
+     * Delivery. Optional auth rather than `auth:sanctum`, because
      * whether a token is required depends on the pack: a free one is public and
      * a paid one is not, and only the controller knows which this is. The
      * ability check and the entitlement check moved in with it — see

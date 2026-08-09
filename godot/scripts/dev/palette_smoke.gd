@@ -143,6 +143,10 @@ var _failures := 0
 
 
 func _ready() -> void:
+	# No harness but backend_smoke wants a network. Cleared BEFORE the first frame,
+	# which is when Backend's launch session would otherwise register the
+	# DEVELOPER's real device (see Backend.autostart_enabled).
+	Backend.autostart_enabled = false
 	# The palette plus a usable page need vertical room; the dev scene sizes its
 	# own window so the layout is not judged against Godot's default 1152x648.
 	get_window().size = Vector2i(1280, 940)

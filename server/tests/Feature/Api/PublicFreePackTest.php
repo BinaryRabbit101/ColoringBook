@@ -2,9 +2,9 @@
 
 namespace Tests\Feature\Api;
 
+use App\Models\Device;
 use App\Models\Entitlement;
 use App\Models\Pack;
-use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\Concerns\PublishesPacks;
 use Tests\TestCase;
@@ -90,7 +90,7 @@ class PublicFreePackTest extends TestCase
 
         // …and signed in but unentitled is still the 403 the client hides the
         // pack's books on.
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->getJson('/api/v1/packs/forest-friends/download')
             ->assertForbidden()
             ->assertJsonPath('error.code', 'ENTITLEMENT_REQUIRED');
@@ -104,8 +104,8 @@ class PublicFreePackTest extends TestCase
         $this->get('/api/v1/packs/forest-friends/download')->assertRedirect();
         $this->get('/api/v1/packs/forest-friends/manifest')->assertOk();
 
-        // Nobody asked; nobody is recorded. The anonymous tier is *lazy*
-        // (§4.3): free play sends no identifier and creates no state.
+        // Nobody asked; nobody is recorded. Free play is *lazy* (§4.3): a
+        // token-less fetch sends no identifier and creates no state.
         $this->assertSame(0, Entitlement::query()->count());
         $this->assertDatabaseCount('devices', 0);
     }
@@ -115,17 +115,16 @@ class PublicFreePackTest extends TestCase
         $this->fakePackStorage();
         $pack = $this->publishFixturePack(free: true)->pack;
 
-        $user = User::factory()->create();
-        $bearer = $this->issueDeviceToken($user);
+        $device = Device::factory()->create();
+        $bearer = $this->issueDeviceToken($device);
 
         $this->withToken($bearer)->get('/api/v1/packs/forest-friends/manifest')->assertOk();
 
         // `owned` and GET /entitlements keep meaning what they mean for a
-        // signed-in household — the claim is no longer the *gate*, but it is
+        // registered device — the claim is no longer the *gate*, but it is
         // still the inventory.
         $this->assertDatabaseHas('entitlements', [
-            'user_id' => $user->id,
-            'device_id' => null,
+            'device_id' => $device->id,
             'pack_id' => $pack->id,
             'source' => Entitlement::SOURCE_FREE,
             'revoked_at' => null,
@@ -177,13 +176,13 @@ class PublicFreePackTest extends TestCase
         $this->fakePackStorage();
         $this->publishFixturePack(free: true);
 
-        $user = User::factory()->create();
+        $device = Device::factory()->create();
 
         // `packs:download` gates *paid* bytes. A free pack skips the token gate
         // entirely, so a token that lacks the ability is no worse off than no
         // token at all — which is the only coherent answer once the same bytes
         // are one anonymous request away.
-        $this->withToken($this->issueDeviceToken($user, 'tablet', ['save:sync']))
+        $this->withToken($this->issueDeviceToken($device, ['entitlements:read']))
             ->get('/api/v1/packs/forest-friends/download')
             ->assertRedirect();
     }

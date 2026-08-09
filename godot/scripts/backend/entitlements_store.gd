@@ -1,7 +1,13 @@
 class_name EntitlementsStore
 extends RefCounted
-## What the server last said this account owns -- cached, with a TTL and a
+## What the server last said this DEVICE owns -- cached, with a TTL and a
 ## LAST-KNOWN-GOOD fallback (DLC_SERVER.md 9, 8.2).
+##
+## [b]The owner is the device, and it never changes.[/b] There are no accounts to
+## sign into or out of, so there is no "somebody else's shelf" to guard against:
+## one installation is one identity for as long as [code]user://[/code] survives,
+## and the only thing that ever rewrites this cache is a successful
+## [code]GET /entitlements[/code] for that same identity.
 ##
 ## [b]The client never decides ownership[/b] (DLC_SERVER.md 9). This class is a
 ## cache of the server's answer and nothing more: every download is authorised
@@ -55,9 +61,6 @@ var _loaded := false
 var _by_slug: Dictionary = {}
 ## Unix seconds of the last SUCCESSFUL fetch; 0 = never.
 var _fetched_at := 0.0
-## Account the cache belongs to, so signing in as somebody else cannot inherit the
-## previous account's shelf.
-var _account := ""
 
 
 func _init(path: String = CACHE_PATH) -> void:
@@ -98,19 +101,19 @@ func get_slugs() -> PackedStringArray:
 	return slugs
 
 
-## Does this account own [param pack_slug]?
+## Does this device own [param pack_slug]?
 ##
-## [b]With no data at all this is FALSE[/b] -- an account that has never
-## successfully talked to the server owns nothing it can prove. That is safe
-## because it only ever hides books that were downloaded through this same server,
-## and [method should_hide_book] is what the shelf actually asks.
+## [b]With no data at all this is FALSE[/b] -- a device that has never successfully
+## talked to the server owns nothing it can prove. That is safe because it only ever
+## hides books that were downloaded through this same server, and
+## [method should_hide_book] is what the shelf actually asks.
 func owns(pack_slug: String) -> bool:
 	_ensure_loaded()
 	return _by_slug.has(pack_slug)
 
 
 ## The shelf's question, and deliberately not the same as [method owns]: hide an
-## installed pack's books ONLY when the server has positively told us this account
+## installed pack's books ONLY when the server has positively told us this device
 ## no longer owns it. No cache, an expired token, a plane -- none of those are a
 ## revocation, and none of them may take a child's book away (DLC_SERVER.md 8.2).
 func should_hide_book(pack_slug: String) -> bool:
@@ -133,11 +136,6 @@ func latest_version(pack_slug: String) -> int:
 	return int((row as Dictionary).get(KEY_LATEST_VERSION, 0))
 
 
-func get_account() -> String:
-	_ensure_loaded()
-	return _account
-
-
 func get_path() -> String:
 	return _path
 
@@ -146,7 +144,7 @@ func get_path() -> String:
 
 ## Replaces the cache with a successful [code]GET /entitlements[/code] response
 ## (a BARE JSON array). Rows without a [code]pack_slug[/code] are dropped.
-func store(rows: Array, account: String) -> void:
+func store(rows: Array) -> void:
 	_ensure_loaded()
 	_by_slug = {}
 	for raw: Variant in rows:
@@ -163,29 +161,18 @@ func store(rows: Array, account: String) -> void:
 			KEY_GRANTED_AT: String(row.get(KEY_GRANTED_AT, "")),
 		}
 	_fetched_at = float(Time.get_unix_time_from_system())
-	_account = account
 	_write()
 
 
-## Forgets everything. Called on sign-out and whenever the signed-in account
-## changes -- one family tablet, two parents, no inherited shelves.
+## Forgets everything. Dev harnesses and "delete my data" only -- nothing in normal
+## play empties this cache, because losing it would blink every DLC book off the
+## shelf until the next successful fetch.
 func clear() -> void:
 	_loaded = true
 	_by_slug = {}
 	_fetched_at = 0.0
-	_account = ""
 	if FileAccess.file_exists(_path):
 		DirAccess.remove_absolute(_path)
-
-
-## Drops the cache when it belongs to a different account than [param account].
-## Returns true when it did. Cheap enough to call on every sign-in.
-func reset_if_other_account(account: String) -> bool:
-	_ensure_loaded()
-	if _account == "" or _account == account:
-		return false
-	clear()
-	return true
 
 
 # ======================================================================= disk ==
@@ -204,7 +191,6 @@ func _ensure_loaded() -> void:
 	if int(data.get("version", 0)) > SCHEMA_VERSION:
 		return
 	_fetched_at = float(data.get("fetched_at", 0.0))
-	_account = String(data.get("account", ""))
 	for raw: Variant in data.get("entitlements", []):
 		if typeof(raw) != TYPE_DICTIONARY:
 			continue
@@ -223,7 +209,6 @@ func _write() -> void:
 		return
 	file.store_string(JSON.stringify({
 		"version": SCHEMA_VERSION,
-		"account": _account,
 		"fetched_at": _fetched_at,
 		"entitlements": _by_slug.values(),
 	}, "\t"))

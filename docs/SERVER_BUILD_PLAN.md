@@ -13,10 +13,41 @@ where this doc is silent, the design doc rules.
 | Dashboard/admin UI | **Inertia v3 + Vue 3 + Fortify** (house pattern, per `Reminders`) | Blade + Livewire |
 | Game-client auth | Laravel **Sanctum** bearer tokens with abilities — unchanged | same |
 | Scope | Phases 1–5; **no payments** (Phase 6 later) | — |
-| Child profiles (Q4) | **In v1.** Schema ships `child_profiles`; sync payloads carry optional `profile` | open |
-| `age_band` (Q12) | **Not collected.** Column omitted entirely — we store nothing about the child but nickname + avatar index | proposed |
-| Email (Q11) | `MAIL_MAILER=log` for now; password reset works but mails go to the log. SMTP relay is a deploy-time concern | open |
+| Child profiles (Q4) | ~~**In v1.** Schema ships `child_profiles`; sync payloads carry optional `profile`~~ — **superseded 2026-08-09**, see below | open |
+| `age_band` (Q12) | **Not collected.** Nothing about a child is stored anywhere | proposed |
+| Email (Q11) | `MAIL_MAILER=log` for now; password reset works but mails go to the log. SMTP relay is a deploy-time concern. Since 2026-08-09 the only person who can receive one is the operator | open |
 | `X-Accel-Redirect` (§7.4) | Behind config `coloringbook.accel_redirect` (default off). Off = stream via PHP `Storage::download` — correct in dev, flip on under Nginx | — |
+
+## Decisions (2026-08-09 — the device-only identity)
+
+**These supersede DLC_SERVER.md's account and save-sync sections and the 2026-08-06 row on
+child profiles.** The product call: manual registration and login are gone, and with them
+every reason for a player's data to exist on a server. `server/CLAUDE.md` restates this for
+implementing agents; where any doc still describes parent accounts, child profiles or cloud
+save-sync, that file and this table win.
+
+| Topic | Decision | Superseded |
+|---|---|---|
+| Player identity | **The `Device` row IS the identity.** Sanctum tokens are minted on `Device` (it is `Authenticatable` + `HasApiTokens`), so `$request->user()` is a `Device` on every game route | accounts, WP1's `POST /auth/*` |
+| `users` | **Operators only** — the person who signs in to publish packs. `is_admin` is the whole model; rows come from a seeder or a shell, and there is no registration route in the app | "guardian registers" |
+| Entitlement owner | `entitlements.device_id`, and nothing else. `App\Services\EntitlementOwner` deleted | `entitlements.user_id` / dual owner |
+| Restore purchases | **Re-verify the same store receipt from the new device.** Hence `UNIQUE(device_id, platform, platform_txn_id)` rather than a global one — the same receipt legitimately grants on N devices, which Google Play requires | account linking / adoption |
+| Cloud saves | **Gone.** No `book_progress`, `paint_layers`, `retained_paint_layers`, `shelf_erasures`; no `/sync/*`, no `PaintStorage`, no `paint` disk, no `paint:prune` schedule. `user://` is the whole persistence story | design §6 in full, WP2 + WP4 |
+| Abilities | Exactly `entitlements:read` + `packs:download`. **`save:sync` no longer exists anywhere** | three abilities |
+| `/device/register` | Contract unchanged and **pinned**: `{device_uid, device_name, platform}` → `{token, abilities, expires_at, device:{ulid}}`, `throttle:6,1`. `devices.device_uid` is now globally unique — there is no account to scope it inside | `user_id IS NULL` scoping |
+| Token refresh | **No refresh route.** A `401` is recovered by re-registering with the same uid; find-or-create makes it idempotent and the entitlements survive | `POST /auth/refresh` |
+| Web surface | `/admin/*`, `/login`, `/dashboard`, `settings/{profile,security,appearance}` — admin session only. Removed: `settings/{profiles,devices,pictures,progress}`, `DELETE settings/profile`, the passkey well-known, and Fortify's register / email-verification / two-factor / passkey routes | parent dashboard |
+| Admin grants | `POST /admin/entitlements` addresses a **`device_uid`** — the only handle a player has — and answers `DEVICE_NOT_FOUND` instead of `USER_NOT_FOUND` | grant by email |
+| Migrations | **Squashed into the original `create_*` migrations** rather than added as a drop round. Nothing is deployed that would need the intermediate states | — |
+| PII | **Players have none.** The operator's email is the only address stored, and nothing a child makes leaves the device. Update any COPPA discussion to that footing | "a parent's email" |
+
+Client half (`godot/`), for the record, since the two move together: `sync_queue.gd`,
+`account_panel` and the sync smoke are deleted; `auth.json` is schema **v2** and device-only
+(a v1 file keeps its `device_uid` and drops the rest); `Backend.sign_in_device()` runs at
+startup, `_authed()` replays a request once after re-registering on a `401`, and
+`restore_purchases()` / `get_store_receipts()` are the billing-plugin seam. The `AdultGate`
+now guards money instead of accounts, and settings' Account row is **Purchases → Restore**.
+`user://sync_queue.json` is orphaned on disk: nothing reads or writes it.
 
 ## House conventions (copy from these, don't invent)
 
@@ -34,11 +65,18 @@ where this doc is silent, the design doc rules.
 - IDs: numeric autoincrement PKs internal; every row that crosses the API boundary gets a
   `ulid` column and is addressed by it (design doc §5).
 - API error shape everywhere: `{"error": {"code": "SNAKE_CASE", "message": "…"}}`.
-- Routes: `routes/api.php` only `require`s per-domain files created in WP0
-  (`routes/api/auth.php`, `sync.php`, `catalog.php`, `admin.php`) so parallel agents
-  never edit the same route file.
+- Routes: `routes/api.php` holds no routes of its own — it only `require`s the per-domain
+  files (`routes/api/device.php`, `catalog.php`, `admin.php`) under the `/api/v1` prefix, so
+  parallel agents never edit the same route file. Add routes to your domain file.
 
 ## Work packages
+
+> **These are the campaign record, not a brief to work from.** They are left as
+> written — including WP1's accounts and parent dashboard, WP2's progress sync, WP4's
+> paint sync and WP11's sync client — because the acceptance criteria and the
+> conventions they established are what the app was built against. Where a work package
+> below conflicts with the **2026-08-09 Decisions** table, the table wins and the work
+> package is history: none of that machinery still exists.
 
 ### WP0 — Scaffold (sequential, blocks everything)
 

@@ -49,8 +49,9 @@ extends Control
 ##      (BL-41), keeps every row built so a download in the tab nobody is looking
 ##      at carries on, and opens on a tab that has something on it
 ##   i  BL-52: the Get button's question is about the PACK, not the player -- a
-##      free pack (owned or not) and a paid pack this device owns all download
-##      with nobody signed in; only a paid pack nobody owns meets the adult gate
+##      free pack (owned or not) and a paid pack this device owns all download on
+##      a device the server has never met; only a paid pack nobody owns has to be
+##      bought, and its row says so rather than offering a doomed download
 ##   f  a DLC book and the built-in book that share a uid share one save entry --
 ##      migrated progress AND progress recorded live against the built-in book --
 ##      and the BL-25 release shape: with no built-in books at all the shelf is
@@ -135,6 +136,10 @@ var _cold_take_ms := 0.0
 
 
 func _ready() -> void:
+	# No harness but backend_smoke wants a network. Cleared BEFORE the first frame,
+	# which is when Backend's launch session would otherwise register the
+	# DEVELOPER's real device (see Backend.autostart_enabled).
+	Backend.autostart_enabled = false
 	get_window().size = Vector2i(1280, 820)
 	# The paint readback stalls on the presentation queue under FIFO v-sync; the
 	# run is much shorter on mailbox and this harness measures nothing that cares.
@@ -820,17 +825,18 @@ func _check_shared_uid() -> void:
 		% GameState.get_page_status(GameState.book_key(dupe), 0))
 	GameState.mark_page_status(_coyote_book, 0, GameState.STATUS_IN_PROGRESS)
 	var canvas := Image.create(4, 4, false, Image.FORMAT_RGBA8)
-	canvas.fill(Color(0.2, 0.6, 0.9, 1.0))
-	var painted := canvas.save_png_to_buffer()
-	_expect(GameState.install_page_paint(_coyote_book, 0, painted),
+	var painted_color := Color(0.2, 0.6, 0.9, 1.0)
+	canvas.fill(painted_color)
+	_expect(GameState.save_page_paint(_coyote_book, 0, canvas),
 		"...a paint layer is written against the built-in book")
 	_expect(GameState.get_page_status(GameState.book_key(dupe), 0) == GameState.STATUS_IN_PROGRESS,
 		"...and the pack twin reports that progress (%s)"
 		% GameState.get_page_status(GameState.book_key(dupe), 0))
 	_expect(GameState.get_resume_index(dupe) == GameState.get_resume_index(_coyote_book),
 		"...opens at the same page (%d)" % GameState.get_resume_index(dupe))
-	_expect(FileAccess.file_exists(GameState.get_paint_path(dupe, 0))
-			and FileAccess.get_file_as_bytes(GameState.get_paint_path(dupe, 0)) == painted,
+	var through_the_twin := GameState.load_page_paint(dupe, 0)
+	_expect(through_the_twin != null
+			and through_the_twin.get_pixel(0, 0).is_equal_approx(painted_color),
 		"...and finds the very same pixels on disk (%s)"
 		% GameState.get_paint_path(dupe, 0).get_file())
 
@@ -1010,11 +1016,11 @@ func _check_shop_tabs() -> void:
 	shop.queue_free()
 
 
-# ================================ i: who the Get button asks for (BL-52) ==
-# DLC_SERVER.md 7.4/9. Free packs are PUBLIC since BL-52, so the shop's question
-# stopped being "is anybody signed in" and became "does this pack need an owner":
-# a free book downloads on a fresh tablet with no account and no token, and only a
-# paid one nobody owns routes the grown-up to the adult gate.
+# ================================= i: what the Get button asks about (BL-52) ==
+# DLC_SERVER.md 7.4/9. There is nobody to sign in, so the shop's question is only
+# ever about the PACK: a free book's bytes are public and download on a tablet the
+# server has never met, an owned one is already this device's, and everything else
+# has to be bought.
 #
 # Asserted here as a PURE DECISION, from the server's two flags, with no server and
 # no network: pressing a free row for real would start an 8 MB download, which is
@@ -1022,7 +1028,7 @@ func _check_shop_tabs() -> void:
 # the server's word, rendered verbatim -- this file decides nothing (§9).
 
 func _check_download_gate() -> void:
-	print("\n-- check i: a free pack needs no account (BL-52) --")
+	print("\n-- check i: a free pack needs nothing from anybody (BL-52) --")
 
 	var shop := SHOP_SCENE.instantiate() as PackShop
 	add_child(shop)
@@ -1039,18 +1045,22 @@ func _check_download_gate() -> void:
 	])
 	await get_tree().process_frame
 
-	_expect(not shop.get_row("free-new").needs_account(),
-		"a FREE pack nobody owns needs no account -- its bytes are public")
-	_expect(not shop.get_row("free-owned").needs_account(),
-		"...nor does a free one already claimed")
-	_expect(not shop.get_row("paid-owned").needs_account(),
-		"...nor a PAID one this device already owns, however it came to own it")
-	_expect(shop.get_row("paid-new").needs_account(),
-		"a paid pack nobody owns is the ONE row the adult gate is still for")
+	_expect(not shop.get_row("free-new").needs_purchase(),
+		"a FREE pack nobody owns can just be taken -- its bytes are public")
+	_expect(not shop.get_row("free-owned").needs_purchase(),
+		"...as can a free one already claimed")
+	_expect(not shop.get_row("paid-owned").needs_purchase(),
+		"...and a PAID one this device already owns, however it came to own it")
+	_expect(shop.get_row("paid-new").needs_purchase(),
+		"a paid pack nobody owns is the ONE row that has to be bought")
+	_expect(shop.get_row("paid-new").get_state() == PackShop.PackRow.STATE_PURCHASE
+			and shop.get_row("paid-new").get_action_button().disabled,
+		"...so it rests in '%s' rather than offering a download the server would refuse"
+		% shop.get_row("paid-new").get_state())
 
-	var gated := shop.gated_rows()
-	_expect(gated.size() == 1 and gated[0].get_slug() == "paid-new",
-		"...so the shop counts exactly one gated row (%d)" % gated.size())
+	var purchasable := shop.purchasable_rows()
+	_expect(purchasable.size() == 1 and purchasable[0].get_slug() == "paid-new",
+		"...and the shop counts exactly one row to buy (%d)" % purchasable.size())
 
 	# And the hint follows the rows rather than the player: a catalogue of nothing
 	# but free books never tells a child to go and fetch a grown-up.
@@ -1059,10 +1069,10 @@ func _check_download_gate() -> void:
 			PackShop.KEY_IS_FREE: true},
 	])
 	await get_tree().process_frame
-	_expect(shop.gated_rows().is_empty(),
-		"an all-free catalogue has nothing behind the gate at all")
-	_expect(shop.get_status_text() != PackShop.SIGNED_OUT_HINT,
-		"...and says nothing about signing in ('%s')" % shop.get_status_text())
+	_expect(shop.purchasable_rows().is_empty(),
+		"an all-free catalogue has nothing to buy at all")
+	_expect(shop.get_status_text() != PackShop.PURCHASE_HINT,
+		"...and says nothing about buying or restoring ('%s')" % shop.get_status_text())
 
 	shop.queue_free()
 

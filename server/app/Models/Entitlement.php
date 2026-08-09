@@ -11,26 +11,21 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * One owner's claim on one pack (DLC_SERVER.md §5, §9, §4.3).
+ * One device's claim on one pack (DLC_SERVER.md §5, §9).
  *
  * Rows here are the single source of truth for "do you own this": there is no
  * implicit ownership anywhere in the code, not even for free packs — a free
  * pack simply grants itself a `source = 'free'` row the first time a token
  * asks for its bytes (see `App\Services\Entitlements`).
  *
- * **Exactly one owner** (BL-52): either `user_id` (a parent account) or
- * `device_id` (an anonymous device that bought a pack from the store without
- * anybody typing an email). `owner_key` is the stored discriminator the two
- * unique indexes turn on; `App\Services\EntitlementOwner` is the only thing
- * allowed to write either column.
+ * The owner is always a `Device`. `device_id` is not fillable: who owns what is
+ * never something a request body gets to say.
  *
  * `revoked_at` is a tombstone rather than a delete, so a refund is auditable
  * and a re-grant is a deliberate act.
  *
  * @property int $id
- * @property int|null $user_id
- * @property int|null $device_id
- * @property string|null $owner_key
+ * @property int $device_id
  * @property int $pack_id
  * @property string $source
  * @property string|null $platform
@@ -39,8 +34,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property CarbonImmutable|null $revoked_at
  * @property CarbonImmutable|null $created_at
  * @property CarbonImmutable|null $updated_at
- * @property-read User|null $user
- * @property-read Device|null $device
+ * @property-read Device $device
  * @property-read Pack $pack
  */
 #[Fillable(['source', 'platform', 'platform_txn_id', 'granted_at', 'revoked_at'])]
@@ -76,17 +70,6 @@ class Entitlement extends Model
     }
 
     /**
-     * @return BelongsTo<User, $this>
-     */
-    public function user(): BelongsTo
-    {
-        return $this->belongsTo(User::class);
-    }
-
-    /**
-     * The anonymous device that owns this claim, when an account doesn't
-     * (BL-52).
-     *
      * @return BelongsTo<Device, $this>
      */
     public function device(): BelongsTo

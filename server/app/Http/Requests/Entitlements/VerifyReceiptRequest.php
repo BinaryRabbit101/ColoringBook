@@ -9,7 +9,7 @@ use Illuminate\Validation\Rule;
 
 /**
  * `POST /api/v1/entitlements/verify` — `{platform, purchase_token, sku}`
- * (BL-52, DLC_SERVER.md §9).
+ * (DLC_SERVER.md §9).
  *
  * `platform` is validated against `coloringbook.stores.sku_columns`, so a
  * platform this build has never heard of is a 422 with a field error, while a

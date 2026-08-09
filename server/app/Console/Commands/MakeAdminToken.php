@@ -16,14 +16,14 @@ use Illuminate\Console\Command;
  * someone with a shell on the server, not a session that a stolen laptop
  * inherits.
  *
- * It carries exactly the `admin` ability — never the game's `save:sync`,
- * `entitlements:read`, `packs:download` set — so a leaked pack-build token
- * cannot read anybody's colouring, and a leaked device token cannot publish.
+ * It carries exactly the `admin` ability — never the game's
+ * `entitlements:read` + `packs:download` set — so a leaked device token can
+ * never publish a pack, and a leaked pack-build token owns nothing.
  */
 class MakeAdminToken extends Command
 {
     protected $signature = 'admin:token
-        {email : The parent account (users.is_admin must already be set)}
+        {email : The operator account (users.is_admin must already be set)}
         {--name=pack-build : A label, so the token can be found and revoked}
         {--days=90 : How long it lives; 0 for no expiry}';
 

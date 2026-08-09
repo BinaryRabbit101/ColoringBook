@@ -1,12 +1,12 @@
 <?php
 
-namespace App\Actions\Accounts;
+namespace App\Actions\Devices;
 
 use App\Models\Device;
 use Carbon\CarbonImmutable;
 
 /**
- * What `POST /api/v1/auth/token` hands back — the one and only moment the
+ * What `POST /api/v1/device/register` hands back — the one and only moment the
  * plain-text token exists.
  */
 class IssuedDeviceToken

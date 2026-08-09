@@ -4,27 +4,31 @@ namespace Tests\Feature\Api;
 
 use App\Models\Device;
 use App\Models\Entitlement;
-use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Route;
 use Laravel\Sanctum\PersonalAccessToken;
 use Tests\Concerns\PublishesPacks;
 use Tests\TestCase;
 
 /**
- * `POST /api/v1/device/register` — the anonymous tier (BL-52,
- * DLC_SERVER.md §4.3, §11).
+ * `POST /api/v1/device/register` — **the only client identity**
+ * (DLC_SERVER.md §4.3, §11).
  *
- * Two things are being proved here and they pull in opposite directions: an
- * anonymous device must be able to own and download packs, and it must never
- * be able to touch a child's artwork or somebody else's account.
+ * The contract this file pins, because the game client codes against it:
+ *
+ *     {device_uid, device_name, platform}
+ *       → {token, abilities, expires_at, device: {ulid}}
+ *
+ * find-or-create, `throttle:6,1`, abilities exactly
+ * `entitlements:read` + `packs:download`.
  */
 class DeviceRegistrationTest extends TestCase
 {
     use PublishesPacks, RefreshDatabase;
 
-    public function test_it_creates_an_anonymous_device_and_returns_a_token(): void
+    public function test_it_creates_a_device_and_returns_a_token(): void
     {
         $response = $this->postJson('/api/v1/device/register', [
             'device_uid' => 'tablet-in-the-kitchen',
@@ -39,7 +43,6 @@ class DeviceRegistrationTest extends TestCase
 
         $device = Device::query()->sole();
 
-        $this->assertNull($device->user_id);
         $this->assertSame('tablet-in-the-kitchen', $device->device_uid);
         $this->assertSame('Kitchen tablet', $device->device_name);
         $this->assertSame('android', $device->platform);
@@ -49,7 +52,7 @@ class DeviceRegistrationTest extends TestCase
         $this->assertArrayNotHasKey('id', (array) $response->json('device'));
     }
 
-    public function test_the_token_carries_exactly_two_abilities_and_never_save_sync(): void
+    public function test_the_token_carries_exactly_the_two_abilities(): void
     {
         $response = $this->postJson('/api/v1/device/register', [
             'device_uid' => 'tablet-in-the-kitchen',
@@ -61,10 +64,10 @@ class DeviceRegistrationTest extends TestCase
 
         $this->assertSame(['entitlements:read', 'packs:download'], $token->abilities);
         $this->assertSame(Device::class, $token->tokenable_type);
-        $this->assertNotContains('save:sync', (array) $token->abilities);
+        $this->assertNotContains('admin', (array) $token->abilities);
     }
 
-    public function test_the_token_gets_the_same_ninety_day_window_and_slides(): void
+    public function test_the_token_gets_a_ninety_day_window_and_slides(): void
     {
         $expiresAt = CarbonImmutable::parse(
             (string) $this->postJson('/api/v1/device/register', ['device_uid' => 'tablet-uid'])
@@ -77,8 +80,6 @@ class DeviceRegistrationTest extends TestCase
             1,
         );
 
-        // And `SlideTokenExpiry` keeps working for it: the window is the same
-        // window, the tokenable is the only thing that differs.
         $bearer = (string) $this->postJson('/api/v1/device/register', ['device_uid' => 'tablet-uid'])
             ->json('token');
 
@@ -94,6 +95,11 @@ class DeviceRegistrationTest extends TestCase
         );
     }
 
+    /**
+     * The whole reason there is no refresh route: registering again with the
+     * uid the client has held since install is a *fresh token on the same
+     * identity*, so a 401 is recovered by one idempotent call.
+     */
     public function test_registering_again_rotates_the_token_and_keeps_the_row(): void
     {
         $first = (string) $this->postJson('/api/v1/device/register', ['device_uid' => 'tablet-uid'])
@@ -118,63 +124,42 @@ class DeviceRegistrationTest extends TestCase
         $this->withToken($second)->getJson('/api/v1/entitlements')->assertOk();
     }
 
-    public function test_a_uid_that_belongs_to_an_account_is_never_exposed(): void
-    {
-        $user = User::factory()->create();
-        $linked = Device::factory()->for($user)->create(['device_uid' => 'shared-uid']);
-
-        $response = $this->postJson('/api/v1/device/register', ['device_uid' => 'shared-uid'])
-            ->assertOk();
-
-        $anonymous = Device::query()->anonymous()->sole();
-
-        // A brand-new, empty identity — not the household's row.
-        $this->assertNotSame($linked->ulid, $response->json('device.ulid'));
-        $this->assertSame($anonymous->ulid, $response->json('device.ulid'));
-        $this->assertDatabaseCount('devices', 2);
-
-        // …and the account's device did not lose its account or its tokens.
-        $linked->refresh();
-        $this->assertSame($user->id, $linked->user_id);
-    }
-
-    public function test_an_anonymous_device_cannot_reach_anything_gated_on_save_sync(): void
-    {
-        $bearer = (string) $this->postJson('/api/v1/device/register', ['device_uid' => 'tablet-uid'])
-            ->json('token');
-
-        // The whole sync surface, plus the two account routes on the same gate.
-        // This is the compliance claim of §4.3 as an assertion: an anonymous
-        // device can own packs, it can never upload a child's artwork.
-        $calls = [
-            ['getJson', '/api/v1/sync/progress'],
-            ['putJson', '/api/v1/sync/progress'],
-            ['deleteJson', '/api/v1/sync/progress'],
-            ['postJson', '/api/v1/sync/paint/coyote-2026/0'],
-            ['getJson', '/api/v1/sync/paint/coyote-2026/0'],
-            ['deleteJson', '/api/v1/sync/paint/coyote-2026/0'],
-            ['getJson', '/api/v1/me'],
-            ['getJson', '/api/v1/profiles'],
-        ];
-
-        foreach ($calls as [$verb, $url]) {
-            $this->forgetResolvedGuards();
-
-            $this->withToken($bearer)->{$verb}($url)
-                ->assertForbidden()
-                ->assertJsonPath('error.code', 'MISSING_ABILITY');
-        }
-    }
-
-    public function test_an_anonymous_device_reads_its_own_entitlements_and_only_its_own(): void
+    /**
+     * Re-auth must not cost a player their books. This is the assertion behind
+     * "there is no refresh route".
+     */
+    public function test_re_registering_keeps_the_entitlements(): void
     {
         $this->fakePackStorage();
         $pack = $this->publishFixturePack()->pack;
 
-        $issued = $this->registerAnonymousDevice('tablet-uid');
-        $other = $this->registerAnonymousDevice('other-tablet-uid');
+        $issued = $this->registerDevice('tablet-uid');
 
-        Entitlement::factory()->ownedByDevice($issued->device)->for($pack)
+        Entitlement::factory()->for($issued->device)->for($pack)
+            ->source(Entitlement::SOURCE_PURCHASE)
+            ->create();
+
+        $bearer = (string) $this->postJson('/api/v1/device/register', ['device_uid' => 'tablet-uid'])
+            ->json('token');
+
+        $this->forgetResolvedGuards();
+
+        $this->withToken($bearer)
+            ->getJson('/api/v1/entitlements')
+            ->assertOk()
+            ->assertJsonCount(1)
+            ->assertJsonPath('0.pack_slug', 'forest-friends');
+    }
+
+    public function test_a_device_reads_its_own_entitlements_and_only_its_own(): void
+    {
+        $this->fakePackStorage();
+        $pack = $this->publishFixturePack()->pack;
+
+        $issued = $this->registerDevice('tablet-uid');
+        $other = $this->registerDevice('other-tablet-uid');
+
+        Entitlement::factory()->for($issued->device)->for($pack)
             ->source(Entitlement::SOURCE_PURCHASE)
             ->create();
 
@@ -194,19 +179,19 @@ class DeviceRegistrationTest extends TestCase
             ->assertJsonCount(0);
     }
 
-    public function test_an_anonymous_device_downloads_the_paid_pack_it_owns(): void
+    public function test_a_device_downloads_the_paid_pack_it_owns(): void
     {
         $this->fakePackStorage();
         $pack = $this->publishFixturePack()->pack;
 
-        $issued = $this->registerAnonymousDevice('tablet-uid');
+        $issued = $this->registerDevice('tablet-uid');
 
         $this->withToken($issued->plainTextToken)
             ->getJson('/api/v1/packs/forest-friends/download')
             ->assertForbidden()
             ->assertJsonPath('error.code', 'ENTITLEMENT_REQUIRED');
 
-        Entitlement::factory()->ownedByDevice($issued->device)->for($pack)
+        Entitlement::factory()->for($issued->device)->for($pack)
             ->source(Entitlement::SOURCE_PURCHASE)
             ->create();
 
@@ -216,8 +201,7 @@ class DeviceRegistrationTest extends TestCase
             ->get('/api/v1/packs/forest-friends/download')
             ->assertRedirect();
 
-        // …and the shop says so, which is what turns "Buy" into "Download" on a
-        // tablet nobody has signed in on.
+        // …and the shop says so, which is what turns "Buy" into "Download".
         $this->forgetResolvedGuards();
 
         $this->withToken($issued->plainTextToken)
@@ -227,35 +211,20 @@ class DeviceRegistrationTest extends TestCase
     }
 
     /**
-     * The generated column earning its keep. `UNIQUE(user_id, device_uid)`
-     * alone would allow this, because SQL treats two NULLs as distinct — which
-     * is exactly the hole `owner_key = coalesce(user_id, 0)` closes.
+     * `device_uid` is globally unique now that nothing scopes it. Two rows for
+     * one uid would be two inventories for one install, and the second one
+     * would silently be the empty one.
      */
-    public function test_the_database_refuses_a_second_anonymous_row_for_one_uid(): void
+    public function test_the_database_refuses_a_second_row_for_one_uid(): void
     {
-        $this->registerAnonymousDevice('tablet-uid');
+        $this->registerDevice('tablet-uid');
 
         $this->expectException(QueryException::class);
 
         Device::query()->create(['device_uid' => 'tablet-uid']);
     }
 
-    public function test_per_account_uniqueness_of_a_uid_is_unchanged(): void
-    {
-        $user = User::factory()->create();
-        Device::factory()->for($user)->create(['device_uid' => 'tablet-uid']);
-
-        // Two accounts may each hold the same uid (a reinstall on a shared
-        // tablet); one account may not hold it twice.
-        Device::factory()->for(User::factory())->create(['device_uid' => 'tablet-uid']);
-        $this->assertDatabaseCount('devices', 2);
-
-        $this->expectException(QueryException::class);
-
-        Device::factory()->for($user)->create(['device_uid' => 'tablet-uid']);
-    }
-
-    public function test_the_uid_is_validated_like_the_sign_in_route_validates_it(): void
+    public function test_the_uid_is_bounded(): void
     {
         $this->postJson('/api/v1/device/register', [])
             ->assertStatus(422)
@@ -267,5 +236,36 @@ class DeviceRegistrationTest extends TestCase
             ->assertJsonPath('error.code', 'VALIDATION_FAILED');
 
         $this->assertDatabaseCount('devices', 0);
+    }
+
+    /**
+     * The pinned rate limit. Asserted on the route rather than by hammering it:
+     * the two unnamed limiters (`throttle:60,1` from the group and this one)
+     * share a cache key, so a request costs each of them a hit and counting
+     * responses would pin that quirk instead of the contract.
+     */
+    public function test_registration_carries_the_tighter_rate_limit(): void
+    {
+        $route = Route::getRoutes()->getByName('api.v1.device.register');
+
+        $this->assertNotNull($route);
+        $this->assertContains('throttle:6,1', $route->gatherMiddleware());
+        $this->assertContains('throttle:60,1', $route->gatherMiddleware());
+    }
+
+    public function test_hammering_registration_is_throttled_in_the_house_shape(): void
+    {
+        for ($i = 0; $i < 12; $i++) {
+            $response = $this->postJson('/api/v1/device/register', ['device_uid' => 'tablet-uid-'.$i]);
+
+            if ($response->getStatusCode() === 429) {
+                $response->assertJsonPath('error.code', 'THROTTLED')
+                    ->assertHeader('Retry-After');
+
+                return;
+            }
+        }
+
+        $this->fail('Registration was never throttled.');
     }
 }

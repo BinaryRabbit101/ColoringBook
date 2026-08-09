@@ -7,7 +7,16 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration
 {
     /**
-     * Run the migrations.
+     * `users` is the **operator** table, and nothing else.
+     *
+     * There are no player accounts: a game device is its own identity
+     * (`devices`, `POST /api/v1/device/register`). The only rows here are the
+     * people who sign in to the publishing tool at `/admin/*`, and they are
+     * created with `php artisan db:seed` or by hand — there is no registration
+     * form and no self-service sign-up anywhere in the application.
+     *
+     * `is_admin` is still the whole authorisation model (DLC_SERVER.md §10.2):
+     * one boolean, no roles, enforced by `App\Http\Middleware\EnsureAdmin`.
      */
     public function up(): void
     {
@@ -16,7 +25,7 @@ return new class extends Migration
             // Public identifier — every row that crosses the API boundary is
             // addressed by its ULID, never by the numeric key (DLC_SERVER.md §5).
             $table->ulid('ulid')->unique();
-            $table->string('name');
+            $table->string('name')->nullable();
             $table->string('email')->unique();
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');

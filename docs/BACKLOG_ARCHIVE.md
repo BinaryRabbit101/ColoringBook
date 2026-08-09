@@ -6,6 +6,16 @@ gotchas and smoke-count history that implementing agents rely on. Do not trim th
 Ordered by entry number (BL-8, the DLC umbrella, stays in BACKLOG.md — its Phase 6
 is still open).
 
+> **Read every account, profile and cloud-sync reference below as history.** On
+> 2026-08-09 (**BL-53**, in BACKLOG.md) player accounts, child profiles and cloud
+> save-sync were removed from the product: the device is the identity, and `user://`
+> is the whole persistence story. That is why entries here cite parts of
+> `docs/DLC_SERVER.md` that no longer say what they said — notably **§6**, now
+> "Saves — local, and only local" (§6.1 keys the save by `book_uid` and §6.3 is
+> the surviving status ordering; the sync, merge and erasure machinery of BL-18 is
+> gone), and **§4**, now the device identity. Nothing below has been rewritten:
+> these are records of what was true when the work was done.
+
 ### BL-1: Default canvas zoom is too tight — `done`
 The drawing canvas opens at a zoom level where the page edges are hard to reach.
 By default the canvas should start slightly zoomed **out**, leaving a comfortable

@@ -1,6 +1,6 @@
 class_name SettingsPanel
 extends Control
-## The settings overlay: the account, erase progress, read the version.
+## The settings overlay: restore purchases, erase progress, read the version.
 ##
 ## [b]An overlay, not a screen[/b]. [code]main.tscn[/code] owns it and puts it on
 ## top of whatever screen is showing, which is why it is in
@@ -25,21 +25,20 @@ extends Control
 ## the game shares. Two things here are this panel's own business rather than the
 ## shared mechanism's:
 ## [codeblock]
-## the account row  a plain BoxContainer, so portrait stacks caption / email / button
-## the email        AUTOWRAP_ARBITRARY in portrait, because it has no spaces to break
+## the purchases row  a plain BoxContainer, so portrait stacks caption / value /
+##                    button instead of squeezing three things onto 390 pt of phone
+## the value          AUTOWRAP_ARBITRARY in portrait, so a long line wraps rather
+##                    than clipping to an ellipsis
 ## [/codeblock]
-## The clipped "Binaryrabbit101@gmail.c…" next to a small Manage button is the exact
-## complaint BL-48 opened with, and it is fixed by giving the address the whole width
-## of the panel instead of whatever is left over beside a button.
 
 ## The player closed the panel.
 signal closed()
 ## The player confirmed the destructive erase.
 signal erase_all_confirmed()
-## The grown-up tapped "Account" (WP10). The parent puts the [AdultGate] in front
-## of it and only then the [AccountPanel] -- this panel never opens an account
-## screen itself, and never speaks to the network.
-signal account_requested()
+## The grown-up tapped "Restore". The parent puts the [AdultGate] in front of it and
+## only then runs the restore -- this panel never speaks to the network itself, for
+## the same "signals up, calls down" reason it never writes the save.
+signal restore_requested()
 
 ## Where the version string comes from (set in project.godot).
 const VERSION_SETTING := "application/config/version"
@@ -51,8 +50,8 @@ const ACK_SECONDS := 2.2
 
 @onready var _scrim: Button = $Scrim
 @onready var _palette_value: Label = $Center/Panel/Margin/Column/PaletteRow/PaletteValue
-@onready var _account_value: Label = $Center/Panel/Margin/Column/AccountRow/AccountValue
-@onready var _account_button: Button = $Center/Panel/Margin/Column/AccountRow/AccountButton
+@onready var _purchases_value: Label = $Center/Panel/Margin/Column/PurchasesRow/PurchasesValue
+@onready var _restore_button: Button = $Center/Panel/Margin/Column/PurchasesRow/PurchasesButton
 @onready var _erase_button: Button = $Center/Panel/Margin/Column/EraseButton
 @onready var _confirm_box: VBoxContainer = $Center/Panel/Margin/Column/ConfirmBox
 @onready var _confirm_button: Button = $Center/Panel/Margin/Column/ConfirmBox/Row/ConfirmButton
@@ -73,7 +72,7 @@ func _ready() -> void:
 	_metrics.apply()
 	_scrim.pressed.connect(_on_close_pressed)
 	_close_button.pressed.connect(_on_close_pressed)
-	_account_button.pressed.connect(func() -> void: account_requested.emit())
+	_restore_button.pressed.connect(func() -> void: restore_requested.emit())
 	_erase_button.pressed.connect(_on_erase_pressed)
 	_cancel_button.pressed.connect(_on_cancel_pressed)
 	_confirm_button.pressed.connect(_on_confirm_pressed)
@@ -84,28 +83,45 @@ func _ready() -> void:
 
 ## Re-reads everything the panel displays. Called on open, so a panel that was
 ## kept around shows current values.
+##
+## [b]The purchases row never mentions an identity[/b], because there is not one a
+## grown-up could act on: the app signs this device in by itself and the row's job
+## is only to say what the device owns and offer to go and ask the store again.
+## The whole row hides in a build with no server, where there is nothing to buy and
+## nothing to restore.
 func refresh() -> void:
 	var palette := GameState.get_active_palette()
 	_palette_value.text = palette.display_name if palette != null else "?"
-	# WP10: the account row reads Backend, which is inert (and therefore reads
-	# "Not signed in") whenever there is no account or no server configured. This
-	# panel still never talks to the network itself.
-	var signed_in := Backend.is_signed_in()
-	_account_value.text = Backend.get_account_email() if signed_in else "Not signed in"
-	_account_button.text = "Manage" if signed_in else "Sign in"
-	_account_button.visible = Backend.is_enabled()
+	var owned := Backend.get_entitlements().size()
+	_purchases_value.text = "Nothing bought yet" if owned == 0 \
+		else "%d pack%s on this device" % [owned, "" if owned == 1 else "s"]
+	_restore_button.visible = Backend.is_enabled()
+	_purchases_value.get_parent().visible = Backend.is_enabled()
 	_version_label.text = "ColoringBook %s (%s)" % [
 		String(ProjectSettings.get_setting(VERSION_SETTING, "0.0.0")), BUILD_TAG
 	]
 	set_confirming(false)
 
 
+## Reports what a restore did, in the panel's own status line. Called by the parent
+## after [signal restore_requested] has been through the adult gate and the network
+## -- [b]the one place in the game a backend result is ever shown to anybody[/b]
+## outside the pack shop, and only ever to a grown-up who asked for it.
+func report_restore(restored: int, ok: bool, message: String = "") -> void:
+	refresh()
+	if not ok:
+		_acknowledge(message if message != "" else "Could not reach the store. Try again later.")
+		return
+	_acknowledge("Nothing to restore." if restored == 0
+		else "Restored %d purchase%s." % [restored, "" if restored == 1 else "s"])
+
+
 ## BL-48: the one thing the shared scaler cannot do for this panel. In portrait the
-## account row has already been stacked by [OverlayMetrics] (it is a plain
-## [BoxContainer]), so the address has the whole panel width to itself and there is
+## purchases row has already been stacked by [OverlayMetrics] (it is a plain
+## [BoxContainer]), so its value has the whole panel width to itself and there is
 ## no reason left to clip it.
 func _on_overlay_scaled(_scale: float, portrait: bool) -> void:
-	OverlayMetrics.fit_long_text(_account_value, portrait)
+	OverlayMetrics.fit_long_text(_purchases_value, portrait)
 	# The palette value is pushed to the far margin because it is the RIGHT-HAND end
 	# of a row. Stacked, there is no right-hand end, and a right-aligned value above
 	# a left-aligned email looks like two different bugs rather than one layout.
@@ -158,18 +174,18 @@ func _on_close_pressed() -> void:
 
 # ===================================================================== access ==
 
-func get_account_button() -> Button:
-	return _account_button
+func get_restore_button() -> Button:
+	return _restore_button
 
 
-func get_account_text() -> String:
-	return _account_value.text
+func get_purchases_text() -> String:
+	return _purchases_value.text
 
 
-## The label the account email is written into. BL-48's harness measures it, and it
+## The label the purchases line is written into. BL-48's harness measures it, and it
 ## is the one control on this panel whose CONTENT can be too long for its box.
-func get_account_label() -> Label:
-	return _account_value
+func get_purchases_label() -> Label:
+	return _purchases_value
 
 
 ## BL-48's shared scaler, so a harness can read the live scale and touch floor off

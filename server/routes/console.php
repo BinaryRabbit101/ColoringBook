@@ -9,17 +9,6 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 /*
- * WP4 — expire the retained losing paint versions (DLC_SERVER.md §6.3).
- *
- * Nightly, off-peak, and without overlap: the sweep is per-file work and a
- * long one must not have a second copy walking the same rows. Nothing here is
- * urgent — a picture whose 30 days ran out at breakfast can go at 03:20.
- */
-Schedule::command('paint:prune')
-    ->dailyAt('03:20')
-    ->withoutOverlapping();
-
-/*
  * BL-24 — drain the queue (the per-page mapping jobs, DLC_SERVER.md §10.3).
  *
  * The mini-pc has no resident queue worker; its every-minute schedule:run cron

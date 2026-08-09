@@ -8,7 +8,6 @@ use App\Models\Book;
 use App\Models\Pack;
 use App\Models\PackVersion;
 use App\Models\Page;
-use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\Concerns\AdminsPacks;
 use Tests\Concerns\AuthorsBooks;
@@ -43,9 +42,7 @@ class AdminBookAuthoringTest extends TestCase
 
     public function test_a_game_token_cannot_author_books(): void
     {
-        $user = User::factory()->admin()->create();
-
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken())
             ->getJson('/api/v1/admin/books')
             ->assertForbidden()
             ->assertJsonPath('error.code', 'MISSING_ABILITY');

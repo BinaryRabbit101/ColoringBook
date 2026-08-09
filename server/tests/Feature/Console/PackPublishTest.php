@@ -6,10 +6,10 @@ use App\Actions\Packs\PublishPackDirectory;
 use App\Exceptions\PackPublishException;
 use App\Models\Asset;
 use App\Models\Book;
+use App\Models\Device;
 use App\Models\Pack;
 use App\Models\PackVersion;
 use App\Models\Page;
-use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Storage;
@@ -318,7 +318,7 @@ class PackPublishTest extends TestCase
             ->assertJsonPath('packs.0.slug', 'forest-friends')
             ->assertJsonPath('packs.0.latest_version', 1);
 
-        $bearer = $this->issueDeviceToken(User::factory()->create());
+        $bearer = $this->issueDeviceToken(Device::factory()->create());
 
         $this->withToken($bearer)
             ->getJson('/api/v1/packs/forest-friends/manifest')

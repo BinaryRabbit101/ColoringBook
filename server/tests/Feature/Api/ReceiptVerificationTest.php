@@ -2,17 +2,18 @@
 
 namespace Tests\Feature\Api;
 
+use App\Models\Device;
 use App\Models\Entitlement;
 use App\Models\Pack;
-use App\Models\User;
 use App\Services\Stores\FakeStoreReceiptVerifier;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\Concerns\PublishesPacks;
 use Tests\TestCase;
 
 /**
- * `POST /api/v1/entitlements/verify` — receipts are the restore path (BL-52,
- * DLC_SERVER.md §9, §4.3).
+ * `POST /api/v1/entitlements/verify` — receipts are the restore path
+ * (DLC_SERVER.md §9, §4.3), and the only way a purchase reaches a household's
+ * second tablet now that there are no accounts.
  *
  * The fake verifier makes this deterministic: a purchase token is valid iff it
  * begins `test-`. Everything below is therefore about the *seam* and the
@@ -42,14 +43,14 @@ class ReceiptVerificationTest extends TestCase
         return $pack;
     }
 
-    public function test_a_valid_receipt_grants_the_pack_to_an_account(): void
+    public function test_a_valid_receipt_grants_the_pack_to_the_device(): void
     {
         $this->fakeStore();
         $pack = $this->sellablePack();
 
-        $user = User::factory()->create();
+        $device = Device::factory()->create();
 
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->postJson('/api/v1/entitlements/verify', [
                 'platform' => 'google',
                 'purchase_token' => 'test-purchase-abc',
@@ -61,8 +62,7 @@ class ReceiptVerificationTest extends TestCase
             ->assertJsonPath('latest_version', 1);
 
         $this->assertDatabaseHas('entitlements', [
-            'user_id' => $user->id,
-            'device_id' => null,
+            'device_id' => $device->id,
             'pack_id' => $pack->id,
             'source' => Entitlement::SOURCE_PURCHASE,
             'platform' => 'google',
@@ -71,12 +71,12 @@ class ReceiptVerificationTest extends TestCase
         ]);
     }
 
-    public function test_a_valid_receipt_grants_the_pack_to_an_anonymous_device(): void
+    public function test_a_granted_pack_is_immediately_downloadable(): void
     {
         $this->fakeStore();
         $pack = $this->sellablePack();
 
-        $issued = $this->registerAnonymousDevice('tablet-uid');
+        $issued = $this->registerDevice('tablet-uid');
 
         $this->withToken($issued->plainTextToken)
             ->postJson('/api/v1/entitlements/verify', [
@@ -88,7 +88,6 @@ class ReceiptVerificationTest extends TestCase
             ->assertJsonPath('pack_slug', 'forest-friends');
 
         $this->assertDatabaseHas('entitlements', [
-            'user_id' => null,
             'device_id' => $issued->device->id,
             'pack_id' => $pack->id,
             'source' => Entitlement::SOURCE_PURCHASE,
@@ -119,7 +118,7 @@ class ReceiptVerificationTest extends TestCase
         ];
 
         foreach (['tablet-one-uid', 'tablet-two-uid'] as $uid) {
-            $issued = $this->registerAnonymousDevice($uid);
+            $issued = $this->registerDevice($uid);
 
             $this->forgetResolvedGuards();
 
@@ -129,7 +128,8 @@ class ReceiptVerificationTest extends TestCase
         }
 
         // Two rows, one purchase — which is why `platform_txn_id` uniqueness is
-        // per owner rather than global.
+        // per device rather than global. Google Play requires a non-consumable
+        // to be restorable, and this is the whole mechanism.
         $this->assertSame(2, Entitlement::query()->where('platform_txn_id', 'test-one-purchase')->count());
     }
 
@@ -138,8 +138,8 @@ class ReceiptVerificationTest extends TestCase
         $this->fakeStore();
         $this->sellablePack();
 
-        $user = User::factory()->create();
-        $bearer = $this->issueDeviceToken($user);
+        $device = Device::factory()->create();
+        $bearer = $this->issueDeviceToken($device);
 
         $body = [
             'platform' => 'google',
@@ -159,13 +159,13 @@ class ReceiptVerificationTest extends TestCase
         $this->fakeStore();
         $pack = $this->sellablePack();
 
-        $user = User::factory()->create();
-        Entitlement::factory()->for($user)->for($pack)
+        $device = Device::factory()->create();
+        Entitlement::factory()->for($device)->for($pack)
             ->source(Entitlement::SOURCE_PURCHASE)
             ->revoked()
             ->create();
 
-        $this->withToken($this->issueDeviceToken($user))
+        $this->withToken($this->issueDeviceToken($device))
             ->postJson('/api/v1/entitlements/verify', [
                 'platform' => 'google',
                 'purchase_token' => 'test-purchase-abc',
@@ -185,7 +185,7 @@ class ReceiptVerificationTest extends TestCase
         $this->fakeStore();
         $this->sellablePack();
 
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->postJson('/api/v1/entitlements/verify', [
                 'platform' => 'google',
                 'purchase_token' => 'not-a-real-purchase',
@@ -199,12 +199,15 @@ class ReceiptVerificationTest extends TestCase
 
     public function test_an_unconfigured_platform_answers_store_unavailable(): void
     {
-        // No fakeStore() call: this is the shipped default, and it is the
-        // safe one — a deployment with no store credentials refuses in a way
-        // the client retries rather than accepting everything.
+        // The shipped default, and it is the safe one — a deployment with no
+        // store credentials refuses in a way the client retries rather than
+        // accepting everything. Set explicitly rather than relied on: a
+        // developer's own .env may well name the fake.
+        config(['coloringbook.stores.verifiers.google' => null]);
+
         $this->sellablePack();
 
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->postJson('/api/v1/entitlements/verify', [
                 'platform' => 'google',
                 'purchase_token' => 'test-purchase-abc',
@@ -223,7 +226,7 @@ class ReceiptVerificationTest extends TestCase
 
         app()->detectEnvironment(fn (): string => 'production');
 
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->postJson('/api/v1/entitlements/verify', [
                 'platform' => 'google',
                 'purchase_token' => 'test-purchase-abc',
@@ -240,7 +243,7 @@ class ReceiptVerificationTest extends TestCase
         $this->fakeStore();
         $this->sellablePack();
 
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->postJson('/api/v1/entitlements/verify', [
                 'platform' => 'google',
                 'purchase_token' => 'test-purchase-abc',
@@ -259,7 +262,7 @@ class ReceiptVerificationTest extends TestCase
 
         // The pack's `sku_google` is set; asking Apple for the same string must
         // not find it, or one store's product ids would sell another's packs.
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->postJson('/api/v1/entitlements/verify', [
                 'platform' => 'apple',
                 'purchase_token' => 'test-purchase-abc',
@@ -274,7 +277,7 @@ class ReceiptVerificationTest extends TestCase
 
         // Deliberately not the 503: "we cannot ask that store" and "there is no
         // such store" are different problems with different remedies.
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->postJson('/api/v1/entitlements/verify', [
                 'platform' => 'nintendo',
                 'purchase_token' => 'test-purchase-abc',
@@ -299,7 +302,7 @@ class ReceiptVerificationTest extends TestCase
             ->assertUnauthorized()
             ->assertJsonPath('error.code', 'UNAUTHENTICATED');
 
-        $this->withToken($this->issueDeviceToken(User::factory()->create(), 'tablet', ['save:sync']))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create(), ['packs:download']))
             ->postJson('/api/v1/entitlements/verify', $body)
             ->assertForbidden()
             ->assertJsonPath('error.code', 'MISSING_ABILITY');
@@ -314,7 +317,7 @@ class ReceiptVerificationTest extends TestCase
         // Delisting must never take a bought pack away from the household that
         // bought it (§7.3), and a fresh install restoring from receipts is
         // exactly that household.
-        $this->withToken($this->issueDeviceToken(User::factory()->create()))
+        $this->withToken($this->issueDeviceToken(Device::factory()->create()))
             ->postJson('/api/v1/entitlements/verify', [
                 'platform' => 'google',
                 'purchase_token' => 'test-purchase-abc',
