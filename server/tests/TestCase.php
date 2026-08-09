@@ -2,6 +2,8 @@
 
 namespace Tests;
 
+use App\Actions\Accounts\IssuedDeviceToken;
+use App\Actions\Devices\RegisterAnonymousDevice;
 use App\Models\Device;
 use App\Models\User;
 use Carbon\CarbonImmutable;
@@ -57,5 +59,22 @@ abstract class TestCase extends BaseTestCase
             $abilities ?? $default,
             $expiresAt ?? CarbonImmutable::now()->addDays((int) config('coloringbook.token.ttl_days')),
         )->plainTextToken;
+    }
+
+    /**
+     * The BL-52 twin: an **anonymous** device token, minted the way
+     * `POST /device/register` mints one — on the device row itself, because
+     * there is no account for it to hang off (§4.3).
+     *
+     * Goes through the real action rather than hand-rolling a token, so a test
+     * that uses it also proves the abilities are the anonymous set and the
+     * device really is `user_id IS NULL`.
+     */
+    protected function registerAnonymousDevice(
+        string $deviceUid = 'anonymous-device-uid',
+        ?string $deviceName = null,
+        ?string $platform = null,
+    ): IssuedDeviceToken {
+        return app(RegisterAnonymousDevice::class)->handle($deviceUid, $deviceName, $platform);
     }
 }

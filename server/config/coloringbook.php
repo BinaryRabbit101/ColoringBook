@@ -85,6 +85,59 @@ return [
         // Abilities a device token may hold. Nothing destructive: account
         // mutation always requires a fresh password confirm in the dashboard.
         'abilities' => ['save:sync', 'entitlements:read', 'packs:download'],
+
+        // BL-52: what an *anonymous* device token carries. Deliberately the
+        // set above minus `save:sync` — an anonymous device can own packs, it
+        // can never upload a child's artwork (§4.3). Sync stays behind the
+        // adult gate on a parent account, which is the only path that ever
+        // carries PII or a child's picture.
+        'anonymous_abilities' => ['entitlements:read', 'packs:download'],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Stores — receipt verification (BL-52, §9)
+    |--------------------------------------------------------------------------
+    |
+    | `POST /entitlements/verify` validates a purchase token through whichever
+    | `App\Contracts\StoreReceiptVerifier` a platform names here. This is the
+    | whole payments seam: Phase 6 binds a real verifier and the schema, the
+    | routes and the client flow do not move.
+    |
+    | `verifiers` ships as ALL NULL, and that is the safe default rather than
+    | an oversight — an unconfigured platform answers `STORE_UNAVAILABLE`
+    | (503, retryable), so a deployment can never silently accept receipts it
+    | has no way of checking. Point one at a class to switch it on:
+    |
+    |   COLORINGBOOK_STORE_GOOGLE_VERIFIER="App\Services\Stores\FakeStoreReceiptVerifier"
+    |
+    | The fake is a development tool (deterministic: a token is valid iff it
+    | starts with `fake.prefix`). `StoreReceipts` refuses to hand it out in
+    | production whatever the config says, so a copied .env cannot turn a real
+    | store into a rubber stamp.
+    |
+    | `sku_columns` is the other half: which `packs` column a platform's SKU
+    | lives in. It also defines the set of platforms the request validator will
+    | accept, so an unknown one is a 422 rather than a 503.
+    |
+    */
+
+    'stores' => [
+        'verifiers' => [
+            'google' => env('COLORINGBOOK_STORE_GOOGLE_VERIFIER'),
+            'apple' => env('COLORINGBOOK_STORE_APPLE_VERIFIER'),
+            'stripe' => env('COLORINGBOOK_STORE_STRIPE_VERIFIER'),
+        ],
+
+        'sku_columns' => [
+            'google' => 'sku_google',
+            'apple' => 'sku_apple',
+            'stripe' => 'sku_stripe',
+        ],
+
+        'fake' => [
+            'prefix' => env('COLORINGBOOK_STORE_FAKE_PREFIX', 'test-'),
+        ],
     ],
 
     /*

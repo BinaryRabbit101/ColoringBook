@@ -89,7 +89,12 @@ class PackDownloadTest extends TestCase
         $this->assertSame(1, Entitlement::query()->count());
     }
 
-    public function test_a_revoked_entitlement_blocks_even_a_free_pack(): void
+    /**
+     * BL-52 moved this line, and the move is the point: a revoked row governs
+     * **the row**, never whether a free pack is public. Refusing here would be
+     * theatre — the same bytes are one token-less request away (§7.4).
+     */
+    public function test_a_revoked_entitlement_neither_blocks_a_free_pack_nor_comes_back(): void
     {
         $this->fakePackStorage();
         $pack = $this->publishFixturePack(free: true)->pack;
@@ -97,14 +102,22 @@ class PackDownloadTest extends TestCase
         $user = User::factory()->create();
         Entitlement::factory()->for($user)->for($pack)->source(Entitlement::SOURCE_FREE)->revoked()->create();
 
-        $this->withToken($this->issueDeviceToken($user))
-            ->getJson('/api/v1/packs/forest-friends/download')
-            ->assertForbidden()
-            ->assertJsonPath('error.code', 'ENTITLEMENT_REQUIRED');
+        $bearer = $this->issueDeviceToken($user);
+
+        $this->withToken($bearer)
+            ->get('/api/v1/packs/forest-friends/download')
+            ->assertRedirect();
 
         // The auto-grant must not resurrect a deliberate revocation.
         $this->assertSame(1, Entitlement::query()->count());
         $this->assertNotNull(Entitlement::query()->sole()->revoked_at);
+
+        // …so the household still does not *own* it: no shelf entry, no
+        // `owned` in the shop. Un-revoking stays an admin act.
+        $this->withToken($bearer)
+            ->getJson('/api/v1/entitlements')
+            ->assertOk()
+            ->assertJsonCount(0);
     }
 
     public function test_a_retired_pack_is_still_downloadable_by_its_owner(): void

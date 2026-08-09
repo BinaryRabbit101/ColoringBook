@@ -6,6 +6,7 @@ use App\Exceptions\ApiException;
 use App\Models\Entitlement;
 use App\Models\Pack;
 use App\Models\User;
+use App\Services\EntitlementOwner;
 use App\Services\Entitlements;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -55,6 +56,8 @@ class GrantPackEntitlement
             );
         }
 
-        return $this->entitlements->regrant($user, $pack, $source);
+        // Always an *account* owner: an admin grants to a household, never to
+        // an anonymous device, which has no email to be addressed by (BL-52).
+        return $this->entitlements->regrant(EntitlementOwner::forUser($user), $pack, $source);
     }
 }

@@ -70,8 +70,10 @@ the `/api/v1` prefix with the `api.v1.` name prefix and a baseline
 
 ```
 routes/api/auth.php      WP1 — register, token, refresh, /me, profiles
+routes/api/device.php    BL-52 — anonymous device registration
 routes/api/sync.php      WP2 (progress) + WP4 (paint)
 routes/api/catalog.php   WP3 — packs, manifest, download, entitlements
+                         BL-52 — public free delivery, /entitlements/verify
 routes/api/admin.php     WP5 — assets, pack versions, preview, publish
                          WP14 — books/pages authoring, one-button publish
                          BL-37 — sticker-set/sticker authoring, same publish
@@ -146,6 +148,13 @@ Every game token carries exactly `save:sync`, `entitlements:read`,
 in `bootstrap/app.php`). Nothing a token can reach may delete the account,
 change the password or revoke another device — those live in the dashboard
 behind a password re-confirmation.
+
+Since BL-52 there is a **second kind of token**: an anonymous device's, minted
+on the `Device` row rather than on a user and carrying `entitlements:read` +
+`packs:download` and never `save:sync`. `$request->user()` may therefore be a
+`Device`. Anything that must be account-only is gated on `save:sync` and needs
+no type check; anything that reads or writes entitlements goes through
+`App\Services\EntitlementOwner`. See the BL-52 section below.
 
 `Tests\TestCase` provides `issueDeviceToken($user, $deviceUid, $abilities)` and
 `forgetResolvedGuards()`. Use the latter between "revoke" and "try again" in a
@@ -410,10 +419,11 @@ WP3 writes are `free` and whatever WP5 grants.
 |---|---|---|
 | `GET` | `/packs?client_version=` | optional |
 | `GET` | `/packs/{slug}?client_version=` | optional |
-| `GET` | `/packs/{slug}/manifest?version=` | token + `packs:download` + entitlement |
-| `GET` | `/packs/{slug}/download?version=` | token + `packs:download` + entitlement |
-| `GET` | `/packs/{slug}/files/{path}?version=` | token + `packs:download` + entitlement |
-| `GET` | `/entitlements?client_version=` | token + `entitlements:read` |
+| `GET` | `/packs/{slug}/manifest?version=` | **public if `is_free`** (BL-52), else token + `packs:download` + entitlement |
+| `GET` | `/packs/{slug}/download?version=` | **public if `is_free`**, else token + `packs:download` + entitlement |
+| `GET` | `/packs/{slug}/files/{path}?version=` | **public if `is_free`**, else token + `packs:download` + entitlement |
+| `GET` | `/entitlements?client_version=` | token + `entitlements:read` (account **or** device, BL-52) |
+| `POST` | `/entitlements/verify` | token + `entitlements:read` (account **or** device, BL-52) |
 
 `/entitlements` returns a **bare array** — `[{pack_slug, latest_version,
 source, granted_at}]`, §11's literal shape. `/packs` returns `{packs: [...]}`
@@ -453,10 +463,12 @@ authenticated device hits `manifest`, `download` or `files` for it. Therefore:
   only for `!is_free && !owned`.
 - **A revoked entitlement stays revoked, free packs included** — the grant only
   fires when there is no row at all. Un-revoking is a deliberate admin act.
-- Grants are idempotent on `(user_id, pack_id)` and survive the unique-index
+  *(BL-52: it stays revoked as a **row**; it no longer blocks the download of a
+  free pack, whose bytes are public. See the BL-52 section.)*
+- Grants are idempotent on `(owner, pack_id)` and survive the unique-index
   race two tablets can cause.
-- `user_id`/`pack_id` are not fillable: who owns what is never something a
-  request body gets to say.
+- `user_id`/`device_id`/`pack_id` are not fillable: who owns what is never
+  something a request body gets to say.
 
 ### `pack:publish`
 
@@ -1313,6 +1325,244 @@ The two tests worth keeping if everything else goes: "a book with no cover still
 publishes page one as the cover", and "publishing omits `anim` for a still
 sticker". Both assert that **nothing moved** for content that predates the
 feature, which is the only way this stays true.
+
+## BL-52 — two identities: public free packs + the anonymous device tier
+
+Design §4.3 (the authority), §7.4 (public free delivery), §9 (receipts), §5
+(the owner split), §11's route tables. Routes live in a new
+`routes/api/device.php` and beside WP3's in `routes/api/catalog.php`.
+
+**The claim the whole entry rests on: the store account is already the
+cross-device identity for purchases.** Play Billing and StoreKit hand the same
+purchase tokens to every device signed into the same store account, so the
+server never needs to *own* an identity to stop a household buying a pack
+twice — it needs to verify a receipt from whichever device presents it. No
+email, no password, no PII, no account.
+
+### The two identities, and the one that cannot sync
+
+| | account (`User`) | anonymous device (`Device`, `user_id IS NULL`) |
+|---|---|---|
+| Made by | `POST /auth/register` + `/auth/token` | `POST /device/register` |
+| Token minted on | the user | **the device row itself** |
+| Abilities | `save:sync`, `entitlements:read`, `packs:download` | `entitlements:read`, `packs:download` |
+| Can reach `/sync/*`, `/me`, `/profiles` | yes | **no** — it never carries `save:sync` |
+
+`Device` gained `HasApiTokens` **and** `Authenticatable`, so `auth:sanctum`
+resolves it into `$request->user()` like any other identity and the ordinary
+`abilities:` middleware does the gating. That is the whole enforcement story
+for "an anonymous device can own packs; it can never upload a child's artwork":
+there is no `instanceof User` check on the sync routes and there must never
+need to be — the ability it was never issued is the gate.
+
+Both token kinds ride the same 90-day sliding window. `SlideTokenExpiry` stopped
+checking `instanceof User` and asks `DeviceTokens::deviceForIdentity()` instead:
+for an account token the device is found by name → `device_uid`, for a device
+token the tokenable *is* the device.
+
+> **phpstan note.** Larastan types `$request->user()` from
+> `auth.providers.users.model`, so `$identity instanceof Device` after
+> `! $identity instanceof User` is reported as always-false. `SlideTokenExpiry`
+> therefore null-checks and hands the value to a `mixed` parameter, which is
+> where the real branch lives. Don't "fix" it back into an instanceof pair.
+
+### `EntitlementOwner` — the one place that knows which owner is which
+
+`App\Services\EntitlementOwner` is a value object wrapping either a `User` or an
+anonymous `Device`, and **every** method on `App\Services\Entitlements` now
+takes one instead of a `User`. Grant, regrant, revoke, `owns`, `live` and the
+free-claim all mean exactly what they used to, per owner.
+
+- `EntitlementOwner::fromAuthenticatable()` returns null for anything that
+  isn't one of the two — including a **linked** device, which is deliberately
+  not an owner: once a device belongs to an account, that account owns its
+  packs. `App\Concerns\ResolvesEntitlementOwner` is the controller-side helper
+  (`owner()` / `requireOwner()`).
+- The column and key are settled in the constructor, so "exactly one owner" is
+  a property of the object rather than something every reader re-derives.
+- `user_id`/`device_id` are still not fillable. `EntitlementOwner::stamp()` is
+  the only thing that writes either.
+
+### Schema: the owner split, and why both new columns are `virtualAs`
+
+```
+devices       user_id NOW NULLABLE
+              owner_key  = coalesce(user_id, 0)          (generated)
+              UNIQUE(owner_key, device_uid)              replaces UNIQUE(user_id, device_uid)
+
+entitlements  user_id NOW NULLABLE
+              device_id →devices nullable, cascade
+              owner_key  = coalesce('u' || user_id, 'd' || device_id)   (generated)
+              UNIQUE(owner_key, pack_id)                 replaces UNIQUE(user_id, pack_id)
+              UNIQUE(owner_key, platform, platform_txn_id)  replaces UNIQUE(platform, platform_txn_id)
+```
+
+Three decisions worth knowing before touching either table:
+
+- **`virtualAs`, not `storedAs`, and it is not a preference.** SQLite's
+  `ALTER TABLE ADD COLUMN` refuses a STORED generated column outright; a VIRTUAL
+  one is fine and a unique index over it behaves identically. `book_progress`
+  and `shelf_erasures` could use `storedAs` because they were written that way
+  at CREATE time. Anything added to an *existing* table has to be virtual, or
+  the table needs a full rebuild — which is a much bigger blast radius for the
+  same index.
+- **`platform_txn_id` uniqueness was deliberately relaxed** from global to
+  per-owner. The same purchase legitimately grants on N devices — that *is* the
+  "bought once, owned everywhere" mechanism. Within one owner it is still
+  once-only, so a replayed receipt cannot mint a second row.
+- **"Exactly one owner" is a PHP invariant, not a CHECK constraint**, because
+  SQLite cannot add one to an existing table either. A row with neither owner
+  gets a NULL `owner_key` and is constrained by nothing, which is precisely why
+  `EntitlementOwner` is the only writer.
+
+`migrate:fresh` and `migrate:rollback --step=2` both round-trip; the `down()`
+paths drop the indexes before the columns, in that order, or SQLite complains
+about an index over a column that no longer exists.
+
+### Free packs are public
+
+`manifest`, `download` and `files/{path}` moved out of
+`auth:sanctum` + `abilities:packs:download` and into the `OptionalSanctumUser`
+group, because whether a token is required now depends on the *pack* and only
+the controller knows which this is. `PackDownloadController::authorised()`:
+
+- **free + downloadable status** → allowed, token or no token. If a token
+  happens to be present the free-claim still fires, so `owned` and
+  `GET /entitlements` keep meaning what they mean for a signed-in household.
+- **anything else** → 401 without a token, `403 MISSING_ABILITY` without
+  `packs:download` (the same `MissingAbilityException` the middleware threw, so
+  the wire response is byte-identical), then the entitlement check as before.
+
+**The 302-to-signed-URL half did not move a byte.** The signature was always
+what authorises the transfer; what changed is who may ask for one. The
+`VerifySignedDownload` routes, `X-Accel-Redirect`, the manifest allow-list and
+the traversal defence are all untouched and still cover the public path.
+
+**The one behaviour that flipped**, and it is the entry's sharpest edge: a
+**revoked** entitlement on a **free** pack no longer refuses the download. It
+cannot sensibly: the same bytes are one token-less request away, so refusing
+would be theatre. Revocation governs the *row* — the pack stays out of
+`GET /entitlements`, `owned` stays false, and the claim is still never
+resurrected (`grant()` only fires when there is no row at all). The old test
+`test_a_revoked_entitlement_blocks_even_a_free_pack` is now
+`…_neither_blocks_a_free_pack_nor_comes_back` and asserts both halves.
+
+A signed-out free fetch writes **nothing** — no entitlement, no device row.
+Free play sends no identifier at all, which is the §4.3 COPPA posture.
+
+### `POST /device/register`
+
+`routes/api/device.php`, `throttle:6,1` stacked on the baseline. §11 files it
+under "Auth" and it could have lived in `routes/api/auth.php`; it is its own
+file for the house reason — one owner per route file.
+
+`App\Actions\Devices\RegisterAnonymousDevice` find-or-creates the
+`user_id IS NULL` row and answers
+`{token, abilities, expires_at, device: {ulid}}`.
+
+- **Only ever the anonymous row.** A `device_uid` already linked to an account
+  is invisible here, so knowing somebody's uid earns an attacker a fresh empty
+  identity rather than that household's entitlements.
+- **Re-registering rotates**: the device's old tokens are deleted before the new
+  one is minted. Its *entitlements* are untouched — the row survives, only its
+  credentials turn over.
+- A lost unique-index race resolves to the existing row; a genuinely
+  unresolvable write is `DEVICE_REGISTRATION_FAILED` (422).
+
+### The receipt seam, and how to fake it
+
+`App\Contracts\StoreReceiptVerifier` is the only thing that talks to a store,
+and it must stay side-effect free — the entitlement is written by
+`App\Actions\Entitlements\VerifyStoreReceipt`, which is where the idempotency
+and revoked-stays-revoked rules live.
+
+```php
+// config/coloringbook.php
+'stores' => [
+    'verifiers'   => ['google' => null, 'apple' => null, 'stripe' => null],
+    'sku_columns' => ['google' => 'sku_google', 'apple' => 'sku_apple', 'stripe' => 'sku_stripe'],
+    'fake'        => ['prefix' => 'test-'],
+],
+```
+
+**All three verifiers ship null, and that is the safe default rather than an
+oversight**: an unconfigured platform answers `STORE_UNAVAILABLE` (503,
+retryable), so a deployment can never silently accept receipts it has no way of
+checking. In a test, wire the fake for one platform and nothing else:
+
+```php
+config(['coloringbook.stores.verifiers.google' => FakeStoreReceiptVerifier::class]);
+```
+
+`FakeStoreReceiptVerifier` is deterministic — valid **iff** the purchase token
+starts with `stores.fake.prefix`, transaction id = the token — so "verify twice,
+get one row" is a real assertion rather than a lucky one. It has two locks
+against reaching production: the null default above, and `StoreReceipts`
+refusing to hand it out when `app()->isProduction()`, whatever the config says.
+
+`sku_columns` also defines the platforms the request validator accepts, so an
+unknown platform is a `422 VALIDATION_FAILED` while a known-but-unconfigured one
+is the 503. Two different problems, two different answers.
+
+The pack is resolved from the **SKU alone** — there is deliberately no
+`pack_slug` field on the request, or a client could pair a valid receipt with a
+pack of its choosing. Resolution uses `downloadable()`, so a retired pack can
+still be restored (§7.3). A SKU nobody sells is the house `404 NOT_FOUND`, which
+is also what stops the endpoint being a price-list enumerator.
+
+### Adoption on sign-in
+
+`App\Actions\Accounts\AdoptAnonymousDevice`, called from `IssueDeviceToken`
+inside its transaction — a sign-in that half-adopted would leave a device
+holding a token for an identity that no longer owns its packs.
+
+Union, and **the account's own row always wins**. A pack the user already has a
+row for keeps that row exactly as it is, *including a revoked one* — which is
+the case the rule exists for: a refund must not be undone by signing in on a
+tablet that still remembers owning it. Everything else moves across keeping its
+`source`, `platform`, `platform_txn_id` and `granted_at`, so a purchase stays
+auditable as the same row it always was. Then the anonymous tokens are deleted
+and the anonymous row goes; anything still hanging off it was a duplicate and
+cascades away with it.
+
+Idempotent: a second sign-in finds no anonymous row and does nothing. The
+(owner, pack) unique index catches the two-tablets-at-once case — losing that
+race means the account already has the pack, which is the outcome adoption
+wanted.
+
+### Codes this adds
+
+`RECEIPT_INVALID` (422 — the store said no; do not retry),
+`STORE_UNAVAILABLE` (503 — we could not ask; retry),
+`DEVICE_REGISTRATION_FAILED` (422).
+
+**No fourth code for a revoked claim on `verify`.** It answers the existing
+`ENTITLEMENT_REQUIRED` (403), which is already what the download path says for
+exactly this situation, so the client's branch count did not grow.
+
+### Testing
+
+- `tests/Feature/Api/PublicFreePackTest.php` (10) — every delivery route
+  signed-out, the paid mirror of each, "a public fetch writes no row", the
+  free-claim still firing behind a token, retired-stays-public/draft-is-404, and
+  the manifest allow-list still governing a public delta.
+- `tests/Feature/Api/DeviceRegistrationTest.php` (13) — create, rotate (with
+  `forgetResolvedGuards()` around the dead token), linked-uid isolation, the
+  exact ability pair, the sliding window, the whole `save:sync` surface refused,
+  and both halves of the `owner_key` uniqueness at the database level.
+- `tests/Feature/Api/ReceiptVerificationTest.php` (13) — grant to each owner
+  kind, the same purchase granting on two devices, idempotency,
+  revoked-stays-revoked, a rejected receipt, the unconfigured platform, the
+  production refusal of the fake, per-platform SKU columns.
+- `tests/Feature/Api/DeviceAdoptionTest.php` (7) — union, revoked-wins,
+  idempotent, the anonymous row and its token gone, and another household's
+  device left alone.
+
+`Tests\TestCase::registerAnonymousDevice()` is the twin of `issueDeviceToken()`
+and goes through the real action, so a test using it also proves the abilities
+are the anonymous set. `EntitlementFactory::ownedByDevice()` clears `user_id` in
+the same breath it sets `device_id` — a two-owner row is not a state the
+application can produce, so it must not be one a factory can either.
 
 ## WP8 — Dusk browser tests
 

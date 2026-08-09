@@ -15,10 +15,19 @@ use Illuminate\Support\Facades\DB;
  * password change, expired token — must end up with exactly one live token,
  * so the parent dashboard's device list stays a truthful list of things that
  * can reach the account.
+ *
+ * Since BL-52 this is also where **adoption** happens (§4.3): if the uid signing
+ * in has an anonymous row, the packs it bought before anybody made an account
+ * become the household's, and the anonymous identity is retired. It runs inside
+ * this transaction deliberately — a sign-in that half-adopted would leave a
+ * device holding a token for an identity that no longer owns its packs.
  */
 class IssueDeviceToken
 {
-    public function __construct(private readonly DeviceTokens $tokens) {}
+    public function __construct(
+        private readonly DeviceTokens $tokens,
+        private readonly AdoptAnonymousDevice $adopt,
+    ) {}
 
     public function handle(
         User $user,
@@ -27,6 +36,8 @@ class IssueDeviceToken
         ?string $platform = null,
     ): IssuedDeviceToken {
         return DB::transaction(function () use ($user, $deviceUid, $deviceName, $platform): IssuedDeviceToken {
+            $this->adopt->handle($user, $deviceUid);
+
             $device = Device::firstOrNew([
                 'user_id' => $user->id,
                 'device_uid' => $deviceUid,

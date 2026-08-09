@@ -2,10 +2,10 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Concerns\ResolvesEntitlementOwner;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\PackResource;
 use App\Models\Pack;
-use App\Models\User;
 use App\Services\Entitlements;
 use App\Services\PackCatalog;
 use Illuminate\Http\JsonResponse;
@@ -14,14 +14,20 @@ use Illuminate\Http\Request;
 /**
  * The shop window — `GET /packs` and `GET /packs/{slug}` (DLC_SERVER.md §11).
  *
- * Auth is *optional* here and nowhere else in the catalog: the game shows what
- * exists before anyone has signed in, and adds `owned` once a token is
- * present. Nothing on these two routes reveals anything an anonymous client
- * shouldn't see — no storage paths, no version rows that were never
- * published, no draft packs.
+ * Auth is *optional*: the game shows what exists before anyone has signed in,
+ * and adds `owned` once a token is present. Nothing on these two routes reveals
+ * anything an anonymous client shouldn't see — no storage paths, no version
+ * rows that were never published, no draft packs.
+ *
+ * Since BL-52 the token may name an anonymous device rather than an account
+ * (§4.3), and `owned` then reflects that device's own claims — which is what
+ * makes the shop show "Download" rather than "Buy" on a tablet that has
+ * restored its purchases without anybody signing in.
  */
 class PackController extends Controller
 {
+    use ResolvesEntitlementOwner;
+
     public function __construct(
         private readonly PackCatalog $catalog,
         private readonly Entitlements $entitlements,
@@ -30,9 +36,9 @@ class PackController extends Controller
     public function index(Request $request): JsonResponse
     {
         $clientVersion = $this->clientVersion($request);
-        $user = $this->user($request);
+        $owner = $this->owner($request);
 
-        $owned = $user === null ? [] : $this->entitlements->ownedPackIds($user);
+        $owned = $owner === null ? [] : $this->entitlements->ownedPackIds($owner);
 
         $packs = $this->catalog->listable($clientVersion)->map(
             fn (Pack $pack): PackResource => new PackResource(
@@ -48,7 +54,7 @@ class PackController extends Controller
     public function show(Request $request, string $slug): JsonResponse
     {
         $clientVersion = $this->clientVersion($request);
-        $user = $this->user($request);
+        $owner = $this->owner($request);
 
         $pack = $this->catalog->findListable($slug);
         $pack->load(['books.pages', 'stickerSets.stickers']);
@@ -57,7 +63,7 @@ class PackController extends Controller
             'pack' => new PackResource(
                 $pack,
                 $this->catalog->latestVersion($pack, $clientVersion),
-                $user !== null && $this->entitlements->owns($user, $pack),
+                $owner !== null && $this->entitlements->owns($owner, $pack),
                 detailed: true,
             ),
         ]);
@@ -76,12 +82,5 @@ class PackController extends Controller
         ]);
 
         return $validated['client_version'] ?? null;
-    }
-
-    private function user(Request $request): ?User
-    {
-        $user = $request->user();
-
-        return $user instanceof User ? $user : null;
     }
 }

@@ -36,6 +36,24 @@ class DeviceTokens
     }
 
     /**
+     * What an **anonymous** device token carries (BL-52, §4.3): the set above
+     * minus `save:sync`, and that omission is the whole compliance story. An
+     * anonymous device may own packs and download them; it can never upload a
+     * child's artwork, so the only identifier the server ever holds without an
+     * account behind it is used solely to authenticate content the device
+     * already bought.
+     *
+     * @return array<int, string>
+     */
+    public function anonymousAbilities(): array
+    {
+        /** @var array<int, string> $abilities */
+        $abilities = config('coloringbook.token.anonymous_abilities');
+
+        return $abilities;
+    }
+
+    /**
      * The full-length expiry for a token used right now.
      */
     public function expiresAt(?CarbonImmutable $from = null): CarbonImmutable
@@ -87,6 +105,23 @@ class DeviceTokens
             ->where('user_id', $user->id)
             ->where('device_uid', $token->name)
             ->first();
+    }
+
+    /**
+     * The device behind a resolved identity, whichever kind it is (BL-52).
+     *
+     * An **anonymous** device token is minted on the device itself, so the
+     * tokenable *is* the device and there is nothing to look up. A linked
+     * device's token hangs off the user, and the name → `device_uid` link is
+     * the only thing that ties Sanctum's table to ours.
+     */
+    public function deviceForIdentity(mixed $identity, PersonalAccessToken $token): ?Device
+    {
+        if ($identity instanceof Device) {
+            return $identity;
+        }
+
+        return $identity instanceof User ? $this->deviceFor($identity, $token) : null;
     }
 
     /**

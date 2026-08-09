@@ -25,6 +25,7 @@ Route::prefix('v1')
     ->middleware('throttle:60,1')
     ->group(function (): void {
         require __DIR__.'/api/auth.php';
+        require __DIR__.'/api/device.php';
         require __DIR__.'/api/sync.php';
         require __DIR__.'/api/catalog.php';
         require __DIR__.'/api/admin.php';

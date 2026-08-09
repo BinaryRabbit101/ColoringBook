@@ -5,7 +5,6 @@ namespace App\Services;
 use App\Exceptions\ApiException;
 use App\Models\Entitlement;
 use App\Models\Pack;
-use App\Models\User;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
 use Symfony\Component\HttpFoundation\Response;
@@ -13,9 +12,15 @@ use Symfony\Component\HttpFoundation\Response;
 /**
  * The entitlement authority (DLC_SERVER.md §9).
  *
- * Everything that decides "may this account have these bytes" goes through
- * here, and the answer is always a row in `entitlements` — there is no
- * implicit ownership anywhere in the codebase.
+ * Everything that decides "may this owner have these bytes" goes through here,
+ * and the answer is always a row in `entitlements` — there is no implicit
+ * ownership anywhere in the codebase.
+ *
+ * ## Two owners, one set of rules (BL-52)
+ *
+ * Every method takes an `EntitlementOwner`, which is either a parent account or
+ * an anonymous device (§4.3). Nothing below cares which: grant, regrant,
+ * revoke and the free-claim all mean exactly what they used to, per owner.
  *
  * ## Free packs
  *
@@ -26,24 +31,28 @@ use Symfony\Component\HttpFoundation\Response;
  *
  *   - `GET /entitlements` stays an honest inventory of what a device should
  *     have installed, rather than the catalog in disguise;
- *   - a revoked free pack *stays* revoked, because the grant only ever fires
- *     when there is no row at all. Un-revoking is a deliberate admin act
+ *   - a revoked free pack's **row** stays revoked, because the grant only ever
+ *     fires when there is no row at all. Un-revoking is a deliberate admin act
  *     (WP5), never a side effect of the client retrying a download;
  *   - Phase 6 can turn a free pack paid without changing a line of gating.
  *
+ * Since BL-52 a free pack's *bytes* are public (§7.4) — the row governs
+ * `owned`, not access — so `authorise()` is only ever consulted for paid packs.
+ * `claimFree()` is the half that still runs on a free fetch when a token
+ * happens to be present.
+ *
  * The catalog's `owned` flag reflects a live row, so a free pack reads
- * `{"is_free": true, "owned": false}` until it is first fetched. The client
- * offers a download for either.
+ * `{"is_free": true, "owned": false}` until it is first fetched by a token.
  */
 class Entitlements
 {
     /**
-     * Authorise a download, granting a free pack to this account on the way
-     * through. Throws `ENTITLEMENT_REQUIRED` for anything else unowned.
+     * Authorise a download of a **paid** pack. Throws `ENTITLEMENT_REQUIRED`
+     * for anything unowned or revoked.
      */
-    public function authorise(User $user, Pack $pack): Entitlement
+    public function authorise(EntitlementOwner $owner, Pack $pack): Entitlement
     {
-        $existing = $this->find($user, $pack);
+        $existing = $this->find($owner, $pack);
 
         if ($existing !== null) {
             if (! $existing->isLive()) {
@@ -54,31 +63,46 @@ class Entitlements
         }
 
         if ($pack->is_free) {
-            return $this->grant($user, $pack, Entitlement::SOURCE_FREE);
+            return $this->grant($owner, $pack, Entitlement::SOURCE_FREE);
         }
 
         throw $this->required();
     }
 
     /**
-     * Does this account currently own the pack? No grants, no exceptions —
-     * this is what paints the catalog's `owned` flag.
+     * The free-claim, on its own: a free pack writes itself a row the first
+     * time a token fetches it, and never touches an existing one — so a
+     * deliberately revoked claim is not resurrected by a retry (BL-52 keeps
+     * that rule verbatim while making the *bytes* public).
      */
-    public function owns(User $user, Pack $pack): bool
+    public function claimFree(EntitlementOwner $owner, Pack $pack): ?Entitlement
     {
-        return $this->find($user, $pack)?->isLive() === true;
+        if (! $pack->is_free) {
+            return null;
+        }
+
+        return $this->grant($owner, $pack, Entitlement::SOURCE_FREE);
     }
 
     /**
-     * The pack ids this account currently owns, for painting a whole listing
+     * Does this owner currently own the pack? No grants, no exceptions — this
+     * is what paints the catalog's `owned` flag.
+     */
+    public function owns(EntitlementOwner $owner, Pack $pack): bool
+    {
+        return $this->find($owner, $pack)?->isLive() === true;
+    }
+
+    /**
+     * The pack ids this owner currently owns, for painting a whole listing
      * without an N+1.
      *
      * @return array<int, int>
      */
-    public function ownedPackIds(User $user): array
+    public function ownedPackIds(EntitlementOwner $owner): array
     {
         /** @var array<int, int> $ids */
-        $ids = $user->entitlements()->live()->pluck('pack_id')->all();
+        $ids = $owner->entitlements()->live()->pluck('pack_id')->all();
 
         return $ids;
     }
@@ -89,10 +113,10 @@ class Entitlements
      *
      * @return Collection<int, Entitlement>
      */
-    public function live(User $user): Collection
+    public function live(EntitlementOwner $owner): Collection
     {
         /** @var Collection<int, Entitlement> $entitlements */
-        $entitlements = $user->entitlements()
+        $entitlements = $owner->entitlements()
             ->live()
             ->with('pack')
             ->orderByDesc('granted_at')
@@ -103,11 +127,11 @@ class Entitlements
     }
 
     /**
-     * Write a claim, if there isn't one. Idempotent on (user, pack).
+     * Write a claim, if there isn't one. Idempotent on (owner, pack).
      *
-     * `user_id`/`pack_id` are set directly rather than mass-assigned: who owns
-     * what is never something a request body gets to say, so neither column is
-     * fillable.
+     * The owner columns are stamped by `EntitlementOwner` rather than
+     * mass-assigned: who owns what is never something a request body gets to
+     * say, so neither is fillable.
      *
      * The `QueryException` catch is not defensive noise — two of a household's
      * tablets opening the same free pack at the same second is an ordinary
@@ -115,20 +139,20 @@ class Entitlements
      * means the other request already granted it.
      */
     public function grant(
-        User $user,
+        EntitlementOwner $owner,
         Pack $pack,
         string $source,
         ?string $platform = null,
         ?string $platformTxnId = null,
     ): Entitlement {
-        $existing = $this->find($user, $pack);
+        $existing = $this->find($owner, $pack);
 
         if ($existing !== null) {
             return $existing;
         }
 
         $entitlement = new Entitlement;
-        $entitlement->user_id = $user->id;
+        $owner->stamp($entitlement);
         $entitlement->pack_id = $pack->id;
         $entitlement->source = $source;
         $entitlement->platform = $platform;
@@ -138,7 +162,7 @@ class Entitlements
         try {
             $entitlement->save();
         } catch (QueryException $e) {
-            return $this->find($user, $pack) ?? throw $e;
+            return $this->find($owner, $pack) ?? throw $e;
         }
 
         return $entitlement;
@@ -149,20 +173,20 @@ class Entitlements
      * life (WP5, §10.2).
      *
      * `grant()` never touches an existing row, on purpose — a revoked pack
-     * must stay revoked no matter how often the client retries a download.
-     * That leaves exactly one way back, and this is it: clearing `revoked_at`
-     * and re-stamping `granted_at`, so the row reads as a fresh claim while
-     * remaining the same auditable row.
+     * must stay revoked no matter how often the client retries a download or
+     * re-presents a receipt. That leaves exactly one way back, and this is it:
+     * clearing `revoked_at` and re-stamping `granted_at`, so the row reads as a
+     * fresh claim while remaining the same auditable row.
      *
      * Idempotent in both directions: re-granting a live claim is a no-op, and
      * re-granting a revoked one un-revokes it once.
      */
-    public function regrant(User $user, Pack $pack, string $source): Entitlement
+    public function regrant(EntitlementOwner $owner, Pack $pack, string $source): Entitlement
     {
-        $existing = $this->find($user, $pack);
+        $existing = $this->find($owner, $pack);
 
         if ($existing === null) {
-            return $this->grant($user, $pack, $source);
+            return $this->grant($owner, $pack, $source);
         }
 
         if ($existing->isLive()) {
@@ -181,9 +205,9 @@ class Entitlements
      * Withdraw a claim without deleting it — a tombstone, so a refund stays
      * auditable and coming back is a decision rather than an accident (§9).
      */
-    public function revoke(User $user, Pack $pack): ?Entitlement
+    public function revoke(EntitlementOwner $owner, Pack $pack): ?Entitlement
     {
-        $existing = $this->find($user, $pack);
+        $existing = $this->find($owner, $pack);
 
         if ($existing === null || ! $existing->isLive()) {
             return $existing;
@@ -195,13 +219,10 @@ class Entitlements
         return $existing;
     }
 
-    private function find(User $user, Pack $pack): ?Entitlement
+    public function find(EntitlementOwner $owner, Pack $pack): ?Entitlement
     {
         /** @var Entitlement|null $entitlement */
-        $entitlement = Entitlement::query()
-            ->where('user_id', $user->id)
-            ->where('pack_id', $pack->id)
-            ->first();
+        $entitlement = $owner->entitlements()->where('pack_id', $pack->id)->first();
 
         return $entitlement;
     }
