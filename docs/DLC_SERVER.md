@@ -155,6 +155,47 @@ fight for no benefit. One uniform bearer-token path across Android, Web and PC.
   outbound SMTP on the mini-pc — see open question **Q11**.
 - Rate-limit auth routes (`throttle:6,1`) and sync routes (`throttle:60,1`).
 
+### 4.3 The anonymous device tier (2026-08-09, BL-52)
+
+The account above is **one of two identities**, and it is the bigger one. BL-52
+adds a smaller one underneath it, born from a product requirement ("never buy a
+pack twice between devices") and a compliance stance (no PII unless a grown-up
+chooses an account):
+
+- **`POST /api/v1/device/register`** (no auth, `throttle:6,1`) finds-or-creates an
+  **anonymous** `devices` row — `user_id` NULL — for the client's `device_uid` and
+  answers `{token, abilities, expires_at, device: {ulid}}`. The token carries
+  exactly `entitlements:read` + `packs:download`, **never `save:sync`**: an
+  anonymous device can own packs; it can never upload a child's artwork. Same
+  90-day sliding window as account tokens.
+- **Registration is lazy.** The client calls it only when a purchase needs
+  verifying or a restore is attempted — never on first launch — so a device that
+  only ever plays free content sends the server no identifier at all.
+- **The store account is the cross-device identity for purchases.** Play
+  Billing / StoreKit return the same purchase tokens on every device signed into
+  the same store account; each device re-verifies them (§9) and earns its own
+  entitlement rows. The server never needs to own an identity to prevent a double
+  purchase.
+- **Linking is adoption.** `POST /auth/token` already carries `device_uid`; when
+  the uid has an anonymous row, sign-in migrates its entitlements to the user
+  (union — a pack the user holds revoked stays revoked), revokes the anonymous
+  tokens, and removes the anonymous row. Idempotent. Signing out drops back to
+  the anonymous tier; purchases re-restore from receipts.
+- **A linked `device_uid` is never exposed through register**: the route only
+  ever scopes to the `user_id IS NULL` row, so knowing a device's uid earns an
+  attacker a fresh empty anonymous identity, not someone's account entitlements.
+- **COPPA posture**: the anonymous identifier is a persistent identifier used
+  solely to authenticate content the device already bought — squarely the
+  "support for internal operations" exemption. Free play (with free packs public
+  per §7.4) involves no identifier, no account, no request that says who anyone
+  is.
+
+Schema deltas: `devices.user_id` nullable (uniqueness of `device_uid` extends
+over the anonymous rows); `entitlements.user_id` nullable plus a nullable
+`entitlements.device_id`, exactly one owner per row, unique per `(owner, pack)`
+via the `profile_key`-style generated column, with `platform_txn_id` uniqueness
+relaxed to per-owner — the same purchase legitimately grants on N devices.
+
 ---
 
 ## 5. Data model
@@ -583,6 +624,13 @@ v4 to fix one page downloads that one page, not 8 MB.
 
 - `GET /api/v1/packs/{slug}/download` (auth + entitlement check) responds `302` to a
   **short-lived signed URL** (`URL::temporarySignedRoute`, 10 min).
+- **Free packs are public** (2026-08-09, BL-52): when the pack `is_free` and is in
+  a downloadable status, `manifest`, `download` and `files/{path}` skip the token +
+  entitlement gate entirely — a signed-out fresh install can download every free
+  book. The 302-to-signed-URL mechanics below are untouched (the signature was
+  always what moves bytes), the per-IP throttle stays, and the free-claim
+  auto-grant still fires when a token happens to be present so `owned` and
+  `GET /entitlements` keep their meaning for signed-in users.
 - The signed route hands off to Nginx with **`X-Accel-Redirect`** into a private `internal;`
   location. PHP-FPM authorises; Nginx pushes the bytes. This is the standard house pattern
   and keeps a 8 MB download off a PHP worker.
@@ -719,6 +767,15 @@ Worth stating plainly because it constrains the API more than anything else:
   server-side.
 - **Free packs are the honest first milestone.** They exercise the entire catalogue,
   entitlement, download and install path with zero payment integration — see the rollout.
+- **Verification accepts both identities** (2026-08-09, BL-52):
+  `POST /entitlements/verify` takes a device token or an account token and writes
+  the entitlement to whichever owner the token names. Validation goes through a
+  `StoreReceiptVerifier` contract (config seam `coloringbook.stores.*`); until
+  store credentials exist the binding is a fake/dev verifier, so Phase 6 becomes
+  "swap the verifier + add the billing plugin", not a schema change. The
+  new-device flow is: install → store returns purchase tokens → register device
+  (§4.3) → re-verify each token → download. Bought once, owned everywhere,
+  nobody typed an email.
 
 ---
 
@@ -897,7 +954,8 @@ old game builds live on players' devices forever.
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | `POST` | `/auth/register` | none | `{email, password, is_guardian:true}` → 201 |
-| `POST` | `/auth/token` | none | `{email, password, device_uid, device_name}` → `{token, abilities, expires_at, user}` |
+| `POST` | `/auth/token` | none | `{email, password, device_uid, device_name}` → `{token, abilities, expires_at, user}`. Adopts the uid's anonymous device row when one exists (§4.3, BL-52) |
+| `POST` | `/device/register` | none | BL-52: `{device_uid, device_name, platform}` → `{token, abilities, expires_at, device}` — anonymous, `entitlements:read` + `packs:download` only |
 | `POST` | `/auth/refresh` | token | slides expiry, returns `{expires_at}` |
 | `DELETE` | `/auth/token` | token | sign out this device |
 | `GET` | `/me` | token | `{user, profiles[], devices[]}` |
@@ -946,11 +1004,11 @@ never a token — the same rule the pictures page follows.
 |---|---|---|---|
 | `GET` | `/packs` | optional | Published packs; `owned:true` per pack when authed. `?client_version=` filters `min_client_version`. |
 | `GET` | `/packs/{slug}` | optional | Detail + latest `pack_version`, cover, page count, byte size |
-| `GET` | `/packs/{slug}/manifest?version=` | token + entitlement | The `manifest.json` — lets the client compute a delta before downloading |
-| `GET` | `/packs/{slug}/download?version=` | token + entitlement | `302` signed URL → `pack.zip` (X-Accel-Redirect) |
-| `GET` | `/packs/{slug}/files/{path}?version=` | token + entitlement | Single file, for delta updates |
-| `GET` | `/entitlements` | token | `[{pack_slug, latest_version, source, granted_at}]` — also the update check |
-| `POST` | `/entitlements/verify` | token | `{platform, purchase_token, sku}` → validates with the store, grants |
+| `GET` | `/packs/{slug}/manifest?version=` | token + entitlement (**public when `is_free`**, BL-52) | The `manifest.json` — lets the client compute a delta before downloading |
+| `GET` | `/packs/{slug}/download?version=` | token + entitlement (**public when `is_free`**, BL-52) | `302` signed URL → `pack.zip` (X-Accel-Redirect) |
+| `GET` | `/packs/{slug}/files/{path}?version=` | token + entitlement (**public when `is_free`**, BL-52) | Single file, for delta updates |
+| `GET` | `/entitlements` | token (account **or device**, BL-52) | `[{pack_slug, latest_version, source, granted_at}]` — also the update check |
+| `POST` | `/entitlements/verify` | token (account **or device**, BL-52) | `{platform, purchase_token, sku}` → validates with the store, grants to the token's owner |
 
 ### Admin (`is_admin`, session or admin token)
 

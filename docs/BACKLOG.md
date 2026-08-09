@@ -26,6 +26,97 @@ deploy to the mini-pc.
 - Affected: `server/` (Laravel app in this repo), `docs/DLC_SERVER.md`,
   `docs/SERVER_BUILD_PLAN.md`
 
+### BL-52: Own once, everywhere — anonymous device entitlements + public free packs — `open` (2026-08-09)
+The requirement, verbatim: *"What's most important is allow the user to not need to
+purchase coloring books twice between devices"* — with an explicit licence to cut
+cloud artwork sync back if that is what a clean COPPA posture costs, and a product
+goal of "free app content available to download without needing to create an
+account."
+
+**The design insight: the store account is already the cross-device identity for
+purchases.** Play Billing's `queryPurchases()` (and StoreKit's restore) returns the
+same purchase tokens on every device signed into the same store account. So the
+server never needs to *own* an identity to prevent double-purchase — it needs to
+verify a receipt from whichever device presents it and grant that device the pack.
+No email, no password, no PII, no account.
+
+Four decisions, each independently shippable:
+
+1. **Free packs go public.** `GET /packs/{slug}/manifest|download|files/{path}`
+   skip the token + entitlement gate when the pack `is_free` (and is in a
+   downloadable status). The 302-to-signed-URL delivery mechanics are untouched —
+   the signed URL was always the thing that moves bytes. The free-claim auto-grant
+   (`source='free'` on first authed fetch) stays for signed-in users, so `owned`
+   and `GET /entitlements` keep meaning what they mean; it is simply no longer the
+   gate. A signed-out child on a fresh tablet can browse the shop and download
+   every free book. Rate-limit stays on the routes; revoked-stays-revoked only
+   governs the entitlement row, never public access to a free pack.
+2. **An anonymous device tier — lazy, and entitlements-only.**
+   `POST /api/v1/device/register` `{device_uid, device_name, platform}` (no auth,
+   `throttle:6,1`) finds-or-creates an **anonymous** `devices` row (`user_id`
+   NULL) for that `device_uid` and returns `{token, abilities, expires_at,
+   device: {ulid}}` — a Sanctum token carrying exactly `entitlements:read` +
+   `packs:download`. **Never `save:sync`**: an anonymous device can own packs; it
+   can never upload a child's artwork. The client registers **lazily** — only
+   when a purchase needs verifying or a restore is attempted, never on first
+   launch — so a device that only ever plays free content sends the server no
+   identifier at all. A `device_uid` already linked to an account is not exposed:
+   register only ever scopes to the anonymous (`user_id IS NULL`) row.
+3. **Receipts are the restore path.** `POST /entitlements/verify`
+   `{platform, purchase_token, sku}` accepts **device tokens and account tokens**
+   and writes the entitlement to whichever owner the token names. Validation goes
+   through a `StoreReceiptVerifier` contract (config seam
+   `coloringbook.stores.*`); until Play/App Store credentials exist the binding is
+   a fake/dev verifier, so Phase 6 becomes "swap the verifier + add the billing
+   plugin", not a schema change. New-device flow: install app → store returns the
+   purchase tokens → client registers device → re-verifies each token → packs
+   download. Bought once, owned everywhere, nobody typed an email.
+   - Schema: `entitlements.user_id` becomes nullable and gains a nullable
+     `device_id →devices`; **exactly one owner** per row, unique per
+     `(owner, pack)` (the `profile_key` generated-column trick is the house
+     pattern for NULL-proof uniqueness). `platform_txn_id` uniqueness relaxes to
+     per-owner — the same purchase legitimately grants on N devices.
+4. **Linking is adoption, and it is optional.** When a grown-up signs in
+   (`POST /auth/token`, which already carries `device_uid`), the server migrates
+   the anonymous row's entitlements to the user (union; a pack the user holds
+   revoked stays revoked), revokes the anonymous tokens, and removes the
+   anonymous device row. Idempotent. Signing out drops back to the anonymous
+   tier; purchases re-restore from receipts.
+
+**What this deliberately does NOT change: artwork sync.** The cutback the
+requirement licensed is realised as "anonymous devices never upload anything",
+not as deleting the built parent-account sync. Sync stays exactly where BL-18/
+BL-50 left it — behind the adult gate, on a parent account, the only path that
+ever carries PII or a child's picture. The COPPA story gets *stronger*: the
+anonymous identifier is used solely for entitlement delivery (squarely the
+"support for internal operations" exemption), free play sends nothing at all,
+and the store handles payment authorisation including platform parental
+controls.
+
+**Client half (Godot):**
+- `AuthStore` grows a second accessor: the account token (existing,
+  `get_live_token()`) and an entitlement token (account token if signed in, else
+  the anonymous one). `SyncQueue.enabled` keeps keying off the **account**
+  accessor — an anonymous token must never turn save-sync on (it lacks the
+  ability and would 403 forever).
+- Catalog / manifest / download / files calls use the entitlement accessor, and
+  free-pack downloads work with **no token at all** — the shop offers Download
+  for `is_free || owned` regardless of sign-in state.
+- `Backend.ensure_device_registered()` — the lazy registration seam the future
+  purchase flow and a restore action call. Nothing in normal free play calls it.
+- Web build: no store, so the anonymous tier is dormant there; free packs are
+  public and paid packs remain the parent-account + Stripe path (Phase 6,
+  unchanged).
+
+Server error codes this adds: `RECEIPT_INVALID` (422), `STORE_UNAVAILABLE`
+(503, retryable), `DEVICE_REGISTRATION_FAILED` (422).
+- Affected: `server/` (migrations, `routes/api/auth.php` or a new
+  `routes/api/device.php`, `routes/api/catalog.php`, `StoreReceiptVerifier` +
+  fake, adoption in the token action, `server/CLAUDE.md`),
+  `godot/scripts/backend/{auth_store,api_client,entitlements_store,sync_queue}.gd`,
+  `godot/scripts/components/pack_shop.gd`, sync/dlc smokes,
+  `docs/DLC_SERVER.md` §4.3/§7.4/§9/§11.
+
 ## Completed — awaiting archive
 
 ### BL-47: Four more animated crayon boxes, on a style-level mask decode — `done`
