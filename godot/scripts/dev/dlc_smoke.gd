@@ -48,6 +48,9 @@ extends Control
 ##   h  the pack shop splits its catalogue into a Books tab and a Stickers tab
 ##      (BL-41), keeps every row built so a download in the tab nobody is looking
 ##      at carries on, and opens on a tab that has something on it
+##   i  BL-52: the Get button's question is about the PACK, not the player -- a
+##      free pack (owned or not) and a paid pack this device owns all download
+##      with nobody signed in; only a paid pack nobody owns meets the adult gate
 ##   f  a DLC book and the built-in book that share a uid share one save entry --
 ##      migrated progress AND progress recorded live against the built-in book --
 ##      and the BL-25 release shape: with no built-in books at all the shelf is
@@ -167,6 +170,7 @@ func _run() -> void:
 	_check_shared_uid()
 	_check_sticker_packs()
 	await _check_shop_tabs()
+	await _check_download_gate()
 
 	print("\n   worker decode covered %d main-thread frames; take() cost %.1f ms prefetched"
 		% [_worker_frames, _prefetched_take_ms]
@@ -1002,6 +1006,63 @@ func _check_shop_tabs() -> void:
 	_expect(shop.get_visible_rows().is_empty()
 			and shop.get_status_text() == String(PackShop.TAB_EMPTY[PackShop.KIND_BOOK]),
 		"...and the empty books tab explains itself ('%s')" % shop.get_status_text())
+
+	shop.queue_free()
+
+
+# ================================ i: who the Get button asks for (BL-52) ==
+# DLC_SERVER.md 7.4/9. Free packs are PUBLIC since BL-52, so the shop's question
+# stopped being "is anybody signed in" and became "does this pack need an owner":
+# a free book downloads on a fresh tablet with no account and no token, and only a
+# paid one nobody owns routes the grown-up to the adult gate.
+#
+# Asserted here as a PURE DECISION, from the server's two flags, with no server and
+# no network: pressing a free row for real would start an 8 MB download, which is
+# backend_smoke's job because it has a server to get the bytes from. Both flags are
+# the server's word, rendered verbatim -- this file decides nothing (§9).
+
+func _check_download_gate() -> void:
+	print("\n-- check i: a free pack needs no account (BL-52) --")
+
+	var shop := SHOP_SCENE.instantiate() as PackShop
+	add_child(shop)
+	await get_tree().process_frame
+	shop.set_packs([
+		{PackShop.KEY_SLUG: "free-new", PackShop.KEY_TITLE: "Free, not owned",
+			PackShop.KEY_IS_FREE: true, PackShop.KEY_OWNED: false},
+		{PackShop.KEY_SLUG: "free-owned", PackShop.KEY_TITLE: "Free and claimed",
+			PackShop.KEY_IS_FREE: true, PackShop.KEY_OWNED: true},
+		{PackShop.KEY_SLUG: "paid-owned", PackShop.KEY_TITLE: "Bought",
+			PackShop.KEY_IS_FREE: false, PackShop.KEY_OWNED: true},
+		{PackShop.KEY_SLUG: "paid-new", PackShop.KEY_TITLE: "For sale",
+			PackShop.KEY_IS_FREE: false, PackShop.KEY_OWNED: false},
+	])
+	await get_tree().process_frame
+
+	_expect(not shop.get_row("free-new").needs_account(),
+		"a FREE pack nobody owns needs no account -- its bytes are public")
+	_expect(not shop.get_row("free-owned").needs_account(),
+		"...nor does a free one already claimed")
+	_expect(not shop.get_row("paid-owned").needs_account(),
+		"...nor a PAID one this device already owns, however it came to own it")
+	_expect(shop.get_row("paid-new").needs_account(),
+		"a paid pack nobody owns is the ONE row the adult gate is still for")
+
+	var gated := shop.gated_rows()
+	_expect(gated.size() == 1 and gated[0].get_slug() == "paid-new",
+		"...so the shop counts exactly one gated row (%d)" % gated.size())
+
+	# And the hint follows the rows rather than the player: a catalogue of nothing
+	# but free books never tells a child to go and fetch a grown-up.
+	shop.set_packs([
+		{PackShop.KEY_SLUG: "free-new", PackShop.KEY_TITLE: "Free, not owned",
+			PackShop.KEY_IS_FREE: true},
+	])
+	await get_tree().process_frame
+	_expect(shop.gated_rows().is_empty(),
+		"an all-free catalogue has nothing behind the gate at all")
+	_expect(shop.get_status_text() != PackShop.SIGNED_OUT_HINT,
+		"...and says nothing about signing in ('%s')" % shop.get_status_text())
 
 	shop.queue_free()
 

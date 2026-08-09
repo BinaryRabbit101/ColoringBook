@@ -1,7 +1,27 @@
 class_name AuthStore
 extends RefCounted
-## The device's account credentials, on disk at [constant AUTH_PATH]
-## (DLC_SERVER.md 4.2).
+## The device's credentials, on disk at [constant AUTH_PATH] (DLC_SERVER.md 4.2,
+## 4.3).
+##
+## [b]TWO identities live in this one file[/b] (BL-52), and the whole point of the
+## class is that they are never confused for each other:
+## [codeblock]
+## the ACCOUNT token       a grown-up signed in; carries save:sync
+## the ANONYMOUS token     POST /device/register minted it for this installation;
+##                         carries entitlements:read + packs:download and NEVER
+##                         save:sync -- an anonymous device can own packs, it can
+##                         never upload a child's artwork
+## [/codeblock]
+## [method get_live_token] means what it always meant -- the ACCOUNT token -- and
+## everything save-sync keys off it, so an anonymous token cannot switch sync on
+## (it would 403 forever on an ability it was never issued). Ownership questions
+## ask [method get_entitlement_token] instead, which is the account token when
+## there is one and the anonymous token otherwise.
+##
+## [b]One device_uid serves both[/b] ([method get_device_uid]): registering
+## anonymously and later signing in are the same installation, which is exactly
+## what lets the server ADOPT the anonymous row's entitlements into the account
+## instead of leaving a household owning a pack twice.
 ##
 ## [b]The user:// boundary.[/b] [code]GameState[/code] owns all of
 ## [code]user://[/code] with exactly two carve-outs, both of them Backend's:
@@ -28,6 +48,13 @@ extends RefCounted
 const AUTH_PATH := "user://auth.json"
 ## Schema version of that file. A file from a newer build is IGNORED (treated as
 ## signed out) rather than misread -- the cost is one sign-in, not a corrupt token.
+##
+## [b]BL-52 added three keys and deliberately did NOT bump this.[/b] The version
+## gate is a DOWNGRADE guard, and bumping it would mean an older build finding a v2
+## file and treating a perfectly good account as signed out -- a real sign-in the
+## grown-up has to redo, traded for nothing. The new keys are purely additive and
+## optional: an older build ignores them on read and drops them on write, which
+## costs at worst one silent re-registration of a token that was free to mint.
 const SCHEMA_VERSION := 1
 
 ## Crockford base32, the ULID alphabet (no I, L, O or U).
@@ -51,6 +78,13 @@ var _expires_at := 0
 ## Free-form room for WP11's sync cursor. Written back verbatim so a later build
 ## adding a field cannot be clobbered by this one.
 var _extra: Dictionary = {}
+
+## BL-52's second identity: the anonymous device token, or "". Kept in named
+## fields rather than in [member _extra] because [method clear] wipes the extras
+## and this is not sync bookkeeping -- it is a credential, with its own lifetime.
+var _anon_token := ""
+var _anon_abilities: PackedStringArray = PackedStringArray()
+var _anon_expires_at := 0
 
 var _path := AUTH_PATH
 var _loaded := false
@@ -91,6 +125,57 @@ func get_token() -> String:
 ## cannot accidentally send a dead bearer.
 func get_live_token() -> String:
 	return _token if is_signed_in() else ""
+
+
+# ------------------------------------- the anonymous device tier (BL-52) --
+# DLC_SERVER.md 4.3. A token minted on the DEVICE ROW rather than on a user, so a
+# tablet nobody has signed in on can still own the pack a grown-up paid for.
+#
+# It is stored beside the account token and is never a substitute for it: the only
+# question it answers is "what does this installation own", and the accessor that
+# reaches for it ([method get_entitlement_token]) is deliberately a different one
+# from [method get_live_token].
+
+## True when this installation has registered anonymously -- expired or not.
+func has_anonymous_token() -> bool:
+	_ensure_loaded()
+	return _anon_token != ""
+
+
+func is_anonymous_expired() -> bool:
+	_ensure_loaded()
+	if _anon_token == "" or _anon_expires_at <= 0:
+		return _anon_token == ""
+	return float(Time.get_unix_time_from_system()) \
+		>= float(_anon_expires_at) - EXPIRY_SKEW_SECONDS
+
+
+## The anonymous token only while it is usable, "" otherwise -- the mirror of
+## [method get_live_token], and dead for the same reasons.
+func get_live_anonymous_token() -> String:
+	return _anon_token if (has_anonymous_token() and not is_anonymous_expired()) else ""
+
+
+func get_anonymous_abilities() -> PackedStringArray:
+	_ensure_loaded()
+	return _anon_abilities.duplicate()
+
+
+func get_anonymous_expires_at() -> int:
+	_ensure_loaded()
+	return _anon_expires_at
+
+
+## [b]The ownership accessor[/b] (BL-52): the account token when a grown-up is
+## signed in, the anonymous one when they are not, "" when neither is usable.
+##
+## Catalogue [code]owned[/code] painting, [code]GET /entitlements[/code],
+## [code]POST /entitlements/verify[/code] and a PAID pack's download all ask this.
+## [b]Nothing save-sync may[/b] -- see [method get_live_token], and the note at the
+## top of the class about the ability the anonymous token was never issued.
+func get_entitlement_token() -> String:
+	var account := get_live_token()
+	return account if account != "" else get_live_anonymous_token()
 
 
 func get_email() -> String:
@@ -177,6 +262,34 @@ func store_token(token: String, email: String, abilities: PackedStringArray,
 	_write()
 
 
+## Records a successful [code]POST /device/register[/code] (BL-52,
+## DLC_SERVER.md 4.3). [param expires_at] is a unix timestamp; 0 means the server
+## did not set one.
+func store_anonymous_token(token: String, abilities: PackedStringArray,
+		expires_at: int) -> void:
+	_ensure_loaded()
+	_anon_token = token
+	_anon_abilities = abilities.duplicate()
+	_anon_expires_at = expires_at
+	if _device_uid == "":
+		_device_uid = new_ulid()
+	_write()
+
+
+## Forgets the anonymous identity. Called when a grown-up signs in: the server
+## ADOPTED this device's entitlements into the account and revoked its tokens in
+## the same transaction, so keeping the string locally would only leave a dead
+## credential lying about where a later reader might reach for it.
+func clear_anonymous_token() -> void:
+	_ensure_loaded()
+	if _anon_token == "" and _anon_abilities.is_empty() and _anon_expires_at == 0:
+		return
+	_anon_token = ""
+	_anon_abilities = PackedStringArray()
+	_anon_expires_at = 0
+	_write()
+
+
 ## Slides the expiry after a successful refresh (DLC_SERVER.md 4.2: 90 days
 ## sliding, refreshed on any successful call).
 func slide_expiry(expires_at: int) -> void:
@@ -190,12 +303,20 @@ func slide_expiry(expires_at: int) -> void:
 ## Forgets the account. Keeps [member _device_uid] on purpose -- the installation
 ## is the same installation, and reusing its id is what stops a family tablet from
 ## accumulating a dashboard row per sign-in.
+##
+## The anonymous token goes too (BL-52). Signing out drops back to the anonymous
+## tier, but not to THIS device's old anonymous token: adoption revoked it on the
+## way in, so a fresh [code]POST /device/register[/code] is the only thing that
+## can put a working one back.
 func clear() -> void:
 	_ensure_loaded()
 	_token = ""
 	_email = ""
 	_abilities = PackedStringArray()
 	_expires_at = 0
+	_anon_token = ""
+	_anon_abilities = PackedStringArray()
+	_anon_expires_at = 0
 	_extra.clear()
 	_write()
 
@@ -207,6 +328,9 @@ func erase() -> void:
 	_email = ""
 	_abilities = PackedStringArray()
 	_expires_at = 0
+	_anon_token = ""
+	_anon_abilities = PackedStringArray()
+	_anon_expires_at = 0
 	_device_uid = ""
 	_device_name = ""
 	_extra.clear()
@@ -252,6 +376,11 @@ func _read() -> void:
 	_abilities = PackedStringArray()
 	for ability: Variant in data.get("abilities", []):
 		_abilities.append(String(ability))
+	_anon_token = String(data.get("anon_token", ""))
+	_anon_expires_at = int(data.get("anon_expires_at", 0))
+	_anon_abilities = PackedStringArray()
+	for ability: Variant in data.get("anon_abilities", []):
+		_anon_abilities.append(String(ability))
 	var extra: Variant = data.get("extra", {})
 	_extra = (extra as Dictionary) if typeof(extra) == TYPE_DICTIONARY else {}
 
@@ -265,6 +394,11 @@ func _write() -> void:
 		"token": _token,
 		"abilities": Array(_abilities),
 		"expires_at": _expires_at,
+		# BL-52's second identity. Additive keys on the same schema version; see
+		# the note on SCHEMA_VERSION for why that is the cheaper trade.
+		"anon_token": _anon_token,
+		"anon_abilities": Array(_anon_abilities),
+		"anon_expires_at": _anon_expires_at,
 		"extra": _extra,
 	}
 	var directory := _path.get_base_dir()

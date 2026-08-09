@@ -93,20 +93,31 @@ anonymous identifier is used solely for entitlement delivery (squarely the
 and the store handles payment authorisation including platform parental
 controls.
 
-**Client half (Godot):**
-- `AuthStore` grows a second accessor: the account token (existing,
-  `get_live_token()`) and an entitlement token (account token if signed in, else
-  the anonymous one). `SyncQueue.enabled` keeps keying off the **account**
-  accessor — an anonymous token must never turn save-sync on (it lacks the
-  ability and would 403 forever).
+**Client half (Godot) — shipped 2026-08-09:**
+- `AuthStore` grew the second accessor: `get_live_token()` still means the
+  **account** token and `SyncQueue.is_active()` still keys off it, so an
+  anonymous token cannot turn save-sync on; `get_entitlement_token()` is the
+  account token if signed in, else the anonymous one. Both live in
+  `user://auth.json` as additive keys on the unchanged schema version.
 - Catalog / manifest / download / files calls use the entitlement accessor, and
-  free-pack downloads work with **no token at all** — the shop offers Download
-  for `is_free || owned` regardless of sign-in state.
-- `Backend.ensure_device_registered()` — the lazy registration seam the future
-  purchase flow and a restore action call. Nothing in normal free play calls it.
+  free-pack downloads work with **no token at all** — `install_pack()` dropped
+  its `is_signed_in()` gate entirely (the server is the authority), and the shop
+  offers Download for `is_free || owned` via `PackRow.needs_account()`,
+  regardless of sign-in state.
+- `Backend.ensure_device_registered()` — the lazy registration seam; nothing in
+  normal free play calls it. `Backend.verify_purchase()` +
+  `ApiClient.verify_receipt()` are the Phase-6 receipt seam, with no UI.
+- Sign-in discards the local anonymous token (the server revoked it while
+  adopting) and refreshes entitlements, so the pack a device bought anonymously
+  is on the account's shelf.
 - Web build: no store, so the anonymous tier is dormant there; free packs are
   public and paid packs remain the parent-account + Stripe path (Phase 6,
   unchanged).
+- Smoke coverage: `backend_smoke` (b) tokenless free install + the paid refusal,
+  (n) the whole anonymous tier including the fake verifier, (c) adoption, (h)
+  free-installs-while-expired; `sync_smoke` (c) an anonymous token leaves sync
+  inert, (d) the token is discarded on sign-in; `dlc_smoke` (i) the Get
+  button's decision, serverless.
 
 Server error codes this adds: `RECEIPT_INVALID` (422), `STORE_UNAVAILABLE`
 (503, retryable), `DEVICE_REGISTRATION_FAILED` (422).

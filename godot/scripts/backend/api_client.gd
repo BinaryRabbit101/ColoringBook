@@ -67,6 +67,20 @@ const CODE_PACK_VERSION_NOT_FOUND := "PACK_VERSION_NOT_FOUND"
 const CODE_DOWNLOAD_LINK_EXPIRED := "DOWNLOAD_LINK_EXPIRED"
 const CODE_THROTTLED := "THROTTLED"
 
+## BL-52's codes (DLC_SERVER.md 4.3, 9). Two of the three are refusals that mean
+## OPPOSITE things to a caller, which is the whole reason they are separate codes:
+## [codeblock]
+## RECEIPT_INVALID    422  the store said no. STOP -- retrying is pointless
+## STORE_UNAVAILABLE  503  we could not ASK. Retry later; the purchase may be fine
+## [/codeblock]
+## A revoked pack answers the existing [constant CODE_ENTITLEMENT_REQUIRED] (403)
+## rather than a fourth code, and an unrecognised SKU the existing
+## [constant CODE_NOT_FOUND] (404), so verifying a receipt branches on the same
+## small set a download already does.
+const CODE_RECEIPT_INVALID := "RECEIPT_INVALID"
+const CODE_STORE_UNAVAILABLE := "STORE_UNAVAILABLE"
+const CODE_DEVICE_REGISTRATION_FAILED := "DEVICE_REGISTRATION_FAILED"
+
 ## Seconds a JSON request may take (DLC_SERVER.md 8.2).
 const TIMEOUT_JSON := 10.0
 ## Seconds a pack download may take. A 12-page pack is ~8 MB (DLC_SERVER.md 2).
@@ -76,6 +90,10 @@ const TIMEOUT_PACK := 120.0
 ## after which the caller gives up until the next app launch (DLC_SERVER.md 8.2).
 const BACKOFF_BASE_SECONDS := 1.0
 const BACKOFF_CAP_SECONDS := 300.0
+
+## Tries a receipt verification gets. More than one because a 503 here means "we
+## could not reach the store", and nobody is waiting on the answer.
+const VERIFY_ATTEMPTS := 3
 
 ## Sent so the server can apply [code]min_client_version[/code] and so a log line
 ## identifies the build.
@@ -162,6 +180,41 @@ func request_bytes(method: int, path: String, body: PackedByteArray,
 		if attempt < attempts - 1:
 			await _sleep(backoff_delay(attempt))
 	return result
+
+
+## [code]POST /entitlements/verify[/code] -- turns a store receipt into an
+## entitlement on whichever owner this client's bearer names (BL-52,
+## DLC_SERVER.md 9). [b]The seam Phase 6's billing plugin plugs into[/b]: nothing
+## in the game calls it yet, because no store plugin exists to produce a
+## [param purchase_token].
+##
+## [b]There is no [code]pack_slug[/code] in the body, and that is a security
+## property rather than an omission[/b]: the server resolves the pack from the SKU
+## alone, so a client cannot pair a valid receipt with a pack of its choosing.
+##
+## The answer is ONE entitlement row -- [code]{pack_slug, latest_version, source,
+## granted_at}[/code], the same shape [code]GET /entitlements[/code] returns a list
+## of -- and it is always [code]200[/code], including on a re-verify: asking again
+## every launch is the restore path working, not a conflict.
+##
+## Retried [constant VERIFY_ATTEMPTS] times, because the failure worth surviving
+## here ([constant CODE_STORE_UNAVAILABLE], 503) is exactly the one
+## [method _is_retryable] already recognises, and a purchase the player has paid
+## for is worth more patience than a catalogue listing.
+func verify_receipt(platform: String, purchase_token: String, sku: String) -> Dictionary:
+	return await request_json(HTTPClient.METHOD_POST, "/entitlements/verify", {
+		"platform": platform,
+		"purchase_token": purchase_token,
+		"sku": sku,
+	}, {"attempts": VERIFY_ATTEMPTS})
+
+
+## Whether a failed [method verify_receipt] is worth asking about again. False for
+## [constant CODE_RECEIPT_INVALID] and [constant CODE_NOT_FOUND] -- the store or
+## the catalogue has given a final answer and a retry loop would only burn the
+## rate limit.
+static func is_verify_retryable(result: Dictionary) -> bool:
+	return _is_retryable(result)
 
 
 ## Downloads [param url] straight to [param destination] -- the bytes never sit in

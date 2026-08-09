@@ -13,6 +13,21 @@ extends Node
 ##                      normally http://127.0.0.1:8123/api/v1)
 ##   --stay             leave the scratch account, pack and stores in place
 ##
+## [b]What the server has to be holding[/b] before check (n) can run (BL-52). Two
+## of these three the delta check already needed; the third is new:
+## [codeblock]
+## coyote-book v1 and v2   php artisan pack:publish <dir> --free, twice, the
+##                         second directory differing in exactly ONE file
+## a PAID pack             php artisan pack:publish <dir> --paid, then give it
+##                         the SKU below:
+##                           Pack::where('slug', 'starter-stickers')->first()
+##                             ->update(['sku_google' => 'coloringbook.starter_stickers'])
+## the FAKE verifier       .env: COLORINGBOOK_STORE_GOOGLE_VERIFIER=\
+##                           App\Services\Stores\FakeStoreReceiptVerifier
+##                         (it accepts any purchase token starting 'test-', and
+##                         refuses to load at all in production)
+## [/codeblock]
+##
 ## [b]It talks to a REAL server and downloads REAL bytes.[/b] That is the whole
 ## point: sha256 verification, the atomic directory swap and the de-duplication
 ## rule are all things that only mean something against the actual 950 KB
@@ -30,9 +45,17 @@ extends Node
 ##      (equal satisfies), the backoff schedule and its cap, header parsing
 ##   b  with no account every Backend method is a NO-OP, and the shelf is exactly
 ##      what BookDef.discover() returns -- EXCEPT the shop window (BL-25): the
-##      catalogue lists signed out, and a Get asks for a sign-in
+##      catalogue lists signed out, a FREE pack downloads with NO Authorization
+##      header at all and writes no entitlement row (BL-52), and only a PAID row's
+##      Get asks for a sign-in
+##   n  BL-52's anonymous device tier: lazy registration, a token carrying
+##      entitlements:read + packs:download and NEVER save:sync, GET /entitlements
+##      answering for a device, the receipt seam granting a PAID pack that then
+##      downloads -- all with nobody signed in and sync still off
 ##   c  register -> token: auth.json written, ULID device uid, expiry parsed, a
-##      wrong password is INVALID_CREDENTIALS and does not disturb the stored token
+##      wrong password is INVALID_CREDENTIALS and does not disturb the stored
+##      token -- and BL-52's ADOPTION: what the device bought anonymously is the
+##      account's afterwards, and the anonymous token is gone
 ##   d  GET /packs lists coyote-book with the server's flags; GET /entitlements
 ##      caches, and is the update check
 ##   e  the install: manifest, signed URL, 950 KB downloaded with real progress,
@@ -57,8 +80,21 @@ extends Node
 
 const COYOTE_UID := "coyote-2026"
 const TEST_BOOK_UID := "test-book-2026"
-## The pack the dev server publishes (WP9).
+## The pack the dev server publishes (WP9). FREE, which since BL-52 means its
+## bytes are public: no token, no account, no identifier of any kind.
 const PACK_SLUG := "coyote-book"
+## A PAID pack, and the Play SKU it is sold under (BL-52). See the header for the
+## two commands that put it on the dev server; check (n) is the only user.
+const PAID_SLUG := "starter-stickers"
+const PAID_SKU := "coloringbook.starter_stickers"
+## The platform the fake verifier is wired to in .env, and a purchase token it
+## accepts -- `FakeStoreReceiptVerifier` says yes to anything starting `test-`
+## and uses the token itself as the transaction id, so "verify twice, get one
+## row" is a real assertion rather than a lucky one.
+const STORE_PLATFORM := "google"
+const GOOD_RECEIPT := "test-wp10-smoke-receipt"
+## ...and one it refuses, because it does not carry the prefix.
+const BAD_RECEIPT := "definitely-not-a-real-purchase-token"
 ## Built-in books: test_book + coyote.
 const BUILTIN_BOOK_COUNT := 2
 
@@ -114,6 +150,7 @@ func _run() -> void:
 
 	_check_pure_logic()
 	await _check_inert_without_account()
+	await _check_anonymous_device()
 	await _check_auth()
 	await _check_catalog()
 	await _check_install()
@@ -149,6 +186,7 @@ func _isolate() -> void:
 
 func _cleanup() -> void:
 	Backend.get_installer().uninstall(PACK_SLUG)
+	Backend.get_installer().uninstall(PAID_SLUG)
 	GameState.set_save_root("")
 	_delete_recursive(TEST_ROOT)
 	# Hand the real stores back so a --stay-less run leaves the autoload as it found
@@ -294,25 +332,203 @@ func _check_inert_without_account() -> void:
 	_expect(not window_shop.get_rows().is_empty(),
 		"the pack shop renders the catalogue while signed out (%d row(s))"
 		% window_shop.get_rows().size())
-	_expect(window_shop.get_status_text() == PackShop.SIGNED_OUT_HINT,
-		"...saying what is still missing ('%s')" % window_shop.get_status_text())
+
+	# --- BL-52: which rows the gate is actually for ---------------------------
+	# The hint used to greet every signed-out shopper. It now speaks only when
+	# something on the list really is behind the gate, because a free book no
+	# longer is.
+	var free_row := window_shop.get_row(PACK_SLUG)
+	var paid_row := window_shop.get_row(PAID_SLUG)
+	_expect(free_row != null and not free_row.needs_account(),
+		"a FREE row needs no account (is_free %s, owned %s)"
+		% [free_row.is_free() if free_row else "?", free_row.is_owned() if free_row else "?"])
+	_expect(paid_row != null and paid_row.needs_account(),
+		"...while a PAID one nobody owns still does -- see the header for its seed")
+	_expect(window_shop.gated_rows().size() == 1
+			and window_shop.get_status_text() == PackShop.SIGNED_OUT_HINT,
+		"...so the shop says what is still missing, for %d row(s) ('%s')"
+		% [window_shop.gated_rows().size(), window_shop.get_status_text()])
+
 	var asked_to_sign_in := [0]
 	window_shop.sign_in_requested.connect(func() -> void: asked_to_sign_in[0] += 1)
-	var window_row := window_shop.get_row(PACK_SLUG)
-	if window_row != null:
-		window_row.press_action()
-		window_row.press_action()
+	if paid_row != null:
+		paid_row.press_action()
+		paid_row.press_action()
 		await get_tree().process_frame
 		_expect(asked_to_sign_in[0] == 1 and not window_shop.is_installing(),
-			"...and a Get asks for a SIGN-IN rather than failing silently (%d)"
+			"a PAID Get asks for a SIGN-IN rather than failing silently (%d)"
 			% asked_to_sign_in[0])
-		_expect(window_row.get_state() == PackShop.PackRow.STATE_CONFIRM,
+		_expect(paid_row.get_state() == PackShop.PackRow.STATE_CONFIRM,
 			"...leaving the row's 'Yes, download' where the grown-up left it (%s)"
-			% window_row.get_state())
+			% paid_row.get_state())
+	if free_row != null:
+		# The shop's own handler is taken off first: what is asserted here is the
+		# DECISION -- that a free Get goes to the download instead of to the gate --
+		# and the real tokenless install is done below, awaited, so it cannot still
+		# be in flight underneath the checks that follow.
+		for connection: Dictionary in free_row.download_requested.get_connections():
+			free_row.download_requested.disconnect(connection["callable"])
+		var wanted := [0]
+		free_row.download_requested.connect(func() -> void: wanted[0] += 1)
+		free_row.press_action()
+		free_row.press_action()
+		await get_tree().process_frame
+		_expect(wanted[0] == 1 and asked_to_sign_in[0] == 1,
+			"a FREE Get goes straight to the download, signed out (%d download(s), %d gate(s))"
+			% [wanted[0], asked_to_sign_in[0]])
 	else:
 		_expect(false, "the signed-out catalogue includes '%s'" % PACK_SLUG)
 	remove_child(window_shop)
 	window_shop.queue_free()
+
+	# --- BL-52: and the bytes really do arrive without a token ----------------
+	# DLC_SERVER.md 7.4: a free pack's manifest, archive and files are PUBLIC. This
+	# is the whole "free app content available to download without needing to create
+	# an account" requirement, proved against a real server.
+	_expect(_auth.get_entitlement_token() == "",
+		"there is no token of ANY kind on this device -- account or anonymous")
+	var public_install: Dictionary = await Backend.install_pack(PACK_SLUG)
+	_expect(bool(public_install[PackInstaller.KEY_OK]),
+		"install_pack('%s') succeeds with NO Authorization header (%s %s)"
+		% [PACK_SLUG, public_install[PackInstaller.KEY_CODE],
+			public_install[PackInstaller.KEY_MESSAGE]])
+	_expect(Backend.is_pack_installed(PACK_SLUG),
+		"...and the pack is on disk, downloaded by a device the server cannot name")
+	_expect(not _entitlements.has_data() and Backend.get_entitlements().is_empty(),
+		"...having written no entitlement anywhere: a public fetch grants nothing")
+	# A paid pack asks the same question and is refused, by the server, in the
+	# words the shop already knows how to read.
+	var refused: Dictionary = await Backend.install_pack(PAID_SLUG)
+	_expect(not bool(refused[PackInstaller.KEY_OK])
+			and String(refused[PackInstaller.KEY_CODE]) == ApiClient.CODE_UNAUTHENTICATED,
+		"...while a PAID pack is %s to the same tokenless request (%s)"
+		% [ApiClient.CODE_UNAUTHENTICATED, refused[PackInstaller.KEY_CODE]])
+	# Put the shelf back the way the rest of the run expects to find it.
+	Backend.uninstall_pack(PACK_SLUG)
+	_expect(not Backend.is_pack_installed(PACK_SLUG),
+		"the public install is removed again, so check (e) still starts from nothing")
+
+
+# ========================================= n: the anonymous device tier (BL-52) ==
+# DLC_SERVER.md 4.3 and 9. The claim under test: a household that bought a pack can
+# have it on a second tablet without an email address, a password or an account --
+# because the store already knows what it bought, and the server only has to verify
+# the receipt whichever device presents it.
+#
+# Everything below happens with NOBODY SIGNED IN. That is the point.
+
+func _check_anonymous_device() -> void:
+	print("\n-- check n: registering a device, and restoring a purchase onto it --")
+
+	_expect(not Backend.is_device_registered() and not _auth.has_anonymous_token(),
+		"nothing has registered yet -- the tier is LAZY, and free play never triggers it")
+	var uid_before := Backend.get_device_uid()
+
+	var registered: Dictionary = await Backend.ensure_device_registered()
+	if String(registered[Backend.KEY_CODE]) == ApiClient.CODE_THROTTLED:
+		# `throttle:6,1`, and Laravel keys that limiter on (domain, ip) rather than on
+		# the route -- so the catalogue traffic check (b) just made shares the bucket
+		# with this route and with /auth/*. Being rate-limited is the server working;
+		# wait the window out rather than report a red run, exactly as check (c) does.
+		print("   the 6-a-minute limiter is full; waiting %d s for the window."
+			% THROTTLE_WINDOW_SECONDS)
+		await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
+		registered = await Backend.ensure_device_registered()
+	_expect(bool(registered[Backend.KEY_OK]),
+		"POST /device/register answered with no auth at all (%s %s)"
+		% [registered[Backend.KEY_CODE], registered[Backend.KEY_MESSAGE]])
+	if not Backend.is_device_registered():
+		_expect(false, "the rest of check (n) needs a device token")
+		return
+
+	# --- the two identities, and the one ability that separates them ---------
+	_expect(Backend.get_device_uid() == uid_before,
+		"...for the SAME device_uid sign-in will send, so adoption can find this row")
+	_expect(not Backend.has_account() and not Backend.is_signed_in(),
+		"...without creating an account (has_account %s)" % Backend.has_account())
+	_expect(_auth.get_live_token() == "",
+		"...and get_live_token() -- the ACCOUNT accessor -- is still empty")
+	_expect(_auth.get_entitlement_token() == _auth.get_live_anonymous_token()
+			and _auth.get_entitlement_token() != "",
+		"...while get_entitlement_token() is now the anonymous one")
+	var abilities := _auth.get_anonymous_abilities()
+	_expect(Array(abilities).has("entitlements:read") and Array(abilities).has("packs:download"),
+		"the device token carries the two ownership abilities (%s)" % [abilities])
+	_expect(not Array(abilities).has("save:sync"),
+		"...and NEVER save:sync -- an anonymous device can own packs, never upload a picture")
+
+	# The BL-52 non-negotiable, from the client's side: an anonymous token must not
+	# turn save-sync on. It keys off the account accessor, which is still "".
+	var queue := Backend.get_sync_queue()
+	_expect(queue != null and not queue.is_active(),
+		"the sync queue is STILL inert -- an anonymous token does not switch sync on")
+	_expect(Backend.get_sync_status_text() == Backend.SYNC_OFF_TEXT,
+		"...and the account panel still reads '%s'" % Backend.get_sync_status_text())
+	_expect(not Backend.has_pending_sync(), "...with nothing queued to go up")
+
+	# --- GET /entitlements answers for a device, not just for a user ---------
+	var listed: Dictionary = await Backend.refresh_entitlements()
+	_expect(bool(listed[Backend.KEY_OK]),
+		"GET /entitlements works on a device token (%s)" % listed[Backend.KEY_CODE])
+	_expect(_entitlements.has_data() and not Backend.owns_pack(PAID_SLUG),
+		"...and this device owns nothing yet, because nothing has been verified")
+
+	# --- the receipt seam ----------------------------------------------------
+	var rejected: Dictionary = await Backend.verify_purchase(
+		STORE_PLATFORM, BAD_RECEIPT, PAID_SKU)
+	_expect(not bool(rejected[Backend.KEY_OK])
+			and String(rejected[Backend.KEY_CODE]) == ApiClient.CODE_RECEIPT_INVALID,
+		"a receipt the store refuses is %s -- final, not worth retrying (%s)"
+		% [ApiClient.CODE_RECEIPT_INVALID, rejected[Backend.KEY_CODE]])
+	_expect(not ApiClient.is_verify_retryable(rejected),
+		"...and the client can tell that from the code alone")
+
+	var unknown: Dictionary = await Backend.verify_purchase(
+		STORE_PLATFORM, GOOD_RECEIPT, "coloringbook.no.such.product")
+	_expect(not bool(unknown[Backend.KEY_OK])
+			and String(unknown[Backend.KEY_CODE]) == ApiClient.CODE_NOT_FOUND,
+		"a SKU nobody sells is the house %s, so verify is not a price-list enumerator (%s)"
+		% [ApiClient.CODE_NOT_FOUND, unknown[Backend.KEY_CODE]])
+
+	var granted: Dictionary = await Backend.verify_purchase(
+		STORE_PLATFORM, GOOD_RECEIPT, PAID_SKU)
+	_expect(bool(granted[Backend.KEY_OK]),
+		"a good receipt grants the pack (%s %s)"
+		% [granted[Backend.KEY_CODE], granted[Backend.KEY_MESSAGE]])
+	var row: Variant = granted[Backend.KEY_DATA]
+	_expect(typeof(row) == TYPE_DICTIONARY
+			and String((row as Dictionary).get("pack_slug", "")) == PAID_SLUG,
+		"...answering ONE entitlement row, for the pack the SKU named (%s)"
+		% (String((row as Dictionary).get("pack_slug", "?")) if typeof(row) == TYPE_DICTIONARY
+			else "not a row"))
+	_expect(typeof(row) == TYPE_DICTIONARY
+			and String((row as Dictionary).get("source", "")) == "purchase",
+		"...recorded as a purchase rather than a free claim")
+
+	var again: Dictionary = await Backend.verify_purchase(
+		STORE_PLATFORM, GOOD_RECEIPT, PAID_SKU)
+	_expect(bool(again[Backend.KEY_OK]),
+		"re-verifying the SAME receipt is another 200, not a conflict (%s)"
+		% again[Backend.KEY_CODE])
+	_expect(Backend.get_entitlements().size() == 1,
+		"...and it is still ONE row: every launch may ask (%d)"
+		% Backend.get_entitlements().size())
+
+	# --- what the device owns, everywhere it is asked ------------------------
+	_expect(Backend.owns_pack(PAID_SLUG), "the cache says this device owns '%s'" % PAID_SLUG)
+	var painted: Dictionary = await Backend.fetch_packs()
+	var paid := _row_with_slug(painted[Backend.KEY_DATA], PAID_SLUG)
+	_expect(bool(paid.get("owned", false)),
+		"...and GET /packs paints owned:true for a DEVICE token too (BL-52)")
+
+	var bought: Dictionary = await Backend.install_pack(PAID_SLUG)
+	_expect(bool(bought[PackInstaller.KEY_OK]),
+		"a PAID pack downloads onto a device nobody has signed in on (%s %s)"
+		% [bought[PackInstaller.KEY_CODE], bought[PackInstaller.KEY_MESSAGE]])
+	_expect(Backend.is_pack_installed(PAID_SLUG),
+		"...which is 'bought once, owned everywhere' with no email address in it")
+	# Off the shelf again: every later check counts what is installed.
+	Backend.uninstall_pack(PAID_SLUG)
 
 
 # ======================================================== c: register + token ==
@@ -366,6 +582,29 @@ func _check_auth() -> void:
 			and _auth.has_ability("save:sync"),
 		"the token carries exactly the three game abilities (%s)" % [_auth.get_abilities()])
 	_expect(not _auth.is_expired(), "the token is live")
+
+	# --- BL-52: adoption, which is what makes linking OPTIONAL ---------------
+	# The sign-in carried the same device_uid check (n) registered under, so the
+	# server moved that device's entitlements onto the account and revoked its
+	# tokens, inside the transaction that minted this one.
+	_expect(not _auth.has_anonymous_token(),
+		"the anonymous token is gone -- the server revoked it, so we do not keep the string")
+	_expect(_auth.get_entitlement_token() == _auth.get_live_token(),
+		"...and the entitlement accessor is the ACCOUNT token again")
+	# sign_in() refreshes the list without anybody awaiting it (8.2), so the shelf
+	# catches up on its own; this only has to see it land. Waiting on the ACCOUNT
+	# STAMP rather than on the pack matters: the anonymous cache is deliberately
+	# carried over rather than cleared (an empty list would blink every DLC book off
+	# the shelf for a frame), so "we own it" was already true and would have proved
+	# nothing about adoption.
+	if not await _wait_for(func() -> bool: return _entitlements.get_account() == _email):
+		await Backend.refresh_entitlements()
+	_expect(_entitlements.get_account() == _email,
+		"the cache now belongs to the grown-up who signed in (%s)"
+		% _entitlements.get_account())
+	_expect(Backend.owns_pack(PAID_SLUG),
+		"...and what the DEVICE bought anonymously is the ACCOUNT's ('%s' adopted)"
+		% PAID_SLUG)
 
 	var me: Dictionary = await Backend.fetch_me()
 	_expect(bool(me[Backend.KEY_OK]), "GET /me works with the stored bearer")
@@ -434,7 +673,7 @@ func _check_catalog() -> void:
 	_expect(_entitlements.has_data() and _entitlements.is_fresh(),
 		"...and the cache is populated and fresh")
 	_expect(not Backend.owns_pack(PACK_SLUG),
-		"...still owning nothing, because nothing has been claimed yet")
+		"...not owning '%s', because a public fetch never claimed it" % PACK_SLUG)
 
 
 # ======================================= e: the download, and the atomic swap ==
@@ -805,6 +1044,11 @@ func _check_expired_token() -> void:
 	var live := _auth.get_token()
 	_auth.store_token(live, _auth.get_email(), _auth.get_abilities(),
 		int(Time.get_unix_time_from_system()) - 10)
+	# Re-inject the store so the facade re-reads it: expiry is a CLIENT-side belief,
+	# and the point of the check is that the belief stops the bearer header leaving.
+	# Without this the ApiClient would still be holding the (server-side perfectly
+	# good) token, and the two "tokenless" requests below would be authorised ones.
+	Backend.use_test_stores(_auth, _entitlements, TEST_DLC_ROOT, _base_url)
 	_expect(_auth.has_account() and _auth.is_expired(),
 		"the stored token is now expired")
 	_expect(not Backend.is_signed_in(), "...so the device is not signed in")
@@ -817,11 +1061,21 @@ func _check_expired_token() -> void:
 	_expect(not runtime.is_empty() and Backend.is_book_visible(runtime[0]),
 		"the DLC book is STILL on the shelf -- an expired token never takes a book away")
 
-	var blocked: Dictionary = await Backend.install_pack(PACK_SLUG)
-	_expect(not bool(blocked[Backend.KEY_OK]),
-		"install_pack() is a no-op while signed out")
+	# BL-52 split this in two, and the split IS the entry. A lapsed token sends no
+	# bearer header, so both of these are tokenless requests to the same server --
+	# and the pack decides the answer, not the player.
+	var blocked: Dictionary = await Backend.install_pack(PAID_SLUG)
+	_expect(not bool(blocked[Backend.KEY_OK])
+			and String(blocked[Backend.KEY_CODE]) == ApiClient.CODE_UNAUTHENTICATED,
+		"a PAID pack is refused while the token is expired (%s)" % blocked[Backend.KEY_CODE])
+	_expect(not Backend.is_pack_installed(PAID_SLUG),
+		"...and did not land on disk")
+	var still_free: Dictionary = await Backend.install_pack(PACK_SLUG)
+	_expect(bool(still_free[PackInstaller.KEY_OK]),
+		"...while the FREE one still installs, because its bytes never needed the token (%s)"
+		% still_free[PackInstaller.KEY_CODE])
 	_expect(Backend.installed_pack_version(PACK_SLUG) >= 1,
-		"...and the pack it could not re-download is still installed")
+		"...leaving the pack installed either way")
 
 	# Put the live token back for the sign-out check.
 	var future := int(Time.get_unix_time_from_system()) + 86400

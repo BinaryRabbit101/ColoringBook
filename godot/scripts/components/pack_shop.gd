@@ -11,10 +11,20 @@ extends Control
 ## [b]It lists signed out[/b] (BL-25). Since a shipped build contains no coloring
 ## books at all, this overlay is the only way a shelf ever gets one, so it must not
 ## require an account merely to be looked at: [code]GET /packs[/code] is
-## optional-auth for exactly that reason. What DOES need an account is getting a
-## pack -- even a free one, whose entitlement is granted to a signed-in device
-## (DLC_SERVER.md 9) -- so a Get pressed signed out raises
-## [signal sign_in_requested] and the grown-up meets the adult gate.
+## optional-auth for exactly that reason.
+##
+## [b]And since BL-52 a FREE pack downloads signed out too.[/b] Free packs are
+## public (DLC_SERVER.md 7.4) -- manifest, archive and files, with no Authorization
+## header at all -- so "free app content available to download without needing to
+## create an account" is the shop's behaviour rather than a promise. The question
+## the Get button asks is therefore about the PACK, not about the player:
+## [codeblock]
+## is_free or owned  ->  download it (signed in or not)
+## anything else     ->  sign_in_requested, and the grown-up meets the adult gate
+## [/codeblock]
+## [method PackRow.needs_account] is that one line, and it is the only place this
+## overlay decides anything about entitlement -- both flags in it are the server's
+## word, rendered verbatim.
 ##
 ## [b]Two rules from DLC_SERVER.md 8.2 are the whole design of this screen:[/b]
 ##
@@ -82,9 +92,12 @@ const TAB_EMPTY := {
 	KIND_STICKER_SET: "No sticker sets yet. Check back soon!",
 }
 
-## Shown when the catalogue lists but nobody is signed in, and again if a Get is
-## pressed in that state (BL-25). One string, so the shop says the same thing twice
-## rather than two things once.
+## Shown when the catalogue lists something this device cannot have without an
+## account, and again if a Get is pressed on one (BL-25). One string, so the shop
+## says the same thing twice rather than two things once.
+##
+## BL-52 narrowed WHEN it appears rather than what it says: a shop offering nothing
+## but free books never shows it, because there is nothing left to sign in for.
 const SIGNED_OUT_HINT := "A grown-up needs to sign in to add a book."
 
 ## The crayon that draws a download (BL-31). Preloaded into a constant rather than
@@ -143,9 +156,11 @@ func refresh() -> void:
 		return
 	var packs: Variant = result.get(Backend.KEY_DATA, [])
 	set_packs(packs as Array if typeof(packs) == TYPE_ARRAY else [])
-	if not _rows.is_empty() and not Backend.is_signed_in():
-		# The catalogue lists fine signed out (BL-25); getting one still needs an
-		# account, so say so here rather than only at the moment of the tap.
+	if not Backend.is_signed_in() and not gated_rows().is_empty():
+		# The catalogue lists fine signed out (BL-25) and its free books download that
+		# way too (BL-52) -- so this only speaks up when something on the list really
+		# is behind the gate, rather than telling a child to fetch a grown-up for a
+		# book they could have had.
 		_set_status(SIGNED_OUT_HINT)
 
 
@@ -184,6 +199,16 @@ func _open_a_tab_with_something_on_it() -> void:
 ## the player can see.
 func get_rows() -> Array[PackRow]:
 	return _rows.duplicate()
+
+
+## The rows a Get would bounce to the adult gate: neither free nor owned (BL-52).
+## Both tabs, because the hint is about the shop rather than about the tab.
+func gated_rows() -> Array[PackRow]:
+	var out: Array[PackRow] = []
+	for row in _rows:
+		if row.needs_account():
+			out.append(row)
+	return out
 
 
 # ======================================================================= tabs ==
@@ -321,12 +346,16 @@ func _show_installed_only() -> void:
 func _on_download_requested(row: PackRow) -> void:
 	if _installing != "":
 		return
-	if not Backend.is_signed_in():
-		# BL-25: even a free pack needs a signed-in device to grant its entitlement
-		# (DLC_SERVER.md 9). Route the grown-up to the gate instead of letting the
-		# install fail with a code nobody asked to see. The row is left in its confirm
-		# state on purpose -- come back from the gate and "Yes, download" is still
-		# there, and a refresh after a successful sign-in rebuilds it anyway.
+	if row.needs_account() and not Backend.is_signed_in():
+		# A pack that is neither free nor already owned needs an identity to be
+		# entitled to it (DLC_SERVER.md 9). Route the grown-up to the gate instead of
+		# letting the install fail with a code nobody asked to see. The row is left in
+		# its confirm state on purpose -- come back from the gate and "Yes, download"
+		# is still there, and a refresh after a successful sign-in rebuilds it anyway.
+		#
+		# BL-52: a FREE pack no longer comes through here, because its bytes are
+		# public and asking a child to fetch a grown-up for them was a gate with
+		# nothing behind it.
 		_set_status(SIGNED_OUT_HINT)
 		sign_in_requested.emit()
 		return
@@ -509,6 +538,22 @@ class PackRow extends PanelContainer:
 
 	func get_bytes() -> int:
 		return int(_data.get(KEY_BYTES, 0))
+
+	## The server's [code]is_free[/code], verbatim.
+	func is_free() -> bool:
+		return bool(_data.get(KEY_IS_FREE, false))
+
+	## The server's [code]owned[/code], verbatim -- painted for an account token OR
+	## an anonymous device token since BL-52.
+	func is_owned() -> bool:
+		return bool(_data.get(KEY_OWNED, false))
+
+	## Whether getting this pack needs somebody to sign in (BL-52). Free packs are
+	## public and an owned pack is already ours, so the answer is "no" far more often
+	## than it used to be — and it is still the SERVER's two flags deciding, never
+	## this file (DLC_SERVER.md 9).
+	func needs_account() -> bool:
+		return not is_free() and not is_owned()
 
 	func get_state() -> String:
 		return _state

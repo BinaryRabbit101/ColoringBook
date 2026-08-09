@@ -190,6 +190,34 @@ chooses an account):
   per §7.4) involves no identifier, no account, no request that says who anyone
   is.
 
+**The client half, as built.** `AuthStore` holds both identities in the one
+`user://auth.json` (additive keys `anon_token` / `anon_abilities` /
+`anon_expires_at`, on the same schema version — bumping it would sign a
+downgrading build out of a perfectly good account for nothing), and offers two
+deliberately different accessors:
+
+| accessor | is | asked by |
+|---|---|---|
+| `get_live_token()` | the **account** token, or "" | `SyncQueue.is_active()`, `/me`, `/sync/*` |
+| `get_entitlement_token()` | account token, else the anonymous one, else "" | `GET /entitlements`, `/entitlements/verify`, catalogue `owned`, a **paid** pack's download |
+
+That split is the whole client-side enforcement of "an anonymous device can own
+packs; it can never upload a child's artwork" — an anonymous token lacks
+`save:sync` and would 403 forever, so sync must never key off the accessor that
+can return one. `Backend._sync_token()` puts the *entitlement* token on the
+`ApiClient`, which is safe precisely because the queue declines to fire in the
+one state where the two accessors differ.
+
+`Backend.ensure_device_registered()` is the lazy seam, and **nothing in normal
+play calls it** — only a purchase about to be verified
+(`Backend.verify_purchase()` → `ApiClient.verify_receipt()`) and a future
+restore action. `install_pack()` no longer requires an account at all: a free
+pack's bytes are public (§7.4) and a paid one is refused by the server in codes
+the shop already reads, so the client stopped guessing at an answer it is about
+to be given. The shop's Get button asks `PackRow.needs_account()` —
+`not is_free and not owned`, both the server's flags — instead of "is anybody
+signed in".
+
 Schema deltas: `devices.user_id` nullable (uniqueness of `device_uid` extends
 over the anonymous rows); `entitlements.user_id` nullable plus a nullable
 `entitlements.device_id`, exactly one owner per row, unique per `(owner, pack)`

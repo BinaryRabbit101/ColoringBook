@@ -23,6 +23,7 @@ extends Node
 ##    disjoint from anything the game saves:
 ##    [codeblock]
 ##    user://auth.json        the device's account token   (AuthStore)
+##                            AND its anonymous one (BL-52)
 ##    user://dlc/             installed packs + the        (PackInstaller,
 ##                            entitlement cache             EntitlementsStore)
 ##    user://sync_queue.json  pending pushes, base          (SyncQueue, WP11)
@@ -123,8 +124,14 @@ func _ready() -> void:
 	# DLC_SERVER.md 7.3: the update check is folded into the entitlements call, so
 	# one background request at launch covers ownership AND "is there a v2 of this
 	# pack". Fire and forget -- no screen is waiting for it (8.2).
-	if is_signed_in():
+	#
+	# BL-52: an ENTITLEMENT token is enough for this, so a device that registered
+	# anonymously to restore a purchase keeps its shelf current too. A device that
+	# has never registered has no token at all and sends nothing, which is the whole
+	# point of the tier being lazy (DLC_SERVER.md 4.3).
+	if has_entitlement_token():
 		refresh_entitlements()
+	if is_signed_in():
 		# 8.3, the top of the diagram: pull the shelf, merge it, push what is ours.
 		# Not awaited by anything; the title screen is already up.
 		_sync.on_launch()
@@ -199,6 +206,22 @@ func is_signed_in() -> bool:
 ## Kid-facing screens never see it (DLC_SERVER.md 4.2).
 func is_token_expired() -> bool:
 	return _auth != null and _auth.has_account() and _auth.is_expired()
+
+
+## Whether this device can ask the server what it OWNS -- an account token, or
+## BL-52's anonymous device token (DLC_SERVER.md 4.3).
+##
+## Deliberately not [method is_signed_in], and never a substitute for it: sync,
+## [code]/me[/code] and the profiles all still need an account, because the
+## anonymous token does not carry [code]save:sync[/code] and never will.
+func has_entitlement_token() -> bool:
+	return is_enabled() and _auth != null and _auth.get_entitlement_token() != ""
+
+
+## True when this installation holds a live anonymous device token (BL-52). Read by
+## the harnesses and by a future restore button; nothing in normal play asks.
+func is_device_registered() -> bool:
+	return _auth != null and _auth.get_live_anonymous_token() != ""
 
 
 func get_account_email() -> String:
@@ -317,11 +340,22 @@ func sign_in(email: String, password: String) -> Dictionary:
 	if typeof(user) == TYPE_DICTIONARY:
 		account = String((user as Dictionary).get("email", email))
 	# A different grown-up on the same tablet must not inherit the last one's shelf.
+	# An ANONYMOUS cache is not somebody else's: it belongs to no account
+	# ([code]_account == ""[/code]), the server just adopted its rows into this one,
+	# and reset_if_other_account leaves it alone for exactly that reason.
 	_entitlements.reset_if_other_account(account)
 	_auth.store_token(String(payload.get("token", "")), account, abilities,
 		parse_timestamp(String(payload.get("expires_at", ""))))
+	# BL-52: the sign-in carried this device's uid, so the server ADOPTED the
+	# anonymous row's entitlements into the account and revoked its tokens inside the
+	# same transaction. Ours is dead; drop it rather than keep a string that would
+	# 401 if anything ever reached for it.
+	_auth.clear_anonymous_token()
 	_sync_token()
 	auth_changed.emit(is_signed_in())
+	# ...and the account may own MORE than it did a moment ago, because whatever this
+	# device bought anonymously is now the account's. One refresh covers both the
+	# adoption and the ordinary launch-time update check (7.3).
 	refresh_entitlements()
 	# 8.3: this device may have been colouring signed out for a week. Reconcile the
 	# whole shelf, once. Fire and forget -- the panel that called sign_in() shows
@@ -379,13 +413,87 @@ func fetch_me() -> Dictionary:
 	return await _authed_get("/me")
 
 
+# ================================================== the anonymous device tier ==
+# DLC_SERVER.md 4.3, BL-52. "Own once, everywhere", without an email address: the
+# store account is already the cross-device identity for purchases, so the server
+# only has to verify a receipt from whichever device presents it.
+
+## Makes sure this installation can be told what it owns, registering anonymously
+## if that is what it takes. Answers a result dictionary; never throws.
+##
+## [b]NOTHING IN NORMAL PLAY MAY CALL THIS[/b], and that is the entry's whole COPPA
+## posture (DLC_SERVER.md 4.3): a device that only ever downloads free packs sends
+## the server no identifier at all. The two callers this exists for are a purchase
+## about to be verified and a grown-up pressing "restore my purchases" -- both of
+## them Phase 6, both of them deliberate acts.
+##
+## Three outcomes, in the order they are checked:
+## [codeblock]
+## an account token   nothing to do -- the account IS the identity
+## a live anon token  nothing to do -- this device already registered
+## neither            POST /device/register with the persisted device_uid
+## [/codeblock]
+## The uid is [method AuthStore.get_device_uid], the SAME one sign-in sends, which
+## is what lets the server adopt this device's packs into an account later.
+func ensure_device_registered() -> Dictionary:
+	if not is_enabled():
+		return _disabled()
+	if is_signed_in() or is_device_registered():
+		return {KEY_OK: true, KEY_CODE: "", KEY_MESSAGE: "", KEY_DATA: null}
+	var result: Dictionary = await _api.request_json(
+		HTTPClient.METHOD_POST, "/device/register", {
+			"device_uid": _auth.get_device_uid(),
+			"device_name": _auth.get_device_name(),
+			"platform": OS.get_name(),
+		}
+	)
+	if not bool(result[KEY_OK]):
+		return result
+	var data: Variant = result[KEY_DATA]
+	if typeof(data) != TYPE_DICTIONARY:
+		return _failure(ApiClient.CODE_BAD_BODY, "The device registration was not JSON.")
+	var payload := data as Dictionary
+	var abilities := PackedStringArray()
+	for ability: Variant in payload.get("abilities", []):
+		abilities.append(String(ability))
+	_auth.store_anonymous_token(String(payload.get("token", "")), abilities,
+		parse_timestamp(String(payload.get("expires_at", ""))))
+	_sync_token()
+	return result
+
+
+## Turns a store receipt into an entitlement (BL-52, DLC_SERVER.md 9) -- the
+## restore path, and the seam Phase 6's billing plugin plugs into. Registers this
+## device first if there is no identity to write the entitlement to.
+##
+## [b]No UI calls this yet[/b], because there is no billing plugin to produce a
+## [param purchase_token]. When there is, "bought once, owned everywhere" is: ask
+## the store what this account owns, then call this once per purchase token.
+func verify_purchase(platform: String, purchase_token: String, sku: String) -> Dictionary:
+	if not is_enabled():
+		return _disabled()
+	var registered := await ensure_device_registered()
+	if not bool(registered[KEY_OK]):
+		return registered
+	var result: Dictionary = await _api.verify_receipt(platform, purchase_token, sku)
+	if bool(result[KEY_OK]):
+		# The row we were just handed is one entitlement; the cache holds all of
+		# them, so take the server's whole answer rather than patching ours.
+		await refresh_entitlements()
+	return result
+
+
 # =============================================================== entitlements ==
 
 ## Refreshes the cached entitlement list, which is ALSO the pack update check
-## (DLC_SERVER.md 7.3). Safe to call any time; silently does nothing when signed
-## out, and never blocks anything.
+## (DLC_SERVER.md 7.3). Safe to call any time; silently does nothing with no
+## entitlement token, and never blocks anything.
+##
+## BL-52: it keys off [method has_entitlement_token] rather than
+## [method is_signed_in], because an anonymous device owns packs too and
+## [code]GET /entitlements[/code] answers for either identity.
 func refresh_entitlements() -> Dictionary:
-	if not is_signed_in() or _refreshing:
+	if not has_entitlement_token() or _refreshing:
 		return _disabled()
 	_refreshing = true
 	var result: Dictionary = await _api.request_json(
@@ -535,8 +643,13 @@ func discover_visible_sticker_sets(
 ##
 ## [b]It needs a server, not an account[/b] (BL-25). The route is optional-auth by
 ## design -- "the shop window", DLC_SERVER.md 7.4 -- and a signed-out build with no
-## books baked in has nothing else to show anybody. Signed out, every row simply
-## comes back [code]owned: false[/code]; the sign-in is what the first Get asks for.
+## books baked in has nothing else to show anybody.
+##
+## [code]owned[/code] is painted for whichever identity the bearer names, ACCOUNT
+## OR ANONYMOUS DEVICE (BL-52), so a tablet that restored a purchase without ever
+## signing in sees the pack it bought marked owned. With no token at all every row
+## comes back [code]owned: false[/code] -- which is not the same as "you may not
+## have it": a free pack is downloadable by anybody, and the shop offers it.
 func fetch_packs() -> Dictionary:
 	if not is_enabled():
 		return _disabled()
@@ -557,8 +670,17 @@ func fetch_packs() -> Dictionary:
 ## [b]Only ever called from a button a grown-up pressed[/b] (DLC_SERVER.md 8.2:
 ## "a pack never starts downloading on its own -- a kid on a parent's phone plan
 ## does not silently pull 8 MB"). Nothing in this file schedules it.
+##
+## [b]It no longer requires an account, and it never decided ownership anyway[/b]
+## (BL-52, DLC_SERVER.md 7.4/9). A free pack's manifest, archive and files are
+## PUBLIC, so a signed-out child on a fresh tablet downloads it with no
+## Authorization header at all; a paid one answers 401 or
+## [constant ApiClient.CODE_ENTITLEMENT_REQUIRED] to the same request, which is the
+## server saying no in the words the shop already knows how to read. Putting an
+## [method is_signed_in] gate back here would only mean the client guessing at an
+## answer it is about to be given.
 func install_pack(slug: String, version: int = 0) -> Dictionary:
-	if not is_signed_in():
+	if not is_enabled():
 		return _disabled()
 	if _installer.is_busy():
 		return _failure(PackInstaller.CODE_BUSY,
@@ -570,8 +692,11 @@ func install_pack(slug: String, version: int = 0) -> Dictionary:
 	)
 	var ok := bool(result[PackInstaller.KEY_OK])
 	if ok:
-		# The install granted a free pack server-side; pull the list so the shelf
-		# filter and the update check agree with reality.
+		# Behind a token the install granted a free pack server-side; pull the list so
+		# the shelf filter and the update check agree with reality. With NO token there
+		# was no grant to pull -- a public fetch writes no row (BL-52) -- and this is
+		# already a silent no-op, which is the correct amount of network for a device
+		# that has told the server nothing about itself.
 		await refresh_entitlements()
 		installed_packs_changed.emit()
 	else:
@@ -629,8 +754,19 @@ func _authed_get(path: String) -> Dictionary:
 ## The server rejected our token. Drop it and go offline WITHOUT a word to anybody
 ## on screen (DLC_SERVER.md 4.2 / 8.2); the grown-up sees it next time they open
 ## the account panel.
+##
+## BL-52: an ANONYMOUS token can be rejected too -- adoption revokes it, and so
+## does a re-registration on another process. That is not a sign-out (there is no
+## account to lose and nothing to tell anybody), so it drops the dead string and
+## emits nothing; the next deliberate restore registers again.
 func _expire_silently() -> void:
-	if _auth == null or not _auth.has_account():
+	if _auth == null:
+		return
+	if not _auth.has_account():
+		if _auth.has_anonymous_token():
+			print_verbose("Backend: the server rejected this device's anonymous token.")
+			_auth.clear_anonymous_token()
+			_sync_token()
 		return
 	print_verbose("Backend: the server rejected this device's token; going offline.")
 	_auth.clear()
@@ -641,9 +777,16 @@ func _expire_silently() -> void:
 ## Keeps [ApiClient]'s bearer header in step with the store. An EXPIRED token sends
 ## no header at all, so a lapsed device behaves like a signed-out one instead of
 ## generating 401s.
+##
+## [b]It is the ENTITLEMENT token[/b] (BL-52): the account's when a grown-up is
+## signed in, this device's anonymous one otherwise, nothing at all when neither
+## exists -- which is what makes a free pack's download tokenless on a fresh tablet
+## (DLC_SERVER.md 7.4). That is safe for sync precisely because
+## [method SyncQueue.is_active] keys off [method AuthStore.get_live_token] instead,
+## so the queue never fires a request in the state where these two differ.
 func _sync_token() -> void:
 	if _api != null and _auth != null:
-		_api.set_token(_auth.get_live_token())
+		_api.set_token(_auth.get_entitlement_token())
 
 
 static func _disabled() -> Dictionary:

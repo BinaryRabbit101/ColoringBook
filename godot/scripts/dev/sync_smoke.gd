@@ -46,8 +46,12 @@ extends Control
 ##      that has to match App\Services\ProgressMerge exactly
 ##   b  ISO 8601: sub-second round trip, the server's second-precision +00:00 form,
 ##      and the "age" wording of the status line
-##   c  with no account the queue is completely inert -- no file, no requests
-##   d  register -> sign in; the queue adopts the account and drains
+##   c  with no account the queue is completely inert -- no file, no requests --
+##      and BL-52's anonymous device token does NOT change that: it carries no
+##      `save:sync`, so an anonymous device can own packs and never upload a
+##      child's artwork
+##   d  register -> sign in; the queue adopts the account and drains, and the
+##      anonymous token is discarded because the server adopted (and revoked) it
 ##   e  progress push: the shelf reaches the server, base revisions are recorded,
 ##      and a re-drain of unchanged state is a genuine no-op
 ##   f  the 6.3 conflict protocol: device B moves the row underneath, A's push comes
@@ -96,6 +100,13 @@ const EMAIL_FILE := "user://sync_smoke/scratch_account.txt"
 const SCRATCH_PASSWORD := "Wp11-Smoke-Passphrase-7"
 ## A port nothing is listening on, for the offline check.
 const DEAD_URL := "http://127.0.0.1:8199/api/v1"
+
+## Seconds to wait out the server's `throttle:6,1`, plus slack. Laravel keys that
+## limiter on (domain, ip) rather than on the route, so `/auth/*` and BL-52's
+## `/device/register` share one bucket -- and so does the run of backend_smoke you
+## may have started a minute ago. Being rate-limited is the server WORKING, so the
+## two places that trip it wait rather than report a red run.
+const THROTTLE_WINDOW_SECONDS := 62.0
 
 ## Shortened so the harness does not spend five real seconds per save point. The
 ## real value is asserted separately in check (e).
@@ -425,6 +436,46 @@ func _check_inert() -> void:
 		"a save point signed out leaves no sync_queue.json at all")
 	_expect(not queue.is_pending(), "...and nothing is pending")
 
+	# --- BL-52: and an ANONYMOUS token does not change that ------------------
+	# DLC_SERVER.md 4.3's non-negotiable, from the client's side. An anonymous
+	# device token exists so a tablet can own the pack a household paid for; it is
+	# minted WITHOUT `save:sync` and would 403 forever on every route below. So the
+	# queue keys off the ACCOUNT accessor, and this is the check that says so --
+	# because the failure it guards against is silent, permanent, and would only
+	# ever be noticed as "this tablet's pictures never sync".
+	var registered: Dictionary = await Backend.ensure_device_registered()
+	if String(registered[Backend.KEY_CODE]) == ApiClient.CODE_THROTTLED:
+		print("   the 6-a-minute limiter is full; waiting %d s for the window."
+			% THROTTLE_WINDOW_SECONDS)
+		await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
+		registered = await Backend.ensure_device_registered()
+	if not bool(registered[Backend.KEY_OK]):
+		print("   device registration answered %s; the anonymous half of (c) is skipped."
+			% registered[Backend.KEY_CODE])
+	else:
+		_expect(_auth.get_entitlement_token() != "",
+			"this device now has an anonymous token to spend on entitlements")
+		_expect(_auth.get_live_token() == "",
+			"...and get_live_token() -- what sync asks -- is still empty")
+		_expect(not Array(_auth.get_anonymous_abilities()).has("save:sync"),
+			"...because the token carries no save:sync at all (%s)"
+			% [_auth.get_anonymous_abilities()])
+		_expect(not queue.is_active(),
+			"the queue is STILL inactive -- an anonymous token must never switch sync on")
+		_expect(Backend.get_sync_status_text() == Backend.SYNC_OFF_TEXT,
+			"...and the status line still reads '%s'" % Backend.get_sync_status_text())
+
+		# A drain forced by hand, which is the strongest form of the question: even
+		# ASKED to sync, with a perfectly good bearer sitting in the store, the queue
+		# declines -- because the token it would send is not the one it needs.
+		var drained: Dictionary = await Backend.sync_now(true)
+		_expect(not bool(drained[Backend.KEY_OK]) and String(drained[Backend.KEY_CODE]) == "",
+			"...and a drain asked for by hand is a silent no-op, not a request (%s)"
+			% drained[Backend.KEY_CODE])
+		GameState.save_now()
+		_expect(not FileAccess.file_exists(TEST_QUEUE_PATH),
+			"...with a save point after it still writing no sync_queue.json")
+
 
 # ======================================================= d: the scratch account ==
 
@@ -434,6 +485,13 @@ func _check_sign_in() -> void:
 	queue.set_debounce_seconds(TEST_DEBOUNCE)
 	_email = "wp11-smoke-%d@example.test" % int(Time.get_unix_time_from_system())
 	var result: Dictionary = await Backend.register(_email, SCRATCH_PASSWORD, true)
+	if String(result[Backend.KEY_CODE]) == ApiClient.CODE_THROTTLED:
+		# The same shared `throttle:6,1` check (c)'s device registration waits out,
+		# one request further along. Wait rather than fail the whole run on it.
+		print("   auth routes are rate-limited; waiting %d s for the window."
+			% THROTTLE_WINDOW_SECONDS)
+		await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
+		result = await Backend.register(_email, SCRATCH_PASSWORD, true)
 	_expect(bool(result[Backend.KEY_OK]) and Backend.is_signed_in(),
 		"registered and signed in as %s (%s %s)"
 		% [_email, result[Backend.KEY_CODE], result[Backend.KEY_MESSAGE]])
@@ -442,23 +500,44 @@ func _check_sign_in() -> void:
 		return
 	_write_text(EMAIL_FILE, _email)
 	_expect(queue.is_active(), "the queue is ACTIVE now there is a live token")
+	# BL-52: the sign-in carried the same device_uid check (c) registered under, so
+	# the server adopted this device and revoked its anonymous token in the same
+	# transaction. Keeping the dead string locally would only leave something for a
+	# later reader to reach for.
+	_expect(not _auth.has_anonymous_token(),
+		"...and the anonymous token is gone, adopted into the account")
+	_expect(_auth.get_entitlement_token() == _auth.get_live_token(),
+		"...so both accessors are the ACCOUNT token again")
 	await _idle()
 
 	# Device B: a second token on the SAME account, so both write the account-level
 	# shelf (no ?profile=, per DLC_SERVER.md 11).
-	var token: Dictionary = await Backend.get_api().request_json(
-		HTTPClient.METHOD_POST, "/auth/token", {
-			"email": _email, "password": SCRATCH_PASSWORD,
-			"device_uid": AuthStore.new_ulid(), "device_name": "wp11-device-b",
-			"platform": OS.get_name(),
-		}, {"auth": false}
-	)
+	var token: Dictionary = await _issue_device_b_token()
+	if String(token[Backend.KEY_CODE]) == ApiClient.CODE_THROTTLED:
+		# The fourth auth request of this run, on a bucket check (c) and the register
+		# above have already spent from. Same wait, same reason.
+		print("   auth routes are rate-limited; waiting %d s for the window."
+			% THROTTLE_WINDOW_SECONDS)
+		await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
+		token = await _issue_device_b_token()
 	if bool(token[Backend.KEY_OK]) and typeof(token[Backend.KEY_DATA]) == TYPE_DICTIONARY:
 		_b_token = String((token[Backend.KEY_DATA] as Dictionary).get("token", ""))
 	_b = ApiClient.new(self, _base_url, BackendConfig.get_client_version())
 	_b.set_token(_b_token)
 	_expect(_b_token != "" and _b_token != _auth.get_token(),
 		"device B holds a SECOND token on the same account")
+
+
+## A fresh bearer for "device B" -- a second device on the SAME account, with its
+## own device_uid so the server treats it as one.
+func _issue_device_b_token() -> Dictionary:
+	return await Backend.get_api().request_json(
+		HTTPClient.METHOD_POST, "/auth/token", {
+			"email": _email, "password": SCRATCH_PASSWORD,
+			"device_uid": AuthStore.new_ulid(), "device_name": "wp11-device-b",
+			"platform": OS.get_name(),
+		}, {"auth": false}
+	)
 
 
 # ================================================== e: pushing progress up ==
