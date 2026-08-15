@@ -381,16 +381,8 @@ func _check_device_registration() -> void:
 	_expect(FileAccess.file_exists(TEST_AUTH_PATH),
 		"...and persisted immediately, so a crash cannot cost this device its purchases")
 
-	var registered: Dictionary = await Backend.sign_in_device()
-	if String(registered[Backend.KEY_CODE]) == ApiClient.CODE_THROTTLED:
-		# `throttle:6,1`, and Laravel keys that limiter on (domain, ip) rather than on
-		# the route -- so the catalogue traffic check (b) just made shares the bucket.
-		# Being rate-limited is the server working; wait the window out rather than
-		# report a red run.
-		print("   the 6-a-minute limiter is full; waiting %d s for the window."
-			% THROTTLE_WINDOW_SECONDS)
-		await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
-		registered = await Backend.sign_in_device()
+	var registered: Dictionary = await _unthrottled(func() -> Dictionary:
+		return await Backend.sign_in_device())
 	_expect(bool(registered[Backend.KEY_OK]),
 		"POST /device/register answered with no auth at all (%s %s)"
 		% [registered[Backend.KEY_CODE], registered[Backend.KEY_MESSAGE]])
@@ -853,6 +845,16 @@ func _check_entitlement_filter() -> void:
 func _check_token_recovery() -> void:
 	print("\n-- check h: a token the server refuses is replaced, not reported --")
 
+	# This check deliberately spends TWO registrations, and both are made from
+	# inside Backend._authed(), where a THROTTLED answer is invisible: a
+	# re-registration that fails leaves _authed() returning the original 401, so a
+	# full limiter reads here as "recovery is broken" rather than as "wait a
+	# minute". Start with a bucket that has room, so a red line means the recovery
+	# path really is broken. See [method _unthrottled] for the limiter itself.
+	print("   waiting %d s so the limiter cannot masquerade as a failed recovery."
+		% THROTTLE_WINDOW_SECONDS)
+	await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
+
 	var runtime := BookDef.discover_runtime(TEST_DLC_ROOT)
 	var owned_before := Backend.get_entitlements().size()
 	var uid := Backend.get_device_uid()
@@ -867,7 +869,8 @@ func _check_token_recovery() -> void:
 	_expect(not runtime.is_empty() and Backend.is_book_visible(runtime[0]),
 		"the DLC book is STILL on the shelf -- a lapsed token never takes a book away")
 
-	var recovered: Dictionary = await Backend.fetch_packs()
+	var recovered: Dictionary = await _unthrottled(func() -> Dictionary:
+		return await Backend.fetch_packs())
 	_expect(bool(recovered[Backend.KEY_OK]),
 		"an authed call on an expired token registers first and succeeds (%s)"
 		% recovered[Backend.KEY_CODE])
@@ -883,7 +886,8 @@ func _check_token_recovery() -> void:
 	Backend.use_test_stores(_auth, _entitlements, TEST_DLC_ROOT, _base_url)
 	_expect(Backend.is_signed_in(), "the device believes it holds a live token")
 
-	var replayed: Dictionary = await Backend.refresh_entitlements()
+	var replayed: Dictionary = await _unthrottled(func() -> Dictionary:
+		return await Backend.refresh_entitlements())
 	_expect(bool(replayed[Backend.KEY_OK]),
 		"a 401 is answered by re-registering and REPLAYING the call (%s %s)"
 		% [replayed[Backend.KEY_CODE], replayed[Backend.KEY_MESSAGE]])
@@ -1182,6 +1186,29 @@ func _check_main_flow() -> void:
 	main.free()
 
 
+## Run [param call] and, if the server answers THROTTLED, wait the window out and
+## run it once more.
+##
+## `/device/register` carries `throttle:6,1` and Laravel keys that limiter on
+## (domain, ip) rather than on the route, so every check in this file shares one
+## bucket -- and in a device-only design registration is not a rare event: the
+## launch registers, an expired token registers before its next call, and a 401
+## registers to recover. A run that exercises all three legitimately trips a
+## limiter written for a human typing a password. Being rate-limited is the
+## server working, so the harness waits rather than reporting a red run.
+##
+## [b]It is deliberately not a retry loop[/b]: one wait is enough for a full
+## window, and a second failure is a real one worth seeing.
+func _unthrottled(call: Callable) -> Dictionary:
+	var result: Dictionary = await call.call()
+	if String(result.get(Backend.KEY_CODE, "")) != ApiClient.CODE_THROTTLED:
+		return result
+	print("   the 6-a-minute limiter is full; waiting %d s for the window."
+		% THROTTLE_WINDOW_SECONDS)
+	await get_tree().create_timer(THROTTLE_WINDOW_SECONDS).timeout
+	return await call.call()
+
+
 func _wait_for(condition: Callable, seconds: float = 8.0) -> bool:
 	var deadline := Time.get_ticks_msec() + int(seconds * 1000.0)
 	while Time.get_ticks_msec() < deadline:
@@ -1244,6 +1271,7 @@ func _check_purchases() -> void:
 	# This is the whole "own once, everywhere" story now. The platform store hands
 	# back the same purchase token on a second device; restore_purchases() presents
 	# it and the device earns its own entitlement row.
+	var owned_before_restore := Backend.get_entitlements().size()
 	var restored: Dictionary = await Backend.restore_purchases([
 		{"platform": STORE_PLATFORM, "purchase_token": GOOD_RECEIPT, "sku": PAID_SKU},
 	])
@@ -1251,9 +1279,16 @@ func _check_purchases() -> void:
 			and int(restored[Backend.KEY_RESTORED]) == 1,
 		"restore_purchases() re-verified %d receipt(s) without a conflict (%s)"
 		% [int(restored.get(Backend.KEY_RESTORED, -1)), restored[Backend.KEY_CODE]])
-	_expect(Backend.get_entitlements().size() == 1,
-		"...and it is still ONE row: every launch may ask (%d)"
-		% Backend.get_entitlements().size())
+	# Idempotence is counted on the PAID pack, not on the shelf: this device also
+	# holds a `free` row for the free pack it installed back in check (e), which is
+	# a different pack earned down a different path (DLC_SERVER.md 7.4's auto-claim)
+	# and would otherwise read here as a duplicated purchase.
+	_expect(_rows_naming(PAID_SLUG) == 1,
+		"...and the purchase is still ONE row: every launch may ask (%d)"
+		% _rows_naming(PAID_SLUG))
+	_expect(Backend.get_entitlements().size() == owned_before_restore,
+		"...with nothing else added to the shelf either (%d -> %d)"
+		% [owned_before_restore, Backend.get_entitlements().size()])
 	var empty: Dictionary = await Backend.restore_purchases([])
 	_expect(bool(empty[Backend.KEY_OK]) and int(empty[Backend.KEY_RESTORED]) == 0,
 		"...while a restore with no receipts to present is a plain re-read, not an error")
@@ -1287,6 +1322,18 @@ func _expect(condition: bool, description: String) -> void:
 	if not condition:
 		_failures += 1
 	print("%s - %s" % ["PASS" if condition else "FAIL", description])
+
+
+## How many cached entitlement rows name [param slug]. One is the only healthy
+## answer for a pack this device owns; the count is what proves a re-presented
+## receipt did not earn a second row.
+func _rows_naming(slug: String) -> int:
+	var count := 0
+	for row: Variant in Backend.get_entitlements():
+		if typeof(row) == TYPE_DICTIONARY \
+				and String((row as Dictionary).get("pack_slug", "")) == slug:
+			count += 1
+	return count
 
 
 static func _row_with_slug(rows: Variant, slug: String) -> Dictionary:

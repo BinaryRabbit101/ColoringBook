@@ -835,8 +835,11 @@ func _check_shared_uid() -> void:
 	_expect(GameState.get_resume_index(dupe) == GameState.get_resume_index(_coyote_book),
 		"...opens at the same page (%d)" % GameState.get_resume_index(dupe))
 	var through_the_twin := GameState.load_page_paint(dupe, 0)
+	# Compared at the PNG's own resolution, not with is_equal_approx: the file is
+	# 8 bits a channel, so 0.9 comes back as 230/255 = 0.902 and an exact-ish
+	# compare would fail on a round trip that lost nothing anybody can see.
 	_expect(through_the_twin != null
-			and through_the_twin.get_pixel(0, 0).is_equal_approx(painted_color),
+			and _same_pixel(through_the_twin.get_pixel(0, 0), painted_color),
 		"...and finds the very same pixels on disk (%s)"
 		% GameState.get_paint_path(dupe, 0).get_file())
 
@@ -974,14 +977,19 @@ func _check_shop_tabs() -> void:
 	_expect(not shop.get_row("shiny").visible,
 		"...with the sticker pack hidden rather than absent")
 
+	# What the row said BEFORE it was put away. Captured rather than asserted as a
+	# literal: the state is the SERVER's two flags talking (a row that is neither
+	# free nor owned reads STATE_PURCHASE), and the claim under test is that
+	# switching tabs does not disturb it -- whatever it happens to be.
+	var stowed_state := shop.get_row("forest").get_state()
 	shop.set_tab(PackShop.KIND_STICKER_SET)
 	await get_tree().process_frame
 	_expect(shop.get_visible_rows().size() == 1
 			and shop.get_visible_rows()[0].get_slug() == "shiny",
 		"the stickers tab shows the sticker pack, and only it")
-	_expect(not shop.get_row("forest").visible and shop.get_row("forest").get_state()
-			== PackShop.PackRow.STATE_AVAILABLE,
-		"...and the book rows keep their state while they are put away")
+	_expect(not shop.get_row("forest").visible
+			and shop.get_row("forest").get_state() == stowed_state,
+		"...and the book rows keep their state while they are put away (%s)" % stowed_state)
 
 	# BL-31's wax stroke has to survive a tab switch: the row is still there, still
 	# fed, and still holding the ratio it was given.
@@ -1084,6 +1092,16 @@ func _expect(condition: bool, description: String) -> void:
 	if not condition:
 		_failures += 1
 	print("%s - %s" % ["PASS" if condition else "FAIL", description])
+
+
+## Whether two colours are the same picture once a PNG has been through 8 bits a
+## channel. One step of 1/255 is the smallest difference the file can express, so
+## anything inside it is a lossless round trip -- [method Color.is_equal_approx]
+## is far too tight to say so (0.9 stores as 230/255 = 0.902).
+static func _same_pixel(a: Color, b: Color) -> bool:
+	const STEP := 1.0 / 255.0 + 0.0001
+	return absf(a.r - b.r) <= STEP and absf(a.g - b.g) <= STEP \
+		and absf(a.b - b.b) <= STEP and absf(a.a - b.a) <= STEP
 
 
 static func _names(books: Array[BookDef]) -> String:

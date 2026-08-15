@@ -127,6 +127,45 @@ portable; what is *drawn* is not.
   `godot/scripts/components/{settings_panel,adult_gate,pack_shop}.gd`,
   `godot/scripts/dev/*_smoke.gd`, `docs/*`.
 
+**Verification pass, 2026-08-15** — the harnesses re-run end to end on a rebuilt
+dev server (`migrate:fresh` + `db:seed`, coyote v1/v2, a paid `starter-stickers`
+with a Play SKU, the fake verifier). `composer test` 336 green;
+**backend 190/190, dlc 139/139, shell 200/200, mobile 126/126, flow 279/280**
+(its one red is the child `palette_smoke`, the known windowed-focus flake — the
+same two input checks fail standalone too and neither is anywhere near this
+work). Four harness defects found and fixed, none of them in the product:
+
+- **`/device/register` carries `throttle:6,1`, and that limiter is now
+  load-bearing in a way it was not when it guarded `/auth/*`.** A device-only
+  design registers on launch, before a call on an expired token, and again to
+  recover a 401 — so a run that exercises recovery legitimately trips a limit
+  written for a human typing a password. Worse, the 429 is **invisible**:
+  `Backend._authed()` re-registers internally and, when that fails, returns the
+  *original* 401, so a full bucket reads as "recovery is broken". `backend_smoke`
+  check (h) now starts by waiting the window out, and `_unthrottled()` is the one
+  place the wait lives. Worth a product thought later: a household behind one NAT
+  shares this bucket, and a 429 on the only auth route means no backend until
+  relaunch.
+- **A stale `user://dlc/entitlements.json` silently hides every runtime pack.**
+  `should_hide_book()` treats *present but empty* as "the server said you own
+  nothing", which is correct — but a cache left by any earlier run against a dev
+  server makes `dlc_smoke`'s ring check fail with no hint why. `dlc_smoke`
+  isolates its DLC root and its save, and **not** the entitlements store; that
+  asymmetry is the trap. Delete the file when a runtime pack vanishes for no
+  reason.
+- **Two assertions were wrong rather than the code.** The paint round-trip
+  compared a decoded pixel to an authored `Color` with `is_equal_approx`, which
+  no 8-bit PNG can satisfy (0.9 stores as 230/255 = 0.902) — it now compares at
+  the file's own 1/255 resolution. And the shop's "rows keep their state while
+  put away" pinned the literal `STATE_AVAILABLE`, which stopped being that row's
+  state the moment `STATE_PURCHASE` existed: a fixture row that is neither free
+  nor owned *should* read as needing a purchase, so the check now captures the
+  state before the tab switch and asserts it is undisturbed.
+- Toolchain: the Godot 4.5.1 binary had disappeared from
+  `OneDrive\Desktop\Godot\…`; it now lives at
+  `C:\Users\binar\Documents\Godot\bin\`, off OneDrive, and the `godot` skill
+  records the new path and how to re-extract it.
+
 ### BL-52: Own once, everywhere — device entitlements + public free packs — `done` (2026-08-09)
 > **Partly superseded the same day by BL-53.** Decisions 1–3 below are exactly
 > what the system does. Decision 4 (linking an anonymous device to an account by

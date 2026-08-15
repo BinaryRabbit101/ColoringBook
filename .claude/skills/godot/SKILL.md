@@ -14,7 +14,10 @@ GDScript — write `.gd` files with the normal Write/Edit tools, then attach the
 - **projectPath** (required by almost every tool): `c:\Users\binar\Documents\ColoringBook\godot`
 - All scene/script/texture paths are **relative to the Godot project root** (e.g. `scenes/main.tscn`, not `res://...` and not prefixed with `godot/`).
 - Godot exe is wired through `GODOT_PATH` in mcp.json; you don't pass it. Direct CLI runs (headless tool scripts) use:
-  `c:\Users\binar\OneDrive\Desktop\Godot\Godot_v4.5.1-stable_win64.exe\Godot_v4.5.1-stable_win64.exe`
+  `C:\Users\binar\Documents\Godot\bin\Godot_v4.5.1-stable_win64.exe`
+  (Moved here 2026-08-15: the old `OneDrive\Desktop\Godot\…` copy vanished — OneDrive is
+  not a safe home for a 160 MB binary. Re-extract from
+  `C:\Users\binar\Downloads\Godot_v4.5.1-stable_win64.exe.zip` if it goes missing again.)
 
 ## What the MCP can and cannot do
 
